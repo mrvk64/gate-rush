@@ -1,0 +1,2434 @@
+/* css/game.css — GATE RUSH: every pixel of the DOM layer (ARCHITECTURE §10, GDD §14 / §15 "UI").
+ *
+ * Contract notes
+ *   • --ui is a UNITLESS number written by ui.refit() on <html> (clamp(0.85, min(w/390, h/844), 1.25));
+ *     this file only declares the fallback `:root { --ui: 1 }` (§10.2). Every design-pixel size is
+ *     `calc(N * var(--u))` with --u = 1px × --ui, re-derived on #app as well so a refit on either
+ *     element propagates.
+ *   • Type scale 56/40/28/22/17/14/12 × --ui × --text-scale (html.large-text → 1.15); body / readout text never
+ *     drops below 12 css px (round-2 QA UI-27: the 0.85 --ui floor took 12/13/14 px tokens to 10–12 px).
+ *   • html.reduced-motion and prefers-reduced-motion zero every animation/transition duration.
+ *   • The UI layer never swallows a drag: #ui and .screen are pointer-events:none; only controls,
+ *     cards, pills, modal screens and the error box take pointers (§10.2 verbatim rules below).
+ *   • Elements that ui.js animates with Web Animations (transform: #bossbar, #hint, #namecard, .pu,
+ *     #stars > i, letterbox bars, #progress-skull) are centred WITHOUT transforms (left/right 0 +
+ *     auto margins) so a script animation never knocks them off-centre.
+ *   • Icons that ui.js paints with an inline background-image (coin, shield, hint hand, power-up and
+ *     card icons) carry a pure-CSS fallback drawing in ::before that hides itself once the inline
+ *     image exists ([style*="background-image"]).
+ *   • Single dark theme by design: explicit colours from GDD §15 / data.js PALETTE.ui.
+ *   • Bottom var(--thumb-zone) (180 px) of the HUD stays free of interactive chrome in-game (toast and shield sit
+ *     above it); the non-interactive tutorial hint pill is exempt (round-2 QA UI-18, GDD §14).
+ *   • Steady-state HUD updates are compositor-only (round-2 QA UI-22): the progress fill, marker and boss fill move
+ *     with transforms, looping decorations animate transform / opacity on promoted layers, HUD blocks are
+ *     layout-contained; first-use surfaces are laid out and painted behind #scr-boot by ui.prewarm() (UI-19).
+ */
+
+/* =============================================================================================
+   1. Tokens
+   ============================================================================================= */
+
+:root {
+  --ui: 1;                                   /* fallback only — ui.refit() writes the live value */
+  --text-scale: 1;                           /* html.large-text → 1.15 */
+
+  /* safe areas (§10.2): inside the artifact iframe env() is 0 and the max() floors apply */
+  --safe-top: max(12px, env(safe-area-inset-top));
+  --safe-bottom: max(16px, env(safe-area-inset-bottom));
+  --safe-left: max(8px, env(safe-area-inset-left));
+  --safe-right: max(8px, env(safe-area-inset-right));
+
+  /* fonts */
+  --font-display: "Lilita One", "Arial Black", Impact, sans-serif;
+  --font-body: "Nunito", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+
+  /* colours (GDD §15 UI row / PALETTE.ui) */
+  --bg: #0F1626;
+  --bg-panel: rgba(15, 22, 38, 0.88);
+  --bg-panel-solid: #0F1626;
+  --primary: #FFB02E;
+  --primary-hi: #FFCB5C;
+  --primary-lo: #F2961A;
+  --primary-text: #1A1200;
+  --primary-border: #B5741A;
+  --secondary: #2E9BFF;
+  --secondary-hi: #66BBFF;
+  --secondary-lo: #1C82E6;
+  --secondary-text: #06111F;
+  --secondary-border: #175FA8;
+  --danger: #FF3B4E;
+  --danger-hi: #FF7180;
+  --danger-lo: #D92236;
+  --danger-border: #8F1422;
+  --success: #3BE57A;
+  --success-hi: #8DFFB0;
+  --success-lo: #22B85A;
+  --success-border: #17793C;
+  --text: #F4F1EA;
+  --text-muted: #9AA3B5;
+  --coin: #FFD23F;
+  --coin-hi: #FFF3B0;
+  --coin-lo: #E08F12;
+  --boss-bar: #FF3B4E;
+  --boss-track: #2A0F14;
+  --boss-phase2: #FFB02E;
+  --boss-phase3: #FF3B4E;
+  --boss-shield: #6E7A8A;
+  --focus: #2E9BFF;
+  --outline: #0B0F1A;                        /* PALETTE.glyph.outline — every text stroke */
+  --level-locked: #2A3142;
+  --level-current: #FFB02E;
+  --progress-fill: #3BE57A;
+  --logo-a: #FFB02E;                         /* PALETTE.ui.logoGradient */
+  --logo-b: #FF7A2F;
+  --dim: rgba(8, 12, 22, 0.72);              /* PALETTE.ui.pauseDim @ pauseDimAlpha */
+  --edge-hi: rgba(255, 255, 255, 0.12);
+  --edge-lo: rgba(255, 255, 255, 0.06);
+
+  /* shape / layout */
+  --radius: 16px;
+  --thumb-zone: 180px;                       /* JUICE.ui.thumbZonePx */
+  --letterbox: 8%;                           /* RENDER.letterboxPct */
+  --hint-bottom: 28;                         /* JUICE.ui.hintBottomPx: hint pill bottom = safe-bottom + 28 design px (ui writes it) */
+  --hint-maxw: 86%;                          /* JUICE.ui.hintMaxWidthPct (ui writes it) */
+  --hint-alpha: 0.72;                        /* JUICE.ui.hintAlpha (ui writes it) */
+  --pause-blur: 6px;                         /* JUICE.ui.pauseBlurPx */
+  --logo-outline: 4px;                       /* JUICE.ui.logoOutlinePx */
+
+  /* motion */
+  --screen-fade: 160ms;                      /* JUICE.ui.screenFadeMs (ui.js also writes it inline) */
+  --dur-press: 70ms;
+  --dur-fast: 140ms;
+  --dur-med: 220ms;
+  --ease-pop: cubic-bezier(0.2, 0.9, 0.3, 1.25);
+  --ease-out: cubic-bezier(0.22, 0.8, 0.3, 1);
+
+  /* text strokes (Lilita One reads as a sticker with a dark outline) */
+  --stroke-2: -2px -2px 0 var(--outline), 2px -2px 0 var(--outline), -2px 2px 0 var(--outline), 2px 2px 0 var(--outline),
+              0 -2px 0 var(--outline), 0 2px 0 var(--outline), -2px 0 0 var(--outline), 2px 0 0 var(--outline);
+  --stroke-3: -3px -3px 0 var(--outline), 3px -3px 0 var(--outline), -3px 3px 0 var(--outline), 3px 3px 0 var(--outline),
+              0 -3px 0 var(--outline), 0 3px 0 var(--outline), -3px 0 0 var(--outline), 3px 0 0 var(--outline);
+}
+
+/* --ui-derived tokens: declared on :root AND #app so a --ui written on either element re-derives them */
+:root, #app {
+  --u: calc(1px * var(--ui));
+  --fs-display: calc(56px * var(--ui) * var(--text-scale));
+  --fs-h1: calc(40px * var(--ui) * var(--text-scale));
+  --fs-h2: calc(28px * var(--ui) * var(--text-scale));
+  --fs-h3: calc(22px * var(--ui) * var(--text-scale));
+  --fs-body: calc(17px * var(--ui) * var(--text-scale));
+  --fs-small: max(12.5px, calc(14px * var(--ui) * var(--text-scale)));   /* UI-27: ≥ 12 css px on every phone */
+  --fs-micro: max(12px, calc(12px * var(--ui) * var(--text-scale)));
+  --fs-readout: max(12px, calc(13px * var(--ui) * var(--text-scale)));  /* shop effect captions, level-tile stars */
+  --gap: calc(14 * var(--u));
+  --w-wide: calc(280 * var(--u));            /* primary 280 × 64, wide secondary 280 × 52 */
+  --w-narrow: calc(132 * var(--u));          /* secondary 132 × 52 */
+  --h-primary: max(52px, calc(64 * var(--u)));
+  --h-secondary: max(48px, calc(52 * var(--u)));
+  --icon-btn: max(48px, calc(48 * var(--u)));
+  --pill-h: max(32px, calc(36 * var(--u)));
+}
+
+html.large-text { --text-scale: 1.15; }      /* JUICE.ui.largeTextScale */
+
+/* =============================================================================================
+   2. Base, layout and the pointer contract (§10.2 verbatim rules first)
+   ============================================================================================= */
+
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+html, body, #app { touch-action: none; overscroll-behavior: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+body { margin: 0; background: #0F1626; }
+#app { position: fixed; inset: 0; overflow: hidden; outline: none; }
+#gl-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#ui, .screen { pointer-events: none; }                                   /* drags fall through to #app */
+.screen > *, .btn, .icon-btn, .pill, .seg, input, .card, #error-box, #overlay-msg .panel { pointer-events: auto; }
+#scr-pause, #scr-settings, #scr-boot, #overlay-msg, #scr-complete, #scr-gameover, #scr-endless { pointer-events: auto; }  /* modal: block the game */
+#hud > :not(#btn-pause) { pointer-events: none; }                        /* HUD chrome never swallows a drag */
+#flash, #vignette, #coin-flights, #letterbox, #letterbox-bottom { pointer-events: none; }
+
+/* HUD descendants too (power-up pills are .pill, which the rule above would otherwise re-enable) */
+#hud :not(#btn-pause) { pointer-events: none; }
+
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }       /* every screen / pill is toggled with the hidden attribute */
+
+html {
+  height: 100%;
+  background: #0F1626;
+  color-scheme: dark;
+}
+body {
+  height: 100%;
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-weight: 800;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+#app { background: #0F1626; }
+#app:focus, #app:focus-visible { outline: none; }
+#gl-canvas { touch-action: none; outline: none; }
+
+#ui {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  font-family: var(--font-body);
+  font-weight: 800;
+  font-size: var(--fs-body);
+  line-height: 1.2;
+  color: var(--text);
+  -webkit-tap-highlight-color: transparent;
+}
+#ui ::selection { background: transparent; }
+
+button, input, select { font: inherit; color: inherit; }
+button { -webkit-appearance: none; appearance: none; background: none; border: 0; margin: 0; padding: 0; cursor: pointer; touch-action: manipulation; }
+button:disabled { cursor: default; }
+
+/* focus: keyboard only, never on tap. ui keeps html.pointer-input from boot / any pointer press until the
+   next key press, because its programmatic focus() on PLAY / NEXT / RETRY would otherwise match
+   :focus-visible on touch devices */
+#ui :focus { outline: none; }
+html:not(.pointer-input) #ui :focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+html:not(.pointer-input) #ui input[type="range"]:focus-visible, html:not(.pointer-input) #ui .toggle:focus-visible { outline-offset: 4px; }
+
+/* =============================================================================================
+   3. Screens (absolute flex columns, exactly one non-overlay visible; overlays stack above)
+   ============================================================================================= */
+
+.screen {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--gap);
+  padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+  text-align: center;
+}
+#hud { display: block; z-index: 1; padding: 0; }
+#scr-complete, #scr-gameover, #scr-endless { z-index: 12; }
+/* round-3 FTUE: under a results screen the HUD keeps only its coin pill (below), and that pill is where the run's coins
+   settle — it sat under the results scrim (0.72–0.9 dark), so the new total read as a greyed-out, disabled control. The
+   HUD layer (pointer-events none, pause button hidden) now stacks above the results screens while they are up. */
+#hud.results { z-index: 13; }
+.screen.overlay, #scr-pause { z-index: 20; }
+#scr-settings { z-index: 30; }               /* opened from the pause panel too */
+#overlay-msg { z-index: 40; }
+#scr-boot { z-index: 50; }
+
+.screen.enter { animation: screen-in var(--screen-fade, 160ms) var(--ease-out) both; }
+.screen.enter > .panel { animation: panel-in calc(var(--screen-fade, 160ms) + 60ms) var(--ease-pop) both; }
+
+@keyframes screen-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes panel-in { from { opacity: 0; transform: scale(0.92) translateY(calc(10 * var(--u))); } to { opacity: 1; transform: none; } }
+
+/* round-3 polish: the screen the settings overlay was opened from (ui sets .under: the title) hides its own content
+   once the overlay has faded in, so PLAY's ring, the caption, SHOP / LEVELS no longer show through the scrim behind
+   BACK and RESET SAVE; under the results screens (#hud.results) the HUD keeps only the coin pill, whose count settles
+   there — the LEVEL label, progress bar, pills and boss chrome collided with the results titles in landscape */
+.screen.under > *,
+#hud.results > :not(#coins):not(#flash):not(#vignette):not(#coin-flights) {
+  visibility: hidden;
+  transition: visibility 0s linear var(--screen-fade, 160ms);
+}
+
+/* =============================================================================================
+   4. Typography
+   ============================================================================================= */
+
+h1, .h1 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: var(--fs-h1);
+  line-height: 1;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text);
+  text-shadow: var(--stroke-3), 0 6px 0 var(--outline), 0 10px 18px rgba(0, 0, 0, 0.45);
+  padding: 0 0.1em 6px;
+}
+h1.danger, .danger:not(.btn) { color: var(--danger); }
+.h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: var(--fs-h2);
+  line-height: 1.05;
+  letter-spacing: 0.02em;
+  color: var(--text);
+  text-shadow: var(--stroke-2), 0 4px 0 var(--outline);
+}
+.caption {
+  margin: 0;
+  max-width: calc(340 * var(--u));
+  font-family: var(--font-body);
+  font-weight: 800;
+  font-size: var(--fs-small);
+  line-height: 1.35;
+  color: var(--text);
+  opacity: 0.92;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.9), 0 0 8px rgba(0, 0, 0, 0.75);
+}
+.caption-warn { color: var(--primary); font-size: var(--fs-micro); }
+.micro {
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: var(--fs-micro);
+  color: var(--text-muted);
+  opacity: 0.8;
+  letter-spacing: 0.04em;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.8);
+}
+.row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: calc(16 * var(--u));
+}
+
+/* =============================================================================================
+   5. Logo (gradient #FFB02E → #FF7A2F, thick dark outline, 2 s bob)
+   ============================================================================================= */
+
+.logo {
+  --lo: var(--logo-outline);
+  position: relative;
+  margin: 0;
+  padding: 0.08em 0.14em 0.12em;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: var(--fs-display);
+  line-height: 0.92;
+  letter-spacing: 0.015em;
+  text-align: center;
+  text-transform: uppercase;
+  color: var(--logo-a);
+  /* outline + extruded depth + soft drop, built from stacked drop-shadows so it follows the gradient glyphs */
+  filter:
+    drop-shadow(var(--lo) 0 0 var(--outline))
+    drop-shadow(calc(-1 * var(--lo)) 0 0 var(--outline))
+    drop-shadow(0 var(--lo) 0 var(--outline))
+    drop-shadow(0 calc(-1 * var(--lo)) 0 var(--outline))
+    drop-shadow(0 calc(6 * var(--u)) 0 #2A1404)
+    drop-shadow(0 calc(10 * var(--u)) calc(12 * var(--u)) rgba(0, 0, 0, 0.5));
+  animation: logo-bob 2s ease-in-out infinite;    /* JUICE.ui.logoBobSeconds */
+  will-change: transform;
+}
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .logo {
+    background-image: linear-gradient(180deg, #FFD36E 0%, var(--logo-a) 34%, var(--logo-b) 88%, #F2632A 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+  }
+}
+.logo-big {
+  --lo: calc(var(--logo-outline) + 1px);
+  width: min-content;                        /* GATE / RUSH stacked, like an app-store logo */
+  font-size: calc(88px * var(--ui) * var(--text-scale));
+  line-height: 0.86;
+  letter-spacing: 0.01em;
+}
+@keyframes logo-bob {
+  0%, 100% { transform: translateY(0) rotate(-3deg) scale(1); }
+  50% { transform: translateY(calc(-8 * var(--u))) rotate(-1.5deg) scale(1.02); }
+}
+
+/* =============================================================================================
+   6. Buttons — chunky, glossy, 3D bottom edge, press-down state
+   ============================================================================================= */
+
+.btn {
+  --depth: calc(6 * var(--u));
+  --edge: #0A0E18;
+  --face: linear-gradient(180deg, #3A4A6E, #253250);
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: calc(8 * var(--u));
+  min-width: 48px;
+  min-height: 48px;
+  padding: 0 calc(18 * var(--u));
+  border: 0;
+  border-radius: calc(18 * var(--u));
+  background: var(--face);
+  color: var(--text);
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: var(--fs-h3);
+  line-height: 1;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  box-shadow:
+    inset 0 2px 0 rgba(255, 255, 255, 0.45),
+    inset 0 -3px 0 rgba(0, 0, 0, 0.14),
+    0 var(--depth) 0 var(--edge),
+    0 calc(var(--depth) + 4px) 14px rgba(0, 0, 0, 0.38);
+  transform: translateY(0);
+  transition: transform var(--dur-press) ease-out, box-shadow var(--dur-press) ease-out, filter var(--dur-fast) ease-out;
+}
+/* gloss: a soft white sheen over the top half of the face */
+.btn::before {
+  content: "";
+  position: absolute;
+  left: calc(8 * var(--u));
+  right: calc(8 * var(--u));
+  top: calc(3 * var(--u));
+  height: 42%;
+  border-radius: calc(12 * var(--u)) calc(12 * var(--u)) calc(30 * var(--u)) calc(30 * var(--u)) / calc(12 * var(--u)) calc(12 * var(--u)) calc(10 * var(--u)) calc(10 * var(--u));
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.42), rgba(255, 255, 255, 0.04));
+  pointer-events: none;
+}
+.btn:active:not(:disabled):not([aria-disabled="true"]),
+.btn.pressed {
+  transform: translateY(calc(var(--depth) - 1px));
+  box-shadow:
+    inset 0 2px 0 rgba(255, 255, 255, 0.3),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.14),
+    0 1px 0 var(--edge),
+    0 3px 6px rgba(0, 0, 0, 0.35);
+}
+@media (hover: hover) and (pointer: fine) {
+  .btn:hover:not(:disabled):not([aria-disabled="true"]) { filter: brightness(1.07) saturate(1.05); }
+  .icon-btn:hover { filter: brightness(1.15); }
+}
+.btn:disabled, .btn[aria-disabled="true"] { filter: grayscale(0.85) brightness(0.72); cursor: default; }
+
+.btn.primary {
+  --edge: var(--primary-border);
+  --face: linear-gradient(180deg, var(--primary-hi) 0%, var(--primary) 52%, var(--primary-lo) 100%);
+  width: var(--w-wide);
+  height: var(--h-primary);
+  color: var(--primary-text);
+  font-size: var(--fs-h2);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+.btn.secondary {
+  --edge: var(--secondary-border);
+  --face: linear-gradient(180deg, var(--secondary-hi) 0%, var(--secondary) 55%, var(--secondary-lo) 100%);
+  width: var(--w-narrow);
+  height: var(--h-secondary);
+  color: var(--secondary-text);
+  font-size: var(--fs-h3);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+.btn.danger {
+  --edge: var(--danger-border);
+  --face: linear-gradient(180deg, var(--danger-hi) 0%, var(--danger) 55%, var(--danger-lo) 100%);
+  width: var(--w-wide);
+  height: var(--h-secondary);
+  color: #FFFFFF;
+  font-size: var(--fs-h3);
+  text-shadow: 0 2px 0 rgba(90, 0, 12, 0.55);
+}
+.btn.danger.confirm { animation: confirm-pulse 0.5s ease-in-out infinite alternate; }
+@keyframes confirm-pulse { from { filter: brightness(1); } to { filter: brightness(1.25) saturate(1.2); } }
+/* round 5 integration: a menu start waiting for its generated level script (ui._startLevel → level.requestStart: a few frames
+   unthrottled, ≈ 0.5 s at 4× for a cold L13 / L19 / L28) — the tapped PLAY / NEXT / level tile pulses until the run starts */
+.btn.starting, .tile.starting { animation: confirm-pulse 0.5s ease-in-out infinite alternate; }
+html.reduced-motion .btn.starting, html.reduced-motion .tile.starting { filter: brightness(1.25); }
+@media (prefers-reduced-motion: reduce) { .btn.starting, .tile.starting { filter: brightness(1.25); } }
+
+/* round-3 FTUE: a SHOP button (title, results, game over) wears a red "!" notification badge while the coins buy at least
+   one more rank (ui._syncShopBadges). Non-interactive; it pulses on the compositor (transform only) and holds still under
+   reduced motion (the global rules zero its duration). */
+.btn.has-upgrade::after {
+  content: "!";
+  position: absolute;
+  top: calc(-7 * var(--u));
+  right: calc(-8 * var(--u));
+  width: calc(28 * var(--u));
+  height: calc(28 * var(--u));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: linear-gradient(180deg, var(--danger-hi), var(--danger) 55%, var(--danger-lo));
+  color: #FFFFFF;
+  font-family: var(--font-display);
+  font-size: calc(19 * var(--u));
+  line-height: 1;
+  text-shadow: 0 1px 0 rgba(90, 0, 12, 0.6);
+  box-shadow: 0 0 0 calc(3 * var(--u)) #0B0F1A, 0 3px 8px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+  will-change: transform;
+  animation: badge-pulse 1.4s ease-in-out infinite;
+}
+@keyframes badge-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.15); } }
+
+/* wide secondaries: pause panel, settings, endless */
+.panel .btn.secondary,
+#scr-settings .btn.secondary,
+#btn-endless { width: var(--w-wide); }
+
+/* PLAY: a breathing ring invites the first tap */
+#btn-play::after {
+  content: "";
+  position: absolute;
+  inset: calc(-3 * var(--u));
+  border-radius: calc(21 * var(--u));
+  border: 3px solid rgba(255, 214, 120, 0.9);
+  pointer-events: none;
+  animation: cta-ring 1.6s ease-out infinite;
+}
+@keyframes cta-ring {
+  0% { opacity: 0.85; transform: scale(1); }
+  70%, 100% { opacity: 0; transform: scale(1.12, 1.3); }
+}
+
+/* icon buttons 48 × 48 */
+.icon-btn {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: var(--icon-btn);
+  height: var(--icon-btn);
+  padding: 0;
+  border: 0;
+  border-radius: calc(14 * var(--u));
+  background: linear-gradient(180deg, rgba(44, 58, 90, 0.94), rgba(17, 25, 43, 0.94));
+  color: var(--text);
+  font-family: var(--font-body);
+  font-weight: 800;
+  font-size: calc(24px * var(--ui));
+  line-height: 1;
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.55);
+  cursor: pointer;
+  touch-action: manipulation;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 0 0 2px rgba(255, 255, 255, 0.07),
+    0 4px 0 rgba(4, 7, 14, 0.85),
+    0 7px 12px rgba(0, 0, 0, 0.35);
+  transition: transform var(--dur-press) ease-out, box-shadow var(--dur-press) ease-out, filter var(--dur-fast);
+}
+.icon-btn:active {
+  transform: translateY(3px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), inset 0 0 0 2px rgba(255, 255, 255, 0.07), 0 1px 0 rgba(4, 7, 14, 0.85), 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+#btn-pause { font-size: 0; color: transparent; text-shadow: none; }      /* the ‖ glyph is replaced by two chunky bars */
+#btn-pause::before {
+  content: "";
+  width: calc(6 * var(--u));
+  height: calc(19 * var(--u));
+  border-radius: calc(2 * var(--u));
+  background: var(--text);
+  box-shadow: calc(10 * var(--u)) 0 0 var(--text), 0 2px 0 rgba(0, 0, 0, 0.45), calc(10 * var(--u)) 2px 0 rgba(0, 0, 0, 0.45);
+  transform: translateX(calc(-5 * var(--u)));
+}
+#btn-fullscreen[aria-pressed="true"] { color: var(--primary); }
+/* round 4 (lead): HOME on the results screens (complete, game over, endless run over) — a 48 × 48 icon button in the
+   top-left corner inside the safe area, where the pause button sits in play (the HUD coin pill stays top-right). Out of
+   the flex column (absolute), so NEXT / REPLAY / SHOP / RETRY keep their layout. The house is markup SVG in
+   currentColor (forced-colours safe); its shadow matches the icon-btn glyph shadow. */
+.icon-btn.home-btn { position: absolute; top: var(--safe-top); left: var(--safe-left); z-index: 1; }
+.home-glyph {
+  display: block;
+  width: calc(26 * var(--u));
+  height: calc(26 * var(--u));
+  fill: currentColor;
+  filter: drop-shadow(0 2px 0 rgba(0, 0, 0, 0.55));
+  pointer-events: none;
+}
+
+/* =============================================================================================
+   7. Pills, coin icon, panels
+   ============================================================================================= */
+
+.pill {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: calc(6 * var(--u));
+  height: var(--pill-h);
+  padding: 0 calc(14 * var(--u)) 0 calc(5 * var(--u));
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(30, 42, 68, 0.92), rgba(11, 17, 31, 0.92));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 0 0 2px rgba(255, 255, 255, 0.07),
+    0 3px 0 rgba(4, 7, 14, 0.7),
+    0 5px 10px rgba(0, 0, 0, 0.3);
+  color: var(--text);
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: calc(20px * var(--ui) * var(--text-scale));
+  line-height: 1;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.65);
+}
+.pill:empty { display: none; }
+.pill-value { flex: 1 1 auto; text-align: right; }
+
+/* coin: ui.js paints the texture-factory icon inline; ::before is the CSS fallback until then */
+.coin-icon {
+  position: relative;
+  display: inline-block;
+  flex: none;
+  width: calc(26 * var(--u));
+  height: calc(26 * var(--u));
+  border-radius: 50%;
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+  filter: drop-shadow(0 2px 0 rgba(0, 0, 0, 0.45));
+}
+.coin-icon:not([style*="background-image"])::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 34% 30%, rgba(255, 255, 255, 0.95) 0 9%, rgba(255, 255, 255, 0) 16%),
+    radial-gradient(circle at 50% 50%, var(--coin) 0 44%, #E9A51E 46% 54%, var(--coin) 56% 66%, var(--coin-lo) 70% 100%);
+  box-shadow: inset 0 0 0 1.5px #8A5A0E;
+}
+
+.panel {
+  position: relative;
+  border-radius: var(--radius);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.07) 0%, rgba(255, 255, 255, 0) 38%),
+    var(--bg-panel);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 0 0 1.5px rgba(255, 255, 255, 0.07),
+    0 18px 44px rgba(0, 0, 0, 0.5);
+}
+
+/* =============================================================================================
+   8. HUD (playing / paused / behind results). Nothing below the thumb zone line.
+   ============================================================================================= */
+
+#hud > * { position: absolute; }
+
+/* pause — top-left */
+#btn-pause { top: var(--safe-top); left: var(--safe-left); z-index: 3; }
+
+/* level progress — centred, 220 × 14. At 390 px a centred 220 px bar cannot share the top row with the
+   48 px pause button and the 96 px coin pill (85–305 vs 286–382), so the LVL label sits in the top row
+   between them and the bar hangs just below the corner widgets. */
+#progress, #coins, #powerups, #bossbar, #hint, #namecard, #shield { contain: layout; }   /* UI-22: HUD blocks lay out alone */
+#progress {
+  top: calc(var(--safe-top) + (var(--icon-btn) - var(--fs-body)) / 2);
+  left: 0;
+  right: 0;
+  margin: 0 auto;
+  width: max-content;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(var(--icon-btn) / 2 - var(--fs-body) / 2 + 8px);   /* bar top = safe-top + 48 + 8 */
+  z-index: 2;
+}
+#progress-label {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: var(--fs-body);
+  line-height: 1;
+  letter-spacing: 0.08em;
+  color: var(--text);
+  text-shadow: var(--stroke-2), 0 3px 0 var(--outline);
+  white-space: nowrap;
+}
+#progress-bar {
+  position: relative;
+  width: calc(220 * var(--u));
+  height: max(12px, calc(14 * var(--u)));
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(4, 7, 14, 0.85), rgba(20, 28, 46, 0.85));
+  box-shadow:
+    inset 0 2px 3px rgba(0, 0, 0, 0.65),
+    0 0 0 2px rgba(255, 255, 255, 0.18),
+    0 0 0 4px rgba(4, 7, 14, 0.55),
+    0 4px 10px rgba(0, 0, 0, 0.35);
+}
+/* UI-22: the fill is a full-width strip sliding inside a rounded clip (ui: transform translateX(f − 100 %), 10 Hz,
+   glided by a transform transition) — no width writes, no layout, no repaint of the stripes */
+#progress-clip {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  overflow: hidden;
+}
+#progress-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 100%;
+  border-radius: inherit;
+  background: linear-gradient(180deg, var(--success-hi) 0%, var(--progress-fill) 46%, var(--success-lo) 100%);
+  box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+  transform: translateX(-100%);
+  transition: none;                          /* UI-22: 10 Hz transform steps (a 110 ms transition re-ran every 100 ms → style recalc every frame) */
+  will-change: transform;
+}
+#progress-fill::after {                      /* candy stripes. UI-22: static — any running CSS / Web animation here
+                                                re-ran style recalc + commit every frame (≈ 0.15 ms/frame of DOM CPU,
+                                                measured with a pseudo-element and a real element alike) */
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: repeating-linear-gradient(-45deg, rgba(255, 255, 255, 0.22) 0 7px, rgba(255, 255, 255, 0) 7px 14px);
+}
+@keyframes stripes { from { transform: translateX(0); } to { transform: translateX(19.8px); } }
+
+/* squad marker: a white downward triangle riding the fill edge. UI-22: the element spans the bar and slides by
+   translateX(f %) of its own (= the bar's) width; the outline + drop shadow are baked into an SVG background
+   instead of 5 drop-shadow filters that repainted as it moved */
+#progress-squad {
+  position: absolute;
+  top: calc(-14 * var(--u));
+  left: 0;
+  width: 100%;
+  height: calc(15 * var(--u));
+  transform: translateX(0%);
+  transition: none;
+  will-change: transform;
+  z-index: 2;
+}
+#progress-squad::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: calc(-10 * var(--u));
+  width: calc(20 * var(--u));
+  height: 100%;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 15'%3E%3ClinearGradient id='g' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%23FFFFFF'/%3E%3Cstop offset='1' stop-color='%23DDE6F2'/%3E%3C/linearGradient%3E%3Cpath d='M2.5 3.5H17.5L10 14Z' fill='%23000000' fill-opacity='0.45'/%3E%3Cpath d='M2.5 1.5H17.5L10 12Z' fill='url(%23g)' stroke='%230B0F1A' stroke-width='2' stroke-linejoin='round'/%3E%3C/svg%3E") center / 100% 100% no-repeat;
+}
+
+/* skull at 100 %: CSS-drawn, pulses during the run-up (ui toggles .pulse; transform pulse is ui's WAAPI) */
+#progress-skull {
+  position: absolute;
+  top: 50%;
+  right: calc(-13 * var(--u));
+  width: calc(26 * var(--u));
+  height: calc(26 * var(--u));
+  margin-top: calc(-13 * var(--u));
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 38%, #4A1520 0%, #1E0A10 72%);
+  box-shadow: 0 0 0 2px var(--danger), 0 0 0 4px rgba(4, 7, 14, 0.7), 0 3px 6px rgba(0, 0, 0, 0.5);
+  z-index: 1;
+}
+#progress-skull::before {                    /* cranium with eye sockets */
+  content: "";
+  position: absolute;
+  left: 20%;
+  right: 20%;
+  top: 16%;
+  height: 52%;
+  border-radius: 50% 50% 42% 42%;
+  background:
+    radial-gradient(circle at 31% 58%, #1E0A10 0 19%, rgba(30, 10, 16, 0) 21%),
+    radial-gradient(circle at 69% 58%, #1E0A10 0 19%, rgba(30, 10, 16, 0) 21%),
+    var(--text);
+}
+#progress-skull::after {                     /* jaw with teeth */
+  content: "";
+  position: absolute;
+  left: 33%;
+  right: 33%;
+  top: 64%;
+  height: 16%;
+  border-radius: 0 0 3px 3px;
+  background: repeating-linear-gradient(90deg, var(--text) 0 2px, #1E0A10 2px 3px);
+}
+/* run-up: a static glow; the 1 Hz pulse is ui's transform animation (JUICE.ui.skullPulseHz) — UI-22: the old
+   box-shadow keyframes repainted every frame */
+#progress-skull.pulse { box-shadow: 0 0 0 2px #FF7180, 0 0 0 4px rgba(4, 7, 14, 0.7), 0 0 14px rgba(255, 59, 78, 0.85); }
+
+/* special-gate / crate ticks: small gold diamonds on the bar */
+#progress-ticks { position: absolute; inset: 0; }
+#progress-ticks > .tick {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 7px;                                /* JUICE.ui.progressTickPx 6 + outline */
+  height: 7px;
+  margin: -3.5px 0 0 -3.5px;
+  border-radius: 1.5px;
+  background: linear-gradient(135deg, var(--coin-hi), var(--coin));
+  box-shadow: 0 0 0 1.5px var(--outline);
+  transform: rotate(45deg);
+}
+
+/* coins — top-right, 96 × 36 */
+#coins {
+  top: calc(var(--safe-top) + (var(--icon-btn) - var(--pill-h)) / 2);
+  right: var(--safe-right);
+  min-width: calc(96 * var(--u));
+  z-index: 2;
+}
+#coins-value { flex: 1 1 auto; text-align: right; color: #FFF6D8; }
+
+/* power-up pills — centred under the progress bar (GDD: safe-top + 70; here + 48 + 32 so they clear the
+   bar that moved below the corner widgets), 88 × 36, 28 px conic rings (ui writes the ring gradient) */
+#powerups {
+  top: calc(var(--safe-top) + var(--icon-btn) + 32 * var(--u));
+  left: 0;
+  right: 0;
+  margin: 0 auto;
+  width: max-content;
+  display: flex;
+  gap: calc(8 * var(--u));
+  z-index: 2;
+}
+#powerups > .pu {
+  position: relative;
+  width: calc(88 * var(--u));
+  height: var(--pill-h);
+  padding: 0 calc(10 * var(--u)) 0 calc(4 * var(--u));
+  justify-content: space-between;
+}
+.pu .ring {
+  flex: none;
+  width: calc(32 * var(--u));
+  height: calc(32 * var(--u));
+  border-radius: 50%;
+  background: conic-gradient(var(--primary) 0deg 360deg, rgba(15, 22, 38, 0.88) 360deg);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 4 * var(--u)), #000 calc(100% - 3.5 * var(--u)));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 4 * var(--u)), #000 calc(100% - 3.5 * var(--u)));
+}
+/* round 4 (r3 FTUE residual 3): the pictograms are drawn with the dark glyph outline (#0B0F1A) — the shotgun's stock,
+   the minigun's drum, the rocket's fins — and sat at 18 px straight on the dark pill, so the shotgun read as "an orange
+   ring around a dark shape". The ring is 32 px and its hole holds a light disc (non-interactive ::before, painted once)
+   under a 20 px pictogram, the way the item crates show them in the world. */
+#powerups > .pu::before {
+  content: "";
+  position: absolute;
+  left: calc(9 * var(--u));
+  top: 50%;
+  width: calc(22 * var(--u));
+  height: calc(22 * var(--u));
+  margin-top: calc(-11 * var(--u));
+  border-radius: 50%;
+  background: radial-gradient(circle at 40% 35%, #FFFFFF 0%, #DCE2EC 55%, #B9C2D2 100%);
+  box-shadow: inset 0 -1px 0 rgba(11, 15, 26, 0.35);
+}
+.pu .pu-icon {
+  position: absolute;
+  left: calc(10 * var(--u));
+  top: 50%;
+  width: calc(20 * var(--u));
+  height: calc(20 * var(--u));
+  margin-top: calc(-10 * var(--u));
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+  filter: drop-shadow(0 1px 0 rgba(0, 0, 0, 0.6));
+}
+.pu .pu-icon:not([style*="background-image"])::before {     /* fallback: a glowing bolt dot */
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: calc(10 * var(--u));
+  height: calc(10 * var(--u));
+  margin: calc(-5 * var(--u)) 0 0 calc(-5 * var(--u));
+  border-radius: 50%;
+  background: radial-gradient(circle, #FFFFFF 0 30%, var(--primary) 70%);
+}
+.pu .pu-time { font-size: calc(19px * var(--ui) * var(--text-scale)); color: var(--text); }
+.pu.blink .ring { animation: ring-blink 0.5s steps(1, end) infinite; }    /* JUICE.powerup.pillBlinkHz (ui also drives opacity) */
+@keyframes ring-blink { 0% { opacity: 1; } 50% { opacity: 0.25; } 100% { opacity: 1; } }
+
+/* shield (armor plates) — beside the in-world squad count: ui projects the count label every frame and
+   writes left / top (CSS px, clamped to the safe area); hidden whenever the label is */
+#shield {
+  left: 0;
+  top: 0;
+  padding-right: calc(12 * var(--u));
+  color: #CFE8FF;
+  z-index: 2;
+}
+.shield-icon {
+  position: relative;
+  display: inline-block;
+  flex: none;
+  width: calc(24 * var(--u));
+  height: calc(26 * var(--u));
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+  filter: drop-shadow(0 2px 0 rgba(0, 0, 0, 0.5));
+}
+.shield-icon:not([style*="background-image"])::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.35) 0 50%, rgba(255, 255, 255, 0) 50%),
+    linear-gradient(180deg, #8ACBFF, var(--secondary) 60%, var(--secondary-lo));
+  clip-path: polygon(50% 0, 100% 14%, 94% 58%, 50% 100%, 6% 58%, 0 14%);
+}
+#shield-value { color: #FFFFFF; }
+
+/* boss bar — GDD §14: 330 × 18 track whose top is at safe-top + 110, name above it, phase ticks (ui
+   positions them at 60 % / 25 %). The element box IS the track row; the name hangs above it absolutely.
+   While the bar is up ui sets #hud.boss-on and the power-up row / hint band drop below it (they would
+   otherwise sit under the name). */
+#bossbar {
+  top: calc(var(--safe-top) + 110 * var(--u));
+  left: 0;
+  right: 0;
+  margin: 0 auto;
+  width: min(calc(330 * var(--u)), calc(100% - var(--safe-left) - var(--safe-right) - 16px));
+  display: block;
+  z-index: 2;
+}
+#hud.boss-on #powerups { top: calc(var(--safe-top) + 110 * var(--u) + max(14px, calc(18 * var(--u))) + 12 * var(--u)); }
+#boss-name {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 5 * var(--u));
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: var(--fs-h3);
+  line-height: 1;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #FFE3E6;
+  text-shadow: var(--stroke-2), 0 3px 0 var(--outline), 0 0 14px rgba(255, 59, 78, 0.55);
+  padding: 2px 4px 3px;
+}
+#boss-track {
+  position: relative;
+  height: max(14px, calc(18 * var(--u)));
+  border-radius: 999px;
+  background: linear-gradient(180deg, #1A070B, var(--boss-track));
+  box-shadow:
+    inset 0 2px 4px rgba(0, 0, 0, 0.7),
+    0 0 0 2px rgba(255, 255, 255, 0.16),
+    0 0 0 4px rgba(4, 7, 14, 0.7),
+    0 6px 14px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+#boss-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 100%;
+  border-radius: inherit;
+  background: var(--boss-bar);               /* ui writes the phase colour inline */
+  box-shadow: inset 0 -3px 0 rgba(0, 0, 0, 0.22);
+  transform: translateX(0%);                 /* UI-22: ui slides it (translateX(f − 100 %)) inside the clipped track */
+  transition: transform 120ms linear, background-color var(--dur-med);
+  will-change: transform;
+}
+#boss-fill::after {                          /* gloss survives the inline background colour */
+  content: "";
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  top: 2px;
+  height: 38%;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0.06));
+}
+#boss-track .tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  margin-left: -1.5px;
+  background: rgba(4, 7, 14, 0.85);
+  box-shadow: 1px 0 0 rgba(255, 255, 255, 0.25);
+  z-index: 1;
+}
+#bossbar.phase2 #boss-name { color: #FFE2B0; text-shadow: var(--stroke-2), 0 3px 0 var(--outline), 0 0 14px rgba(255, 176, 46, 0.6); }
+#bossbar.phase3 #boss-name { color: #FFFFFF; text-shadow: var(--stroke-2), 0 3px 0 var(--outline), 0 0 16px rgba(255, 59, 78, 0.9); animation: rage-name 0.6s ease-in-out infinite; will-change: opacity; }
+#bossbar.phase3 #boss-track { box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.7), 0 0 0 2px var(--danger), 0 0 0 4px rgba(4, 7, 14, 0.7), 0 0 18px rgba(255, 59, 78, 0.6); }
+#bossbar.shielded #boss-track::after {       /* shield up: greyed, hatched */
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(-45deg, rgba(200, 230, 255, 0.28) 0 5px, rgba(200, 230, 255, 0) 5px 10px);
+  z-index: 2;
+}
+#bossbar.shielded #boss-name { color: #CFE8FF; text-shadow: var(--stroke-2), 0 3px 0 var(--outline), 0 0 14px rgba(127, 232, 255, 0.6); }
+@keyframes rage-name { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }   /* UI-22: opacity (compositor), not text-shadow */
+
+/* cinematic letterbox (boss intro): 8 % bars behind the HUD chrome */
+#letterbox, #letterbox-bottom {
+  left: 0;
+  right: 0;
+  height: var(--letterbox);                  /* ui also writes RENDER.letterboxPct inline */
+  background: #000000;
+  z-index: 0;
+}
+#letterbox { top: 0; box-shadow: 0 3px 8px rgba(0, 0, 0, 0.55); }           /* UI-19: ≤ 8 px blur (24 px rastered slowly) */
+#letterbox-bottom { bottom: 0; box-shadow: 0 -3px 8px rgba(0, 0, 0, 0.55); }
+
+/* tutorial hint (round-2 QA UI-18): a compact pill bottom-anchored at safe-bottom + JUICE.ui.hintBottomPx (28 design
+   px) under the squad, like the tutorial hand in the ads. The round-1 band "below the HUD, above the gates" (and the
+   §14 "y 620") sat on the horizon exactly where gates, zombies and the boss arrive. Hand icon (32 px) inside the
+   pill's left edge for steer / shoot only; max-width JUICE.ui.hintMaxWidthPct % minus the safe insets; panel alpha
+   JUICE.ui.hintAlpha (ui writes --hint-bottom / --hint-maxw / --hint-alpha). The boss hint behaves the same. Non-
+   interactive (pointer-events none) so drags pass through and the thumb zone stays usable. On wide boxes ui slides
+   it sideways with `translate` when the projected count label would overlap it. It may cover the rear rows of a
+   big formation (lead-accepted). */
+#hint {
+  top: auto;
+  bottom: calc(var(--safe-bottom) + var(--hint-bottom) * var(--u));
+  left: 0;
+  right: 0;
+  margin: 0 auto;
+  width: max-content;
+  max-width: calc(var(--hint-maxw) - var(--safe-left) - var(--safe-right));
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: calc(10 * var(--u));
+  padding: calc(7 * var(--u)) calc(20 * var(--u));
+  border-radius: calc(26 * var(--u));
+  background: linear-gradient(180deg, rgba(26, 38, 64, var(--hint-alpha)), rgba(8, 12, 22, var(--hint-alpha)));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), inset 0 0 0 2px rgba(255, 255, 255, 0.07), 0 4px 12px rgba(0, 0, 0, 0.35);
+  z-index: 3;
+}
+#hint:has(> #hint-hand:not([hidden])) { padding-left: calc(10 * var(--u)); }
+#hint-hand {
+  position: relative;
+  flex: none;
+  width: calc(32 * var(--u));                /* JUICE.ui.hintHandPx is the 64 px bitmap (2× for retina) */
+  height: calc(32 * var(--u));
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+}
+#hint-hand:not([style*="background-image"])::before {     /* fallback: touch point with side arrows */
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 50% 50%, var(--text) 0 13%, var(--outline) 14% 17%, rgba(244, 241, 234, 0.35) 18% 24%, rgba(244, 241, 234, 0) 25%),
+    linear-gradient(90deg, rgba(244, 241, 234, 0) 4%, var(--text) 4% 14%, rgba(244, 241, 234, 0) 14% 86%, var(--text) 86% 96%, rgba(244, 241, 234, 0) 96%) center / 100% 12% no-repeat;
+}
+#hint-hand::after {                          /* touch ripple (hidden under reduced motion, see §15) */
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: calc(18 * var(--u));
+  height: calc(18 * var(--u));
+  margin: calc(-9 * var(--u)) 0 0 calc(-9 * var(--u));
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  animation: ripple 1.25s ease-out infinite;
+  will-change: transform, opacity;
+}
+@keyframes ripple { 0% { opacity: 0.9; transform: scale(0.6); } 100% { opacity: 0; transform: scale(2); } }
+#hint-text {
+  display: block;
+  min-width: 0;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: calc(21px * var(--ui) * var(--text-scale));   /* JUICE.ui.hintTextPx band 20–22 */
+  line-height: 1.12;
+  letter-spacing: 0.03em;
+  text-align: center;
+  text-transform: uppercase;
+  color: #FFFFFF;
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.7);
+  white-space: normal;
+  text-wrap: balance;                        /* no orphans ("… SHOOT / IT DOWN") */
+}
+
+/* boss name card: red skewed banner, "BOSS" over the archetype name */
+#namecard {
+  top: 30%;
+  left: 0;
+  right: 0;
+  margin: 0 auto;
+  width: max-content;
+  max-width: calc(100% - 24px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(2 * var(--u));
+  padding: calc(10 * var(--u)) calc(44 * var(--u)) calc(14 * var(--u));
+  isolation: isolate;
+  z-index: 3;
+}
+#namecard::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0) 45%),
+    linear-gradient(90deg, rgba(150, 16, 32, 0) 0%, rgba(176, 20, 38, 0.92) 16%, rgba(176, 20, 38, 0.92) 84%, rgba(150, 16, 32, 0) 100%);
+  transform: skewX(-12deg);
+}
+#namecard::after {                           /* thin gold rules above and below */
+  content: "";
+  position: absolute;
+  left: 12%;
+  right: 12%;
+  top: 0;
+  bottom: 0;
+  z-index: -1;
+  border-top: 2px solid rgba(255, 210, 63, 0.75);
+  border-bottom: 2px solid rgba(255, 210, 63, 0.75);
+  transform: skewX(-12deg);
+}
+#namecard .nc-label {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: var(--fs-small);
+  letter-spacing: 0.5em;
+  padding-left: 0.5em;
+  color: #FFD0D4;
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.6);
+}
+#namecard .nc-name {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: var(--fs-h1);
+  line-height: 1;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: #FFFFFF;
+  text-shadow: var(--stroke-3), 0 5px 0 var(--outline), 0 0 24px rgba(255, 59, 78, 0.85);
+  white-space: nowrap;
+}
+
+/* round 5 — district banner (DISTRICTS.md §5): a hint-style pill centred in the #powerups row (empty at level start),
+   "DISTRICT n · NAME" in the display face with a 3 px rule in the district's accent under it (ui writes --db-accent /
+   --db-glow when it shows). ui animates opacity + transform only (Web Animations, compositor; reduced motion: opacity
+   only); it drops a row while a power-up pill is up (#hud.pu-on) and never shows under the boss bar (ui hides it). */
+#district-banner {
+  --db-accent: var(--primary);
+  --db-glow: rgba(255, 176, 46, 0.32);
+  top: calc(var(--safe-top) + var(--icon-btn) + 32 * var(--u));
+  left: 0;
+  right: 0;
+  margin: 0 auto;
+  width: max-content;
+  max-width: calc(100% - 32px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(6 * var(--u)) calc(16 * var(--u)) calc(9 * var(--u));
+  border-radius: 999px;
+  background:
+    radial-gradient(70% 90% at 50% 120%, var(--db-glow), rgba(0, 0, 0, 0) 70%),
+    linear-gradient(180deg, rgba(26, 38, 64, var(--hint-alpha)), rgba(8, 12, 22, var(--hint-alpha)));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), inset 0 0 0 2px rgba(255, 255, 255, 0.07), 0 4px 12px rgba(0, 0, 0, 0.35);
+  contain: layout;
+  z-index: 2;
+}
+#hud.pu-on #district-banner { top: calc(var(--safe-top) + var(--icon-btn) + 32 * var(--u) + var(--pill-h) + 8 * var(--u)); }
+#district-banner .db-text {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: var(--fs-body);
+  line-height: 1.15;
+  letter-spacing: 0.06em;
+  color: #FFFFFF;
+  text-shadow: var(--stroke-2), 0 3px 0 var(--outline);
+}
+#district-banner::after {                    /* the accent rule: 60 % of the pill, a soft glow in the same hue */
+  content: "";
+  position: absolute;
+  left: 20%;
+  right: 20%;
+  bottom: calc(4 * var(--u));
+  height: 3px;
+  border-radius: 2px;
+  background: var(--db-accent);
+  box-shadow: 0 0 6px var(--db-glow), 0 1px 0 rgba(4, 7, 14, 0.6);
+}
+
+/* full-screen flash / damage vignette (ui writes colour + opacity inline) and DOM coin flights */
+#flash, #vignette, #coin-flights { inset: 0; }
+#vignette {
+  opacity: 0;
+  z-index: 4;
+  background: radial-gradient(ellipse at center, rgba(255, 59, 78, 0) 45%, rgba(255, 59, 78, 0.75) 100%);
+}
+#flash { opacity: 0; z-index: 5; background: #FFFFFF; }
+#coin-flights { z-index: 6; overflow: hidden; }
+#coin-flights > * {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: calc(22 * var(--u));
+  height: calc(22 * var(--u));
+  border-radius: 50%;
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+  will-change: transform, opacity;
+  pointer-events: none;
+}
+#coin-flights > :not([style*="background-image"]):not(img):not(canvas) {
+  background-image:
+    radial-gradient(circle at 34% 30%, rgba(255, 255, 255, 0.95) 0 9%, rgba(255, 255, 255, 0) 16%),
+    radial-gradient(circle at 50% 50%, var(--coin) 0 44%, #E9A51E 46% 54%, var(--coin) 56% 66%, var(--coin-lo) 70% 100%);
+  box-shadow: 0 0 8px rgba(255, 210, 63, 0.7);
+}
+
+/* =============================================================================================
+   9. Boot
+   ============================================================================================= */
+
+#scr-boot {
+  gap: calc(26 * var(--u));
+  background:
+    radial-gradient(120% 70% at 50% 32%, #23365C 0%, rgba(15, 22, 38, 0) 62%),
+    linear-gradient(180deg, #121B30 0%, #0F1626 55%, #080C16 100%);
+}
+#scr-boot .logo { font-size: calc(64px * var(--ui) * var(--text-scale)); width: min-content; line-height: 0.88; transition: opacity 0.2s ease-out; }
+/* round 4 (r3 FTUE residual 5): hidden until Lilita One has loaded or the BOOTGUARD cap (1.2 s) passes, so a first
+   visit no longer shows the logo in Arial Black and then swaps it (index.html logoFont) */
+#scr-boot .logo.font-wait { opacity: 0; }
+#boot-bar {
+  position: relative;
+  width: calc(240 * var(--u));
+  height: max(12px, calc(14 * var(--u)));
+  border-radius: 999px;
+  background: rgba(4, 7, 14, 0.85);
+  box-shadow: inset 0 2px 3px rgba(0, 0, 0, 0.7), 0 0 0 2px rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+/* round-3 boot polish: a full-width strip sliding inside the bar's rounded clip (ui writes transform translateX(f − 100 %);
+   the BOOTGUARD creep too) — compositor-only, so the bar is rastered once instead of re-laid-out and re-rastered every
+   boot frame (UI-22's HUD progress technique; a width transition here cost new Skia shaders behind the warm-up) */
+#boot-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 100% !important;                    /* a stale shell's BOOTGUARD may still write an inline width: never shrink the strip */
+  border-radius: inherit;
+  background: linear-gradient(180deg, #FFD36E 0%, var(--primary) 50%, var(--logo-b) 100%);
+  box-shadow: 0 0 12px rgba(255, 176, 46, 0.6);
+  overflow: hidden;
+  transform: translateX(-100%);
+  transition: transform 180ms var(--ease-out);
+  will-change: transform;
+}
+#boot-fill::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -28px;
+  right: 0;
+  background: repeating-linear-gradient(-45deg, rgba(255, 255, 255, 0.25) 0 7px, rgba(255, 255, 255, 0) 7px 14px);
+  animation: stripes 0.9s linear infinite;
+}
+#boot-text {
+  font-family: var(--font-body);
+  font-weight: 800;
+  font-size: var(--fs-small);
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+}
+
+/* =============================================================================================
+   10. Title (3D scene idles behind; gradient scrims keep text legible)
+   ============================================================================================= */
+
+#scr-title {
+  justify-content: flex-start;
+  gap: calc(12 * var(--u));
+  padding-top: calc(var(--safe-top) + 76 * var(--u));
+  padding-bottom: calc(var(--safe-bottom) + 30 * var(--u));
+}
+#scr-title::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(8, 12, 22, 0.78) 0%, rgba(8, 12, 22, 0.25) 24%, rgba(8, 12, 22, 0) 40%,
+                            rgba(8, 12, 22, 0) 52%, rgba(8, 12, 22, 0.55) 72%, rgba(8, 12, 22, 0.86) 100%);
+}
+#scr-title .logo-big { margin-bottom: auto; }
+#btn-settings { position: absolute; top: var(--safe-top); left: var(--safe-left); }
+#btn-fullscreen { position: absolute; top: var(--safe-top); left: calc(var(--safe-left) + var(--icon-btn) + 10px); }
+#title-coins {
+  position: absolute;
+  top: calc(var(--safe-top) + (var(--icon-btn) - var(--pill-h)) / 2);
+  right: var(--safe-right);
+  min-width: calc(96 * var(--u));
+}
+#btn-play { margin-top: calc(8 * var(--u)); }
+#title-caption { min-height: 1.35em; margin-top: calc(2 * var(--u)); flex-shrink: 0; }   /* round 5: two lines (district) never squeezed under the row */
+/* round 5: the title scene's district (districtForLevel(highestUnlocked)) as a small second caption line with an accent dot */
+.caption-district {
+  display: block;
+  margin-top: calc(2 * var(--u));
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: var(--fs-micro);
+  letter-spacing: 0.08em;
+  color: rgba(244, 241, 234, 0.82);
+  white-space: nowrap;
+}
+.caption-district::before {
+  content: "";
+  display: inline-block;
+  width: 0.62em;
+  height: 0.62em;
+  margin-right: 0.45em;
+  border-radius: 50%;
+  vertical-align: 0.02em;
+  background: var(--d-accent, var(--primary));
+  box-shadow: 0 0 0 1.5px rgba(4, 7, 14, 0.75), 0 0 6px var(--d-accent, var(--primary));
+}
+/* round 5: "Update ready — tap to reload" (sw.js v4): a small non-blocking pill at the bottom centre; the title stack
+   gives it a row of its own while it is up (.has-update) */
+#btn-update {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: max(6px, env(safe-area-inset-bottom));
+  margin: 0 auto;
+  width: max-content;
+  max-width: calc(100% - 2 * (var(--safe-right) + 48px));   /* clear of #version (bottom right) on both sides */
+  height: max(32px, calc(32 * var(--u)));
+  padding: 0 calc(12 * var(--u)) 0 calc(9 * var(--u));
+  gap: calc(7 * var(--u));
+  font-family: var(--font-body);
+  font-weight: 800;
+  font-size: var(--fs-small);
+  letter-spacing: 0;
+  color: #FFFFFF;
+}
+#btn-update .upd-text { overflow: hidden; text-overflow: ellipsis; }
+#btn-update .upd-dot {
+  flex: none;
+  width: calc(10 * var(--u));
+  height: calc(10 * var(--u));
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 0 2px rgba(4, 7, 14, 0.6), 0 0 8px rgba(59, 229, 122, 0.8);
+}
+#btn-update:active { transform: translateY(2px); }
+#scr-title.has-update { padding-bottom: calc(var(--safe-bottom) + 30 * var(--u) + max(32px, calc(32 * var(--u)))); }
+#scr-title > .row { margin-top: calc(4 * var(--u)); }
+#btn-endless {
+  --edge: #4B2A8F;
+  --face: linear-gradient(180deg, #B38CFF 0%, #8A5CFF 55%, #6E3FE6 100%);
+  color: #FFFFFF;
+  text-shadow: 0 2px 0 rgba(40, 10, 90, 0.6);
+}
+#version {
+  position: absolute;
+  right: var(--safe-right);
+  bottom: max(6px, env(safe-area-inset-bottom));
+}
+
+/* =============================================================================================
+   11. Menu screens: levels, shop (dimmed scene, scrolling lists)
+   ============================================================================================= */
+
+#scr-levels, #scr-shop {
+  justify-content: flex-start;
+  gap: calc(12 * var(--u));
+  padding-top: calc(var(--safe-top) + 10 * var(--u));
+  padding-bottom: calc(var(--safe-bottom) + 10 * var(--u));
+  background:
+    radial-gradient(120% 60% at 50% 0%, rgba(46, 155, 255, 0.16), rgba(46, 155, 255, 0) 60%),
+    linear-gradient(180deg, rgba(8, 12, 22, 0.86), rgba(8, 12, 22, 0.94));
+}
+#scr-levels > h1, #scr-shop > h1 { flex: none; }
+#scr-levels > .back, #scr-shop > .back { flex: none; margin-top: auto; }
+
+/* scroll containers re-allow vertical panning inside the touch-action:none app */
+#level-grid, #shop-list, #scr-settings, #endless-stats, #error-text {
+  touch-action: pan-y;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+#level-grid::-webkit-scrollbar, #shop-list::-webkit-scrollbar, #scr-settings::-webkit-scrollbar { display: none; }
+
+/* level grid: 4 columns of 76 × 76 */
+#level-grid {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(4, calc(76 * var(--u)));
+  grid-auto-rows: calc(76 * var(--u));
+  gap: calc(12 * var(--u));
+  justify-content: center;
+  padding: calc(14 * var(--u)) calc(14 * var(--u)) calc(22 * var(--u));
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 14px, #000 calc(100% - 22px), transparent 100%);
+  mask-image: linear-gradient(180deg, transparent 0, #000 14px, #000 calc(100% - 22px), transparent 100%);
+}
+.tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: calc(3 * var(--u));
+  width: calc(76 * var(--u));
+  height: calc(76 * var(--u));
+  border-radius: calc(16 * var(--u));
+  background: linear-gradient(180deg, #3C6BC9 0%, #2B4E99 52%, #22407F 100%);
+  box-shadow:
+    inset 0 2px 0 rgba(255, 255, 255, 0.3),
+    inset 0 0 0 2px rgba(255, 255, 255, 0.06),
+    0 5px 0 #152A57,
+    0 8px 12px rgba(0, 0, 0, 0.35);
+  color: #FFFFFF;
+  cursor: pointer;
+  transition: transform var(--dur-press) ease-out, box-shadow var(--dur-press) ease-out;
+}
+/* round 5: district band (DISTRICTS.md §0: L1–5, 6–10 … L31+ cycle) — a short accent rule along the tile's top and a
+   faint wash of the accent at its foot; a band's first level has a longer rule. ui writes --d-accent / --d-tint. */
+.tile-band {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(0deg, var(--d-tint, rgba(0, 0, 0, 0)) 0%, rgba(0, 0, 0, 0) 55%);
+}
+.tile-band::before {
+  content: "";
+  position: absolute;
+  top: calc(5 * var(--u));
+  left: 50%;
+  width: 28%;
+  height: 3px;
+  margin-left: -14%;
+  border-radius: 2px;
+  background: var(--d-accent, transparent);
+  box-shadow: 0 1px 0 rgba(4, 7, 14, 0.55);
+  opacity: 0.9;
+}
+.tile.band-start .tile-band::before { width: 48%; margin-left: -24%; }
+.tile > .tile-num, .tile > .tile-stars { position: relative; }   /* above the band wash (painted in DOM order after it) */
+.tile.locked .tile-band { opacity: 0.4; }
+.tile:active:not(:disabled) {
+  transform: translateY(4px);
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.25), inset 0 0 0 2px rgba(255, 255, 255, 0.06), 0 1px 0 #152A57, 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+.tile-num {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: calc(30px * var(--ui) * var(--text-scale));
+  line-height: 1;
+  text-shadow: var(--stroke-2), 0 3px 0 var(--outline);
+}
+.tile-stars {
+  min-height: 1em;
+  font-family: var(--font-body);
+  font-weight: 800;
+  font-size: var(--fs-readout);              /* UI-27: 13 px × --ui, never below 12 css px */
+  line-height: 1;
+  letter-spacing: 0.06em;
+  color: var(--coin);
+  text-shadow: 0 1px 0 var(--outline), 0 0 6px rgba(255, 210, 63, 0.45);
+  white-space: nowrap;
+}
+/* earned stars gold with the glow, unearned ones a dim filled star without it (readable at 13 px) */
+.tile-stars > .on { color: var(--coin); text-shadow: 0 1px 0 var(--outline), 0 0 6px rgba(255, 210, 63, 0.45); }
+.tile-stars > .off { color: rgba(255, 255, 255, 0.22); text-shadow: 0 1px 0 rgba(4, 7, 14, 0.5); }
+.tile.current {
+  background: linear-gradient(180deg, #4F82E6 0%, #3561BD 52%, #2A4E9E 100%);
+  box-shadow:
+    inset 0 2px 0 rgba(255, 255, 255, 0.35),
+    0 0 0 3px var(--level-current),
+    0 5px 0 #8A5410,
+    0 0 10px rgba(255, 176, 46, 0.4);
+}
+/* the current-tile pulse is an opacity animation of a promoted glow layer (the box-shadow keyframes repainted the
+   tile every frame while LEVELS was open) */
+.tile.current::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: 0 0 0 3px #FFD36E, 0 0 24px rgba(255, 176, 46, 0.85);
+  opacity: 0;
+  pointer-events: none;
+  animation: tile-glow 1.4s ease-in-out infinite;
+  will-change: opacity;
+}
+@keyframes tile-glow { 0%, 100% { opacity: 0; } 50% { opacity: 1; } }
+.tile.milestone:not(.locked) { background: linear-gradient(180deg, #D04A5B 0%, #A3283A 55%, #84192B 100%); box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.3), inset 0 0 0 2px rgba(255, 255, 255, 0.06), 0 5px 0 #4E0D18, 0 8px 12px rgba(0, 0, 0, 0.35); }
+.tile.milestone.current { box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.35), 0 0 0 3px var(--level-current), 0 5px 0 #4E0D18, 0 0 18px rgba(255, 176, 46, 0.6); }
+.tile .skull {
+  position: absolute;
+  top: calc(-7 * var(--u));
+  right: calc(-7 * var(--u));
+  display: grid;
+  place-items: center;
+  width: calc(26 * var(--u));
+  height: calc(26 * var(--u));
+  border-radius: 50%;
+  background: radial-gradient(circle at 40% 35%, #FF7180, var(--danger) 60%, var(--danger-lo));
+  box-shadow: 0 0 0 2px var(--outline), 0 3px 4px rgba(0, 0, 0, 0.5);
+  font-size: 0;                              /* UI-19: CSS-drawn skull like the HUD's (the ☠ glyph needed a fallback font) */
+}
+.tile .skull::before {                       /* cranium with eye sockets */
+  content: "";
+  position: absolute;
+  left: 21%;
+  right: 21%;
+  top: 17%;
+  height: 50%;
+  border-radius: 50% 50% 42% 42%;
+  background:
+    radial-gradient(circle at 31% 58%, #6B0F1C 0 19%, rgba(107, 15, 28, 0) 21%),
+    radial-gradient(circle at 69% 58%, #6B0F1C 0 19%, rgba(107, 15, 28, 0) 21%),
+    #FFFFFF;
+}
+.tile .skull::after {                        /* jaw with teeth */
+  content: "";
+  position: absolute;
+  left: 33%;
+  right: 33%;
+  top: 64%;
+  height: 17%;
+  border-radius: 0 0 2px 2px;
+  background: repeating-linear-gradient(90deg, #FFFFFF 0 2px, #6B0F1C 2px 3px);
+}
+.tile.locked {
+  background: var(--level-locked);
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.45), inset 0 0 0 2px rgba(255, 255, 255, 0.04);
+  cursor: default;
+  animation: none;
+}
+.tile.locked .tile-num { color: #5B6478; text-shadow: none; font-size: calc(24px * var(--ui) * var(--text-scale)); }
+.tile.locked .skull { filter: grayscale(1) brightness(0.7); }
+.tile.locked::before, .tile.locked::after {  /* padlock */
+  content: "";
+  position: absolute;
+  left: 50%;
+}
+.tile.locked::before {
+  bottom: calc(18 * var(--u));
+  width: calc(12 * var(--u));
+  height: calc(10 * var(--u));
+  margin-left: calc(-6 * var(--u));
+  border: 2.5px solid #5B6478;
+  border-bottom: 0;
+  border-radius: calc(6 * var(--u)) calc(6 * var(--u)) 0 0;
+}
+.tile.locked::after {
+  bottom: calc(9 * var(--u));
+  width: calc(18 * var(--u));
+  height: calc(11 * var(--u));
+  margin-left: calc(-9 * var(--u));
+  border-radius: calc(3 * var(--u));
+  background: #5B6478;
+}
+.tile.locked .tile-stars { display: none; }
+.tile.locked .tile-num { margin-bottom: calc(18 * var(--u)); }
+.tile.endless {
+  grid-column: 1 / -1;
+  width: 100%;
+  height: calc(64 * var(--u));
+  flex-direction: row;
+  gap: calc(14 * var(--u));
+  background: linear-gradient(180deg, #A47BFF 0%, #7B4EF0 55%, #6236D0 100%);
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.3), inset 0 0 0 2px rgba(255, 255, 255, 0.06), 0 5px 0 #34197A, 0 8px 12px rgba(0, 0, 0, 0.35);
+}
+.tile.endless .tile-num { font-size: calc(26px * var(--ui) * var(--text-scale)); letter-spacing: 0.06em; }
+.tile.endless .tile-stars { font-size: var(--fs-small); color: #FFF2C2; letter-spacing: 0.02em; }
+.tile.endless.locked { background: var(--level-locked); box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.45); }
+.tile.endless.locked .tile-num { margin-bottom: 0; margin-left: calc(28 * var(--u)); }
+.tile.endless.locked::before { left: calc(24 * var(--u)); bottom: auto; top: calc(19 * var(--u)); margin-left: 0; }
+.tile.endless.locked::after { left: calc(21 * var(--u)); bottom: auto; top: calc(28 * var(--u)); margin-left: 0; }
+
+/* shop: coin header, 5 cards 358 × 96 */
+#shop-coins { flex: none; min-width: calc(110 * var(--u)); height: max(36px, calc(42 * var(--u))); font-size: var(--fs-h3); padding-right: calc(18 * var(--u)); }
+#shop-coins .coin-icon { width: calc(30 * var(--u)); height: calc(30 * var(--u)); }
+#shop-list {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(10 * var(--u));
+  padding: calc(8 * var(--u)) calc(8 * var(--u)) calc(18 * var(--u));   /* 390 − 2 × 8 safe − 2 × 8 = 358 px cards */
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 10px, #000 calc(100% - 18px), transparent 100%);
+  mask-image: linear-gradient(180deg, transparent 0, #000 10px, #000 calc(100% - 18px), transparent 100%);
+}
+.card {
+  flex: none;
+  display: grid;
+  grid-template-columns: calc(64 * var(--u)) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: calc(12 * var(--u));
+  width: min(calc(358 * var(--u)), 100%);
+  min-height: calc(96 * var(--u));
+  padding: calc(10 * var(--u)) calc(12 * var(--u));
+  border-radius: var(--radius);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.07) 0%, rgba(255, 255, 255, 0) 40%),
+    linear-gradient(180deg, rgba(30, 43, 72, 0.94), rgba(15, 22, 38, 0.94));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 0 0 1.5px rgba(255, 255, 255, 0.07),
+    0 4px 0 rgba(4, 7, 14, 0.75),
+    0 8px 16px rgba(0, 0, 0, 0.35);
+  text-align: left;
+}
+.card.maxed { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), inset 0 0 0 2px rgba(59, 229, 122, 0.55), 0 4px 0 rgba(4, 7, 14, 0.75), 0 8px 16px rgba(0, 0, 0, 0.35); }
+.card-icon {
+  position: relative;
+  display: block;
+  width: calc(64 * var(--u));
+  height: calc(64 * var(--u));
+  border-radius: calc(14 * var(--u));
+  background-color: rgba(255, 255, 255, 0.06);
+  background-image: radial-gradient(circle at 50% 35%, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0) 70%);
+  background-size: 82%;
+  background-repeat: no-repeat;
+  background-position: center;
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.08), inset 0 -4px 8px rgba(0, 0, 0, 0.3);
+}
+.card-body { display: flex; flex-direction: column; gap: calc(4 * var(--u)); min-width: 0; }
+.card-name {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: calc(20px * var(--ui) * var(--text-scale));
+  line-height: 1.05;
+  letter-spacing: 0.02em;
+  color: var(--text);
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pips { display: flex; gap: calc(3 * var(--u)); padding: calc(2 * var(--u)) 0; }
+.pips > i {
+  display: block;
+  flex: 1 1 0;
+  max-width: calc(14 * var(--u));
+  height: calc(9 * var(--u));
+  border-radius: calc(3 * var(--u));
+  background: rgba(255, 255, 255, 0.12);                 /* empty pip: visible track on the #29334D card */
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22), inset 0 1px 2px rgba(0, 0, 0, 0.5);
+  transform: skewX(-14deg);
+}
+.pips > i.on {
+  background: linear-gradient(180deg, #FFDB80, var(--primary) 60%, var(--primary-lo));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5), 0 0 6px rgba(255, 176, 46, 0.55);
+}
+.card.maxed .pips > i.on { background: linear-gradient(180deg, var(--success-hi), var(--success) 60%, var(--success-lo)); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5), 0 0 6px rgba(59, 229, 122, 0.5); }
+.card-effect {
+  font-family: var(--font-body);
+  font-weight: 800;
+  font-size: var(--fs-readout);              /* UI-27: decision info, ≥ 12 css px */
+  line-height: 1.2;
+  color: var(--text-muted);
+}
+.card-estimate {
+  font-family: var(--font-body);
+  font-weight: 800;
+  font-size: var(--fs-micro);
+  line-height: 1.1;
+  color: var(--secondary-hi);
+}
+.card-estimate:empty { display: none; }
+.btn.buy {
+  --depth: calc(4 * var(--u));
+  width: calc(104 * var(--u));
+  height: max(44px, calc(44 * var(--u)));
+  min-height: 44px;
+  padding: 0 calc(8 * var(--u));
+  gap: calc(5 * var(--u));
+  border-radius: calc(13 * var(--u));
+  font-size: calc(20px * var(--ui) * var(--text-scale));
+}
+.btn.buy::after { content: ""; position: absolute; inset: -4px; }   /* ≥ 48 px hit area */
+.btn.buy .coin-icon { width: calc(20 * var(--u)); height: calc(20 * var(--u)); }
+.btn.buy .price { font-variant-numeric: tabular-nums; }
+.btn.buy.cant { filter: grayscale(0.9) brightness(0.72); }
+.btn.buy.max {
+  --edge: var(--success-border);
+  --face: linear-gradient(180deg, var(--success-hi) 0%, var(--success) 55%, var(--success-lo) 100%);
+  color: #052611;
+  cursor: default;
+}
+.btn.buy.max .coin-icon { display: none; }
+
+/* =============================================================================================
+   12. Overlays: settings, pause, context-loss message
+   ============================================================================================= */
+
+.screen.overlay { background: var(--dim); }
+html.blur #scr-pause, html.blur #scr-settings {     /* High tier only (ui toggles html.blur) */
+  -webkit-backdrop-filter: blur(var(--pause-blur));
+  backdrop-filter: blur(var(--pause-blur));
+}
+
+/* pause panel 330 × 380 */
+#scr-pause .panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: calc(14 * var(--u));
+  width: min(calc(330 * var(--u)), calc(100% - 16px));
+  min-height: min(calc(380 * var(--u)), calc(100% - 16px));
+  padding: calc(22 * var(--u)) calc(20 * var(--u)) calc(26 * var(--u));
+}
+#scr-pause h1 { margin-bottom: calc(6 * var(--u)); }
+
+/* settings: rows 56 px; centred when it fits, scrolls when it does not */
+#scr-settings {
+  justify-content: flex-start;
+  gap: calc(8 * var(--u));
+  overflow-y: auto;
+  padding-top: calc(var(--safe-top) + 12 * var(--u));
+  padding-bottom: calc(var(--safe-bottom) + 18 * var(--u));
+  background:
+    radial-gradient(120% 60% at 50% 0%, rgba(46, 155, 255, 0.14), rgba(46, 155, 255, 0) 60%),
+    rgba(8, 12, 22, 0.86);
+}
+#scr-settings > :first-child { margin-top: auto; }
+#scr-settings > :last-child { margin-bottom: auto; }
+#scr-settings > h1 { margin-bottom: calc(6 * var(--u)); flex: none; }
+#scr-settings > .row {
+  flex: none;
+  justify-content: space-between;
+  gap: calc(12 * var(--u));
+  width: min(calc(358 * var(--u)), 100%);
+  min-height: max(52px, calc(56 * var(--u)));
+  padding: 0 calc(10 * var(--u)) 0 calc(16 * var(--u));   /* 48 px controls fill the 56 px row */
+  border-radius: calc(14 * var(--u));
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06) 0%, rgba(255, 255, 255, 0) 50%),
+    var(--bg-panel);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), inset 0 0 0 1.5px rgba(255, 255, 255, 0.06), 0 3px 0 rgba(4, 7, 14, 0.6);
+  font-family: var(--font-body);
+  font-weight: 800;
+  font-size: var(--fs-body);
+  line-height: 1.15;
+  text-align: left;
+  color: var(--text);
+  cursor: default;
+}
+#scr-settings > .btn { flex: none; margin-top: calc(6 * var(--u)); }
+/* UI-33 / UI-20: RESET SAVE is destructive, so it is visually secondary — a text-style danger button 24 px below
+   BACK (≥ 48 px hit area); armed ("TAP AGAIN TO CONFIRM") it becomes an outlined danger pill */
+#scr-settings > #btn-reset-save {
+  --depth: 0px;
+  width: auto;
+  height: auto;
+  min-height: 48px;
+  margin-top: calc(24 * var(--u));
+  padding: 0 calc(16 * var(--u));
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--danger-hi);
+  font-family: var(--font-body);
+  font-weight: 800;
+  font-size: var(--fs-small);
+  letter-spacing: 0.08em;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6);
+}
+#scr-settings > #btn-reset-save::before { display: none; }
+#scr-settings > #btn-reset-save:active { transform: translateY(1px); box-shadow: none; }
+#scr-settings > #btn-reset-save.confirm {
+  color: #FFFFFF;
+  text-decoration: none;
+  background: rgba(255, 59, 78, 0.22);
+  box-shadow: inset 0 0 0 2px var(--danger);
+}
+
+/* range slider: chunky 28 px pill with a blue fill (UI-33: one "on" colour, --secondary, for sliders, toggles and
+   segmented controls) inside a 48 px-tall hit area (GDD §14 ≥ 48 × 48).
+   webkit: the track gradient fills up to the thumb centre from --f (0..1, written by ui on input / sync);
+   firefox: ::-moz-range-progress */
+input[type="range"] {
+  --f: 0.5;
+  --thumb: calc(28 * var(--u));
+  -webkit-appearance: none;
+  appearance: none;
+  flex: none;
+  width: calc(156 * var(--u));
+  height: max(48px, calc(48 * var(--u)));
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  accent-color: var(--secondary);
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  -webkit-appearance: none;
+  height: var(--thumb);
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg,
+    var(--secondary) 0, var(--secondary) calc(var(--thumb) / 2 + (100% - var(--thumb)) * var(--f)),
+    #1A2236 calc(var(--thumb) / 2 + (100% - var(--thumb)) * var(--f)));
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.6), 0 0 0 2px rgba(255, 255, 255, 0.07);
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: var(--thumb);
+  height: var(--thumb);
+  border-radius: 50%;
+  border: 3px solid #FFFFFF;
+  background: radial-gradient(circle at 40% 35%, #FFFFFF 0 18%, #CFE6FF 40%, var(--secondary) 100%);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+}
+input[type="range"]::-moz-range-track {
+  height: calc(28 * var(--u));
+  border: 0;
+  border-radius: 999px;
+  background: #1A2236;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.6), 0 0 0 2px rgba(255, 255, 255, 0.07);
+}
+input[type="range"]::-moz-range-progress { height: calc(28 * var(--u)); border-radius: 999px; background: linear-gradient(180deg, var(--secondary-hi), var(--secondary) 60%, var(--secondary-lo)); }
+input[type="range"]::-moz-range-thumb {
+  width: calc(22 * var(--u));
+  height: calc(22 * var(--u));
+  border-radius: 50%;
+  border: 3px solid #FFFFFF;
+  background: radial-gradient(circle at 40% 35%, #FFFFFF 0 18%, #CFE6FF 40%, var(--secondary) 100%);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+  cursor: pointer;
+}
+
+/* toggle switch */
+input[type="checkbox"].toggle {
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  flex: none;
+  width: calc(60 * var(--u));
+  height: calc(34 * var(--u));
+  margin: 0;
+  border-radius: 999px;
+  background: #2A3142;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.6), 0 0 0 2px rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) ease-out, box-shadow var(--dur-fast) ease-out;
+}
+input[type="checkbox"].toggle::before {
+  content: "";
+  position: absolute;
+  top: calc(3 * var(--u));
+  left: calc(3 * var(--u));
+  width: calc(28 * var(--u));
+  height: calc(28 * var(--u));
+  border-radius: 50%;
+  background: linear-gradient(180deg, #FFFFFF, #D7DFEB);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.5), inset 0 -2px 0 rgba(0, 0, 0, 0.08);
+  transition: transform var(--dur-med) var(--ease-pop);
+}
+input[type="checkbox"].toggle:checked {
+  background: linear-gradient(180deg, var(--secondary-hi), var(--secondary) 60%, var(--secondary-lo));
+  box-shadow: inset 0 2px 3px rgba(0, 0, 0, 0.25), 0 0 0 2px rgba(255, 255, 255, 0.08), 0 0 12px rgba(46, 155, 255, 0.4);
+}
+input[type="checkbox"].toggle:checked::before { transform: translateX(calc(26 * var(--u))); }
+
+/* segmented controls (ui fills buttons from data-options; .on / aria-pressed marks the choice) */
+.seg {
+  display: inline-flex;
+  flex: none;
+  gap: calc(2 * var(--u));
+  padding: calc(2 * var(--u));
+  border-radius: calc(12 * var(--u));
+  background: #141B2C;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.55), 0 0 0 2px rgba(255, 255, 255, 0.06);
+}
+.seg > button {
+  min-width: max(48px, calc(48 * var(--u)));             /* GDD §14 hit areas ≥ 48 × 48 */
+  min-height: max(48px, calc(48 * var(--u)));
+  padding: 0 calc(9 * var(--u));
+  border-radius: calc(9 * var(--u));
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: calc(16px * var(--ui) * var(--text-scale));
+  letter-spacing: 0.02em;
+  line-height: 1;
+  transition: background-color var(--dur-fast), color var(--dur-fast), transform var(--dur-press);
+}
+.seg > button:active { transform: translateY(1px); }
+.seg > button.on, .seg > button[aria-pressed="true"] {
+  background: linear-gradient(180deg, var(--secondary-hi), var(--secondary) 60%, var(--secondary-lo));
+  color: var(--secondary-text);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45), 0 2px 0 var(--secondary-border);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+/* context-loss / blocking message */
+#overlay-msg { background: rgba(8, 12, 22, 0.82); }
+#overlay-text {
+  display: flex;
+  align-items: center;
+  gap: calc(14 * var(--u));
+  max-width: min(calc(340 * var(--u)), calc(100% - 32px));
+  padding: calc(20 * var(--u)) calc(26 * var(--u));
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: var(--fs-h3);
+  line-height: 1.15;
+  letter-spacing: 0.02em;
+  color: var(--text);
+  text-align: left;
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.6);
+}
+#overlay-text::before {
+  content: "";
+  flex: none;
+  width: calc(26 * var(--u));
+  height: calc(26 * var(--u));
+  border-radius: 50%;
+  border: 4px solid rgba(255, 255, 255, 0.16);
+  border-top-color: var(--primary);
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* =============================================================================================
+   13. Results: level complete, game over, endless run over
+   ============================================================================================= */
+
+#scr-complete, #scr-gameover, #scr-endless {
+  gap: calc(12 * var(--u));
+  isolation: isolate;
+}
+#scr-complete {
+  background:
+    radial-gradient(90% 55% at 50% 30%, rgba(255, 176, 46, 0.22), rgba(255, 176, 46, 0) 70%),
+    linear-gradient(180deg, rgba(8, 12, 22, 0.72), rgba(8, 12, 22, 0.9));
+}
+/* slow sunburst behind the stars. UI-19: ui draws the rays + radial fade once into a bitmap at boot (--rays); the
+   layer is promoted and only rotated, so it never re-rasters (the masked repeating-conic-gradient cost a 255 ms
+   GPU raster flush on the first results screen). Fallback before the bitmap exists: a plain soft glow. */
+#scr-complete::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 34%;
+  width: calc(620 * var(--u));
+  height: calc(620 * var(--u));
+  margin: calc(-310 * var(--u)) 0 0 calc(-310 * var(--u));
+  z-index: -1;
+  pointer-events: none;
+  background-image: var(--rays, radial-gradient(closest-side, rgba(255, 210, 63, 0.1), rgba(255, 210, 63, 0)));
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+  animation: rays 30s linear infinite;
+  will-change: transform;
+}
+@keyframes rays { to { transform: rotate(360deg); } }
+
+/* UI-19: one text-shadow stack (outline + extrude), no filters (six stacked drop-shadows + background-clip text
+   rastered slowly on first show) */
+#complete-title {
+  font-size: var(--fs-h1);
+  color: var(--coin);
+  text-shadow: var(--stroke-3), 0 5px 0 #2A1404, 0 8px 0 rgba(0, 0, 0, 0.28);
+}
+
+/* stars: 72 px (the ★/☆ glyph text ui writes is hidden; .on = earned; ui slams them in). UI-19: each star is ONE
+   bitmap (ui draws --star-empty / --star-on once at boot; the SVG is only the fallback), no clip-path — the two
+   clip-path pseudo-elements per star cost a 75–100 ms GPU raster flush on the first results screen (vector SVG still
+   ≈ 40 ms); the earned glow is a radial gradient under the star */
+#stars {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: calc(8 * var(--u));
+  height: calc(104 * var(--u));
+  padding-bottom: calc(4 * var(--u));
+}
+#stars > i {
+  position: relative;
+  display: block;
+  flex: none;
+  width: calc(72 * var(--u));
+  height: calc(72 * var(--u));
+  font-size: 0;
+  font-style: normal;
+  color: transparent;
+  background: var(--star-empty, url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3ClinearGradient id='e' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%233B4560'/%3E%3Cstop offset='1' stop-color='%23232A3C'/%3E%3C/linearGradient%3E%3Cpolygon points='50,2 62.5,34 97,36 70,58 79.5,93 50,73.5 20.5,93 30,58 3,36 37.5,34' fill='%230B0F1A'/%3E%3Cpolygon points='50,2 62.5,34 97,36 70,58 79.5,93 50,73.5 20.5,93 30,58 3,36 37.5,34' transform='translate(11 11) scale(.78)' fill='url(%23e)'/%3E%3C/svg%3E")) center / 100% 100% no-repeat;
+}
+#stars > i:nth-child(2) { width: calc(88 * var(--u)); height: calc(88 * var(--u)); margin-bottom: calc(14 * var(--u)); }
+#stars > i.on {
+  background:
+    var(--star-on, url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3ClinearGradient id='c' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%23FFF3B0'/%3E%3Cstop offset='.45' stop-color='%23FFD23F'/%3E%3Cstop offset='1' stop-color='%23FF9A1F'/%3E%3C/linearGradient%3E%3ClinearGradient id='w' x1='.2' y1='0' x2='.55' y2='.6'%3E%3Cstop offset='0' stop-color='%23fff' stop-opacity='.75'/%3E%3Cstop offset='.55' stop-color='%23fff' stop-opacity='0'/%3E%3C/linearGradient%3E%3Cpolygon points='50,2 62.5,34 97,36 70,58 79.5,93 50,73.5 20.5,93 30,58 3,36 37.5,34' fill='%230B0F1A'/%3E%3Cpolygon points='50,2 62.5,34 97,36 70,58 79.5,93 50,73.5 20.5,93 30,58 3,36 37.5,34' transform='translate(11 11) scale(.78)' fill='url(%23c)'/%3E%3Cpolygon points='50,2 62.5,34 97,36 70,58 79.5,93 50,73.5 20.5,93 30,58 3,36 37.5,34' transform='translate(11 11) scale(.78)' fill='url(%23w)'/%3E%3C/svg%3E")) center / 100% 100% no-repeat,
+    radial-gradient(closest-side, rgba(255, 210, 63, 0.55) 35%, rgba(255, 210, 63, 0) 100%);
+}
+
+#complete-coins {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  color: var(--coin);
+  font-variant-numeric: tabular-nums;
+}
+#complete-coins::before {
+  content: "";
+  flex: none;
+  width: 0.95em;
+  height: 0.95em;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 34% 30%, rgba(255, 255, 255, 0.95) 0 9%, rgba(255, 255, 255, 0) 16%),
+    radial-gradient(circle at 50% 50%, var(--coin) 0 44%, #E9A51E 46% 54%, var(--coin) 56% 66%, var(--coin-lo) 70% 100%);
+  box-shadow: 0 0 0 2px var(--outline), 0 3px 0 var(--outline);
+}
+#complete-coins:empty { display: none; }
+/* UI-30: reward chips in a 2-column grid (4 chips = 2 × 2; an odd last chip centres across both columns) — the
+   wrapping flex row broke 3 + 1 at 390 px */
+#complete-breakdown {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(2, auto);
+  justify-content: center;
+  justify-items: stretch;
+  gap: calc(6 * var(--u)) calc(8 * var(--u));
+  max-width: calc(340 * var(--u));
+}
+#complete-breakdown > li:last-child:nth-child(odd) { grid-column: 1 / -1; justify-self: center; }
+#complete-breakdown > li {
+  padding: calc(5 * var(--u)) calc(11 * var(--u));
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.08);
+  font-family: var(--font-body);
+  font-weight: 800;
+  font-size: var(--fs-small);
+  line-height: 1.1;
+  color: var(--text);
+  white-space: nowrap;
+  text-align: center;
+}
+#complete-breakdown > li.bd-boss { color: var(--coin); box-shadow: inset 0 0 0 1.5px rgba(255, 210, 63, 0.45); }   /* UI-30: a reward, not a penalty */
+#complete-breakdown > li.bd-bonus { color: #FFE9A8; box-shadow: inset 0 0 0 1.5px rgba(255, 210, 63, 0.35); }
+#complete-best:empty { display: none; }
+#btn-next { margin-top: calc(10 * var(--u)); }
+
+/* game over */
+#scr-gameover {
+  background:
+    radial-gradient(90% 55% at 50% 38%, rgba(255, 59, 78, 0.2), rgba(255, 59, 78, 0) 70%),
+    linear-gradient(180deg, rgba(8, 12, 22, 0.7), rgba(8, 12, 22, 0.9));
+}
+#scr-gameover h1 {
+  font-size: var(--fs-display);
+  color: var(--danger);
+  text-shadow: var(--stroke-3), 0 6px 0 var(--outline), 0 0 26px rgba(255, 59, 78, 0.55), 0 12px 20px rgba(0, 0, 0, 0.5);
+}
+/* round-3 polish (GDD §14 UI-33 "one spelling"): the failed level above SQUAD LOST, in the HUD label's type ("LEVEL 7") */
+#gameover-level {
+  margin-bottom: calc(-6 * var(--u));
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: var(--fs-h3);
+  line-height: 1;
+  letter-spacing: 0.08em;
+  color: var(--text);
+  text-shadow: var(--stroke-2), 0 3px 0 var(--outline);
+  white-space: nowrap;
+}
+#gameover-level:empty { display: none; }
+#scr-gameover.enter h1 { animation: slam 0.42s var(--ease-pop) both; }
+#gameover-info { font-size: var(--fs-body); margin-bottom: calc(12 * var(--u)); }
+@keyframes slam {
+  0% { opacity: 0; transform: scale(2.4); }
+  60% { opacity: 1; transform: scale(0.94); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+/* endless run over */
+#scr-endless {
+  background:
+    radial-gradient(90% 55% at 50% 35%, rgba(138, 92, 255, 0.22), rgba(138, 92, 255, 0) 70%),
+    linear-gradient(180deg, rgba(8, 12, 22, 0.72), rgba(8, 12, 22, 0.9));
+}
+#endless-stats {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(6 * var(--u));
+  width: min(calc(300 * var(--u)), calc(100% - 32px));
+  max-height: 46%;
+  overflow-y: auto;
+  padding: calc(16 * var(--u)) calc(20 * var(--u));
+  margin-bottom: calc(8 * var(--u));
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.07) 0%, rgba(255, 255, 255, 0) 38%), var(--bg-panel);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), inset 0 0 0 1.5px rgba(255, 255, 255, 0.07), 0 14px 34px rgba(0, 0, 0, 0.45);
+  font-size: var(--fs-body);
+  white-space: pre-line;
+}
+#endless-stats:empty { display: none; }
+#endless-stats > * { line-height: 1.25; color: var(--text); }
+#endless-stats .es-score {
+  order: -1;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: var(--fs-h2);
+  letter-spacing: 0.02em;
+  text-shadow: var(--stroke-2), 0 3px 0 var(--outline);
+}
+#endless-stats .new-best {
+  order: -2;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: var(--fs-h3);
+  letter-spacing: 0.06em;
+  color: var(--coin);
+  text-shadow: var(--stroke-2), 0 0 14px rgba(255, 210, 63, 0.7);
+  animation: new-best 0.9s ease-in-out infinite alternate;
+}
+#endless-stats .es-best { color: var(--text-muted); }
+#endless-stats .es-coins { color: var(--coin); }
+@keyframes new-best { from { transform: scale(1); } to { transform: scale(1.08); } }
+
+/* =============================================================================================
+   14. Error box (fatal: centred modal with RELOAD; .toast: non-fatal, above the thumb zone) and debug
+   ============================================================================================= */
+
+#error-box {
+  position: absolute;
+  z-index: 60;
+  inset: 0;
+  margin: auto;                              /* centred without a transform (panel-in animates transform) */
+  width: min(calc(340 * var(--u)), calc(100% - 32px));
+  height: -webkit-fit-content;
+  height: fit-content;
+  max-height: calc(100% - 32px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(14 * var(--u));
+  padding: calc(48 * var(--u)) calc(20 * var(--u)) calc(24 * var(--u));
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, rgba(255, 59, 78, 0.12) 0%, rgba(255, 59, 78, 0) 40%), rgba(15, 22, 38, 0.97);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 0 0 2px rgba(255, 59, 78, 0.6), 0 24px 60px rgba(0, 0, 0, 0.6),
+              0 0 0 100vmax rgba(8, 12, 22, 0.72);    /* fatal: dims everything behind the box */
+  text-align: center;
+  color: var(--text);
+  font-family: var(--font-body);
+  animation: panel-in 0.24s var(--ease-pop) both;
+}
+#error-box::before {                         /* "!" badge */
+  content: "!";
+  position: absolute;
+  top: calc(-22 * var(--u));
+  left: 50%;
+  width: calc(52 * var(--u));
+  height: calc(52 * var(--u));
+  margin-left: calc(-26 * var(--u));
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: radial-gradient(circle at 40% 35%, #FF7180, var(--danger) 60%, var(--danger-lo));
+  box-shadow: 0 0 0 3px var(--outline), 0 6px 14px rgba(0, 0, 0, 0.5);
+  font-family: var(--font-display);
+  font-size: calc(32px * var(--ui));
+  line-height: 1;
+  color: #FFFFFF;
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.4);
+}
+#error-text {
+  max-height: 40vh;
+  max-height: 40dvh;
+  overflow-y: auto;
+  font-weight: 800;
+  font-size: var(--fs-body);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  -webkit-user-select: text;
+  user-select: text;
+}
+#error-box.toast {
+  top: auto;
+  bottom: calc(var(--safe-bottom) + var(--thumb-zone));
+  margin: 0 auto;
+  flex-direction: row;
+  gap: calc(10 * var(--u));
+  padding: calc(12 * var(--u)) calc(16 * var(--u)) calc(12 * var(--u)) calc(12 * var(--u));
+  text-align: left;
+  pointer-events: none;                      /* a toast never blocks a drag */
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 0 0 2px rgba(255, 59, 78, 0.6), 0 14px 34px rgba(0, 0, 0, 0.5);
+}
+#error-box.toast::before {
+  position: static;
+  flex: none;
+  width: calc(30 * var(--u));
+  height: calc(30 * var(--u));
+  margin: 0;
+  font-size: calc(20px * var(--ui));
+  box-shadow: 0 0 0 2px var(--outline);
+}
+#error-box.toast #error-text { font-size: var(--fs-small); max-height: none; }
+
+#debug {
+  position: absolute;
+  z-index: 70;
+  top: calc(var(--safe-top) + var(--icon-btn) + 8px);
+  left: var(--safe-left);
+  max-width: calc(100% - var(--safe-left) - var(--safe-right));
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #B8FFC8;
+  font: 600 11px/1.3 var(--font-mono);
+  white-space: pre-wrap;                     /* UI-34: long rows wrap instead of clipping ("tris 2", "particl") */
+  overflow-wrap: anywhere;
+  overflow: hidden;
+  pointer-events: none;
+  text-shadow: 0 1px 0 #000000;
+}
+#debug.red { color: #FFC2C2; box-shadow: 0 0 0 2px var(--danger); }
+/* phones / short panes: dock the (non-interactive) debug overlay inside the bottom thumb zone so it never
+   hides the logo, coin pills, level tiles or the progress bar QA judges */
+@media (max-width: 600px), (max-height: 500px) {
+  #debug {
+    top: auto;
+    bottom: var(--safe-bottom);
+    max-width: calc(100% - var(--safe-left) - var(--safe-right));
+    max-height: calc(8 * 13px + 4px);        /* ≤ 8 lines: the 6 engine rows plus the wraps of the long ones */
+    padding: 4px 6px 0;
+    background: rgba(0, 0, 0, 0.6);
+    font-size: 10px;
+    line-height: 13px;
+    z-index: 0;                              /* under #hud (z 1): the bottom-anchored hint pill draws over it (UI-18) */
+  }
+  #debug.menu { display: none; }             /* menus / results keep their buttons in the thumb zone */
+}
+
+/* =============================================================================================
+   15. Accessibility: reduced motion, large text, coarse/short viewports
+   ============================================================================================= */
+
+html.reduced-motion *,
+html.reduced-motion *::before,
+html.reduced-motion *::after {
+  animation-duration: 0.001ms !important;
+  animation-delay: 0s !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0s !important;
+  transition-delay: 0s !important;
+  scroll-behavior: auto !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-delay: 0s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0s !important;
+    transition-delay: 0s !important;
+    scroll-behavior: auto !important;
+  }
+}
+/* static fallbacks for looping decorations that would otherwise freeze mid-cycle */
+html.reduced-motion #btn-play::after, html.reduced-motion #hint-hand::after, html.reduced-motion .tile.current::after { display: none; }
+@media (prefers-reduced-motion: reduce) {
+  #btn-play::after, #hint-hand::after, .tile.current::after { display: none; }
+}
+
+/* UI-19 boot prewarm: ui.prewarm() adds .prewarm to first-use surfaces behind #scr-boot (z 50) so their first layout /
+   paint / raster happens during boot — round 3: one surface per frame, each displayed for 3 frames, so no boot frame
+   lays out and rasters all of them at once. Their `hidden` attributes are untouched; these rules out-rank
+   `[hidden] { display: none !important }` by specificity. */
+.screen.prewarm[hidden] { display: flex !important; }
+#hud.prewarm[hidden], #bossbar.prewarm[hidden], #letterbox.prewarm[hidden], #letterbox-bottom.prewarm[hidden] { display: block !important; }
+#hint.prewarm[hidden], #namecard.prewarm[hidden], #district-banner.prewarm[hidden] { display: flex !important; }
+#shield.prewarm[hidden], #powerups > .pu.prewarm[hidden] { display: inline-flex !important; }
+.screen.prewarm { opacity: 0.01 !important; visibility: visible !important; pointer-events: none !important; }
+
+/* short viewports (landscape phones, small artifact panes): tighter title stack */
+@media (max-height: 640px) {
+  #scr-title { padding-top: calc(var(--safe-top) + 48 * var(--u)); gap: calc(8 * var(--u)); }
+  .logo-big { font-size: calc(70px * var(--ui) * var(--text-scale)); }
+  #scr-boot .logo { font-size: calc(52px * var(--ui) * var(--text-scale)); }
+  #stars { height: calc(90 * var(--u)); }
+  #stars > i { width: calc(60 * var(--u)); height: calc(60 * var(--u)); }
+  #stars > i:nth-child(2) { width: calc(72 * var(--u)); height: calc(72 * var(--u)); margin-bottom: calc(10 * var(--u)); }
+  #scr-pause .panel { min-height: 0; }
+}
+@media (max-height: 520px) {
+  .logo-big { width: auto; font-size: calc(56px * var(--ui) * var(--text-scale)); }
+  #scr-complete, #scr-gameover, #scr-endless { gap: calc(6 * var(--u)); }
+  #complete-breakdown { max-width: calc(520 * var(--u)); }
+}
+/* landscape phones (e.g. 844 × 390; --ui clamps at 0.85): use the width — shop cards in two columns with a
+   compact header, settings rows in two columns, so every card / row and BACK fit without scrolling */
+@media (orientation: landscape) and (max-height: 500px) {
+  #scr-shop {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    align-items: center;
+    justify-items: center;
+    row-gap: calc(6 * var(--u));
+    column-gap: calc(16 * var(--u));
+    padding-top: var(--safe-top);
+    padding-bottom: var(--safe-bottom);
+  }
+  #scr-shop > h1 { grid-column: 2; grid-row: 1; font-size: var(--fs-h2); padding-bottom: 2px; }
+  #shop-coins { grid-column: 3; grid-row: 1; justify-self: start; height: var(--pill-h); font-size: var(--fs-body); }
+  #shop-list {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    align-self: stretch;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, calc(358 * var(--u))));
+    justify-content: center;
+    align-content: start;
+    gap: calc(8 * var(--u)) calc(12 * var(--u));
+    padding: calc(4 * var(--u)) calc(8 * var(--u)) calc(8 * var(--u));
+  }
+  #shop-list .card {
+    width: 100%;
+    min-height: calc(76 * var(--u));
+    grid-template-columns: calc(48 * var(--u)) minmax(0, 1fr) auto;
+    gap: calc(10 * var(--u));
+    padding: calc(6 * var(--u)) calc(10 * var(--u));
+  }
+  #shop-list .card-icon { width: calc(48 * var(--u)); height: calc(48 * var(--u)); }
+  /* round-3 polish: the odd last card (5 upgrades) centres under the pair above instead of hanging in the left column */
+  #shop-list > .card:last-child:nth-child(odd) { grid-column: 1 / -1; justify-self: center; width: calc(50% - 6 * var(--u)); }
+  #scr-shop > .back { grid-column: 1 / -1; grid-row: 3; margin: 0; }
+
+  /* round-3 polish: the 330 × 380 pause panel was taller than the 390 px box and covered the HUD's top row — RESUME
+     spans the panel, RESTART / SETTINGS / QUIT share one row (≈ 215 px tall at --ui 0.85, centred under the HUD) */
+  #scr-pause .panel {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);       /* equal columns, as wide as the widest label (SETTINGS) */
+    justify-content: center;
+    justify-items: stretch;
+    align-items: center;
+    gap: calc(12 * var(--u));
+    width: auto;
+    min-height: 0;
+    padding: calc(16 * var(--u)) calc(22 * var(--u)) calc(22 * var(--u));
+  }
+  #scr-pause .panel > h1 { grid-column: 1 / -1; justify-self: center; margin-bottom: 0; }
+  #scr-pause .panel > .btn.primary { grid-column: 1 / -1; justify-self: center; }
+  #scr-pause .panel > .btn.secondary { width: auto; min-width: var(--w-narrow); padding: 0 calc(20 * var(--u)); }
+
+  #scr-settings {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, calc(358 * var(--u))));
+    justify-content: center;
+    align-content: center;
+    justify-items: stretch;
+    gap: calc(6 * var(--u)) calc(12 * var(--u));
+    padding-top: var(--safe-top);
+    padding-bottom: var(--safe-bottom);
+  }
+  #scr-settings > :first-child, #scr-settings > :last-child { margin-top: 0; margin-bottom: 0; }
+  #scr-settings > h1 { grid-column: 1 / -1; justify-self: center; font-size: var(--fs-h2); margin-bottom: 0; padding-bottom: 2px; }
+  #scr-settings > .row { width: 100%; }
+  #scr-settings > .btn { justify-self: center; margin-top: calc(4 * var(--u)); }
+  /* BACK and the text-style RESET SAVE share the last row (BACK left, RESET right), whatever the row count */
+  #scr-settings > .back { grid-column: 1; justify-self: end; }
+  #scr-settings > #btn-reset-save { grid-column: 2; justify-self: start; margin-top: calc(4 * var(--u)); }
+
+  /* UI-31: LEVELS uses the width — 8 columns (dense, so 11–16 fill the row beside 9–10 and ENDLESS) put ENDLESS in
+     the first screenful and leave a partial row under the fade, so the grid visibly scrolls */
+  #scr-levels { gap: calc(8 * var(--u)); padding-top: var(--safe-top); }
+  #scr-levels > h1 { font-size: var(--fs-h2); padding-bottom: 2px; }
+  #level-grid { grid-template-columns: repeat(8, calc(76 * var(--u))); grid-auto-flow: row dense; }
+
+  /* UI-26: the boss bar joins the top row (at hold z −12 the boss's head is at y ≈ 84 and its core ≈ 132; the
+     portrait position safe-top + 110 sat on its face): the level label + bar slide left beside the pause button, the
+     boss bar takes the right of the row up to the coin pill (name above, smaller), the power-up pills stack down
+     the left edge */
+  #hud.boss-on #progress { left: calc(var(--safe-left) + var(--icon-btn) + 12px); right: auto; margin: 0; }
+  #bossbar {
+    top: calc(var(--safe-top) + 4px + var(--fs-body) + 10 * var(--u));
+    left: auto;
+    right: calc(var(--safe-right) + 140 * var(--u));
+    margin: 0;
+    width: min(calc(280 * var(--u)), calc(50% - var(--safe-right) - 140 * var(--u) - 24px));
+  }
+  #bossbar #boss-name { font-size: var(--fs-body); padding-top: 0; padding-bottom: 2px; }
+  #boss-track { height: max(12px, calc(14 * var(--u))); }
+  #hud.boss-on #powerups { top: calc(var(--safe-top) + var(--icon-btn) + 12px); left: var(--safe-left); right: auto; margin: 0; flex-direction: column; }
+  /* round 5: the update pill takes the free bottom-left corner (the centred stack has no row to spare at 390 px tall) */
+  #btn-update { left: var(--safe-left); right: auto; margin: 0; }
+  #scr-title.has-update { padding-bottom: calc(var(--safe-bottom) + 30 * var(--u)); }
+  /* round 5: in a landscape phone the camera puts the road and its far gates in the top-centre band, so the district
+     banner sits top-left under the pause button (the left column is buildings), where it never meets a gate; the
+     centred power-up row cannot reach it, so .pu-on does not move it here */
+  #district-banner, #hud.pu-on #district-banner {
+    top: calc(var(--safe-top) + var(--icon-btn) + 12px);
+    left: var(--safe-left);
+    right: auto;
+    margin: 0;
+    max-width: calc(50% - var(--safe-left) - 100px);
+  }
+
+  #complete-breakdown { grid-template-columns: none; grid-auto-flow: column; }   /* one row in landscape */
+  #complete-breakdown > li:last-child:nth-child(odd) { grid-column: auto; }
+
+  /* HUD: an 844 px row has room for the LVL label + bar between the pause button and the coin pill, so they share
+     the top row (the column layout hung the bar over the horizon, where the camera's count framing puts the
+     gates at spawn — visual QA follow-up to VIS-3) */
+  #progress { flex-direction: row; gap: calc(12 * var(--u)); }
+}
+/* narrow phones (< 360 px): keep the 4-column grid and cards inside the gutters */
+@media (max-width: 359px) {
+  #level-grid { grid-template-columns: repeat(4, minmax(0, calc(76 * var(--u)))); gap: calc(8 * var(--u)); padding-left: 8px; padding-right: 8px; }
+  .tile { width: 100%; }
+  #scr-settings > .row { padding-left: calc(12 * var(--u)); }
+  input[type="range"] { width: calc(128 * var(--u)); }
+}
+/* forced colours (Windows high contrast): keep controls visible */
+@media (forced-colors: active) {
+  .btn, .icon-btn, .pill, .tile, .card, .seg > button, input[type="checkbox"].toggle { border: 2px solid ButtonText; }
+  .logo, #complete-title { -webkit-text-fill-color: CanvasText; background: none; filter: none; }
+}

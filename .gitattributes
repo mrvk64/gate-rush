@@ -1,0 +1,5 @@
+# Keep every text file LF in the working tree on every OS: tools/package.js stamps dist/sw.js with a
+# hash of the shipped bytes, so a CRLF checkout would change the build and trip the VERSION-bump rule.
+* text=auto eol=lf
+*.png binary
+*.zip binary

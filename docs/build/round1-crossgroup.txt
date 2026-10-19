@@ -1,0 +1,135 @@
+=== v2:e9daa2df2 len 3550
+
+needsOtherGroup:** none.
+
+=== v2:9c550043e len 5754
+
+needsOtherGroup**
+- **VIS-2 (js/render.js):** implement `render.warmup(): Promise<void>`; main.js and engine.js already call it when it exists. Pre-compiling only the scene from the boot camera, which is what my fallback does, leaves 30 programs that still link on the first title frame (1.5–2.8 s). The warm-up also needs to cover:
+  - the composer's post-processing passes,
+  - shadow-map depth materials,
+  - objects that are hidden or have zero instances at boot (fx particles, decals, gate variants),
+  - objects added at level start.
+
+  One approach: compile with every object temporarily visible, then do one full draw to a tiny offscreen target, all inside a promise that waits on parallel shader compilation.
+- **UI (js/ui.js), optional:** the debug panel cuts off long lines at the 390 px width (visible in the screenshots), and #overlay-msg is hidden a second time on resume. Both are cosmetic.
+
+=== v2:1a97171e9 len 7482
+
+needsOtherGroup:**
+- **characters (CHR-1):** the Hulk rig's vertex colours include large red panels, which is what keeps the phase-3 body looking red. Separately, the boss core light (`BOSSES.anim.lightIntensity` 40, not one of my keys) strongly lights the boss's own torso; consider lowering it.
+- **characters (CHR-1/CHR-5):** with the boss on High, main-pass draw calls peak at 54 (51 with twins); that needs part-mesh merging in `models.js`.
+- **perf/render:** there are 300–450 ms long frames right when the boss spawns. They shorten the intro walk-in, so the boss is 22–28 m away at `boss:fight`.
+- **weapons:** during the boss fight, a phase-3 brute in contact with the squad takes little damage because bullets keep aiming at the boss (p4: 4.7 s in contact, HP 331 → 111). Contact brutes should probably be prioritised over the boss.
+
+PARTIAL/NOT: **ENE-4 — partially fixed.** A brute touching the formation keeps holding its z but now moves toward the squad centre at `contactHoming` 3.5 m/s, and does not move while staggered (`zombies.js:1275`, `data.js:279`).
+
+=== v2:5afbefc18 len 6621
+
+needsOtherGroup
+- **Panel shader (VIS-9):** the hit-flash value now reaches the panel shader at 0.45 or less. The flip flash still sends 1.0, so the shader's flash path should keep the panel's colour visible at 1.0 as well.
+- **`fx.js`:** `HDR_WHITE` comes from `PALETTE.glyph.emissive`, so floaters and damage numbers are now at 1.2. This is intended per the issue; the count label's own gain is FX-1.
+- **New data keys (integrator):** `HIT_FLASH_CAP` (0.45) and `FLASH_ATTEN_HITS` (4) are local constants marked DATA-MISSING, because `GATE_RULES.fx.hitFlashCap` and `GATE_RULES.fx.flashAttenHits` weren't on my allowed key list.
+- **`gates.js` render allocation:** the profiler still attributes about 3.8 MB/min to `gates.js` `render` itself. This was already in the baseline (4.4 MB), predates these fixes and was outside this issue's scope.
+- **`docs/build/qa/perf/progchurn.mjs`:** its title wait reads `window.__game.state.current` without checking that `state` exists, so it now throws and times out during boot. I ran a guarded copy, `docs/build/qa/fix-gates/tools/progchurn-dbg.mjs`, and that copy produced the `progchurn.json` above. The QA/perf owner should patch the original.
+
+=== v2:946e8a991 len 7669
+
+needsOtherGroup). The full phone `--scenario all` run completes L1 CLEAN. Paths below are under the project root; QA output is in docs/build/qa/fix-ui/.
+
+**UI-1 (major): fixed.**
+- css/game.css:88 sets `--hint-y: 150`. css/game.css:902 sets `#hint { top: safe-top + hint-y·u }`, with the hand icon above the text.
+- data.js `JUICE.ui.hintY: 620 → 150`, with a comment noting this amends the GDD.
+- js/ui.js:1528 `_projectLabel()` projects `ctx.fx.label` through the camera matrices without allocating. js/ui.js:1561 `_placeHint()` measures the hint once per show or resize, rechecks at 10 Hz and moves the hint above the label if they would overlap (12 px margin).
+- While the boss bar is up, the hint sits at safe-top + 196 (css/game.css:914).
+- Evidence:
+  - ui/05-play-start.png shows "7" fully visible under "DRAG TO STEER".
+  - boss-hint and boss-pills logs: hint at 162–205 (208–275 during the boss) against the label at 430–614. Nothing overlaps the HUD, the pills or the boss bar.
+  - probe-landscape/04-hud-land.png is also clear.
+- In the l3 and boss runs no level-driven hint fired at all, because the generated levels did not emit one. I tested the crate, red, single and boss hints by firing `hint:show` directly (hintprobe.js).
+
+**UI-2: fixed.** js/ui.js:1722: for twins, the bar colour now follows the summed HP fraction (≤ 0.6 orange, ≤ 0.25 red); single bosses are unchanged. qa2 on fix-ui/twins: the class is empty down to 60 % fill, `phase2` from 55 %, `phase3` at 25 %.
+
+**UI-3: fixed.** js/ui.js:1884 splits stars into `.on` and `.off` spans, and a never-played current tile shows no stars. css/game.css:1228-1229 draws unearned stars in a dim colour with no glow. probe-levels/00-levels-progress.png shows 1, 2 and 3 stars clearly apart.
+
+**UI-4: fixed.** index.html:108-122 adds a watchdog to BOOTGUARD. After 20 s on the boot screen it shows "Still loading… check your connection" with RELOAD, and hides that message again if boot finishes later. A one-off test (kbstall.mjs) that stalls js/main.js shows no box at 10 s and the box with RELOAD at 21 s. The normal boot run is CLEAN.
+
+**UI-5: fixed.**
+- js/ui.js:1406-1413 and the progress block: in endless, `#progress` gets class `endless` and the label shows live metres ("1 164 m").
+- The skull shows only when the current chunk number, worked out from `level:progress` length ÷ 300, is a multiple of 5 (the same rule levelgen uses).
+- The endless run shows no skull on chunks 1–2; endless5 shows it from 1 215 m.
+
+**UI-6: fixed.**
+- Segment buttons are at least 48×48 and row padding moved inside the 56 px row (css/game.css:1586).
+- Sliders are 48 px tall with a 28 px track centred inside (css/game.css:1496). The fill comes from a `--f` variable that js/ui.js:2045 `_sliderFill` sets, replacing the clipped thumb-shadow trick.
+- probe-hit: Quality 53/48/50/50 × 48, sensitivity 50/48/48 × 48, sliders 156×48.
+
+**UI-7: fixed.** index.html:13 now points at icons/icon-maskable-192.png (corner alpha 255; it is already in the PRECACHE list). The test confirms the link target and shows no failed requests.
+
+**UI-8: fixed.** sw.js:179 `networkFirst` (3 s timeout, falls back to the cache, refreshes the cache on success) now serves navigations and `.html/.js/.mjs/.css/.webmanifest` and directory URLs. Icons stay cache-first and the CDN handling is unchanged. VERSION moves to v2. The test shows the worker registered, activated and controlling the page after reload; boot is CLEAN.
+
+**UI-9: fixed.**
+- js/ui.js:1596 `_pla
+
+=== v2:b7c96a177 len 6436
+
+needsOtherGroup**
+- **Boss (boss.js):** the Queen's sacs are in the rig's glow material (`userData.rig.glowMaterial`, torso mesh `glow0`) but nothing pulses them yet. GDD §7 asks for "pulsing sacs".
+- **Data:** `TROOPS.sniper.crateH` 0.5 → 1.0 would replace the pallet I added in models.js.
+- **Docs:**
+  - GDD §8.3: flamer range is now 13 m (it still says 7).
+  - ARCHITECTURE §6.4: new public method `models.setGearGlow(magnet01, armor01)` and the piece tags in the fraction of `aPart`.
+  - ARCHITECTURE §6.5: squad now listens to gear:start, gear:end, armor:change and level:start (it says it listens to nothing).
+  - Troop children: the APC now has one `wheels` mesh instead of `wheelFL`…`wheelRR`, and the drone has `discs` instead of `rotor`.
+- **UI (ui.js):** the squad icon reads `PALETTE.soldier.uniform` and `helmet`, so it will look brighter.
+- **Artifact build:** artifact.html needs rebuilding with `tools/build-artifact.js` if it bundles js/.
+
+Screenshots, logs and reports for all runs are under docs/build/qa/fix-characters/.
+
+=== v2:0dbb8e47e len 6563
+
+needsOtherGroup**
+- **zombies, gates, pickups, boss (to close WPN-5):** add a query that reads its segment from a shared typed array, e.g. `hitTestSeg(seg, radius, out)`, alongside the existing `hitTestSegment`. That removes the last boxing. Pickups would also benefit from a cheap public count of closed crates, so weapons can skip that query.
+- **ui/fx (count label):** the 3D squad-count label should have a dark outline or draw after the additive weapon meshes, so it stays readable when beams or flashes cross it.
+- **Docs:** GDD §15 laser colour magenta → cyan; ARCH §6.11 muzzle flash 60 ms → 33 ms; ARCH §7 fixed rocket/rail gate hits 8/10 → weighted 8·w/10·w; note the laser's 10·w/s applies per beam.
+
+Everything is in docs/build/qa/fix-weapons/. The code changes are in js/weapons.js and js/data.js.
+
+=== v2:0399fb7d1 len 8055
+
+needsOtherGroup**
+- **ui:** the HUD coin count-up still runs on `coins:change` (0.3 s), not on fx arrivals. Syncing it needs a hook such as `ui.coinArrived(n)` that fx calls when a flight lands.
+- **fxmaterials (fx engineer):** set `forceSinglePass = true` on the particle and decal materials where they're built; fx currently sets it on the cached instances. A normal-blend scorch decal kind would let the scorch move into the shared decal pool.
+- **AUD-3 (audio):** use the same pass classification for the pass sound (`fx._passKind`, contract above).
+- **models / zombies / boss:** these instanced meshes are visible while empty: `characters.runner`, `crawler`, `brute`, `spitter`, `zombies.hpBars`, `zombies.globs`, `boss.globs`. They should hide when their count is 0.
+- **perf QA:** `docs/build/qa/perf/evalprobe.mjs` and `progchurn.mjs` fail to boot now. Their title-wait check reads `__game.state.current` before `state` exists and throws. Fixed copies are in `docs/build/qa/fix-fx/`.
+- **GAT-1:** gate glyphs still bloom noticeably on High.
+- **WPN-3:** rockets mostly detonate on gate panels, which hides the scorch.
+
+Everything is in `docs/build/qa/fix-fx/` (label, label082, shards-freeze, numbers, loss, loss-freeze, neutral-freeze, rocket, rocket-low, rocket-freeze, scorch-test, perf-l9, progchurn.json). The scripts in the same folder are freezeshot.mjs, emptyvis.js, coins.js, coins2.js and scorch.js.
+
+=== v2:7af4700cf len 7655
+
+needsOtherGroup**
+- **docs:** GDD §4.2/§4.4 (step costs, design line at 0.75·H with full-intake ceilings, cautious line demoted to a report), §10.1 (rubber band "one shootable to x1", plus the >4·E lock) and §6.3 (per-type windows, shielding, coverage).
+- **ui:** the HUD distance keeps counting after death; it showed 42 m while the results showed 36 m.
+- **design (`GATE_RULES.plus`):** the +A cap of 4·base is what lets a full-intake player run away. It is why the validator ceiling forces mostly flip-gates, rare x lanes and no triples after L7. Revisit the cap if variety matters more.
+- **boss/weapons (seen once, not reproduced):** in an early L4 run the squad arrived with 93, firing showed 0 bullets from 88 s while the Hulk sat at 606 HP in phase 3, and the squad was lost. Later L4 runs won.
+
+Everything is in `<project>/`:
+- `js/levelgen.js`
+- `js/level.js`
+- `tools/validate-levels.js`
+- `js/data.js` (keys listed above only)
+- smoke evidence in `docs/build/qa/fix-level/`: `l4`, `l10`, `l10div`, `l7`, `p2c`, `p3d`, `p4c`, `endless`, `endless-die`, `boss10`, `replay`, `coinmult`, `l1`
+
+=== v2:97bfbd04e len 7646
+
+needsOtherGroup
+- **GAT-1:** send the flip flash as a value above 1 (up to 1.5) if a white flash is wanted on flips. The hit flash should stay at 1 or below.
+- **QA tools:** `docs/build/qa/perf/progchurn.mjs` now times out at boot because `window.__game` exists before `.state` does.
+- **QA tools:** `tools/smoke.js` `frames.worst` includes its own screenshot stall (about 250 ms), so it should exclude frames around screenshots.
+- **CORE / level:** the 118–125 ms level-start frame has no shader compile in it.
+- **UI (probably DOM work):** the 62–69 ms frames at boss intro and weapon pickup have no program changes.
+- **Models:** in a session that booted on Low and then raised the tier, `charDepth.walker` still links on the first shadow frame (about 37 ms).
+- **UI:** on an 844×390 phone with 200 soldiers, gates at spawn sit under the HUD progress bar.

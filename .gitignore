@@ -1,0 +1,11 @@
+# dependencies (reinstall with: npm ci)
+node_modules/
+
+# the zip is rebuilt from dist/ (dist/ itself is tracked: tools/package.js compares each
+# build against the last shipped dist/ to enforce the service-worker VERSION bump)
+gate-rush-dist.zip
+
+# local tool output and OS clutter
+*.log
+.DS_Store
+Thumbs.db
