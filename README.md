@@ -27,17 +27,22 @@ Drag anywhere on the screen to steer, left or right. Your squad fires on its own
 
 ## Play it on your phone
 
-**Option 1: the claude.ai link.** Open https://claude.ai/artifact/BCGzG6hs8jdLmkwtF12nnu on your phone while signed in to claude.ai. That is the fastest way to play. The link is private until you share it from the page's Share menu.
+**Option 1: install it as an app (recommended).** The game is live at **https://mrvk64.github.io/gate-rush/**. Open that address on your phone, then add it to your home screen:
 
-**Option 2: install it as an app (recommended).** Put the `dist/` folder (or the contents of `gate-rush-dist.zip`) on any free HTTPS static host, then add it to your home screen:
-
-1. Build the folder: `node tools/package.js --check`. This writes `dist/`. `gate-rush-dist.zip` is a ready-made copy.
-2. Host it. The simplest way is Netlify Drop: open app.netlify.com/drop in a desktop browser and drag the `dist` folder onto the page. GitHub Pages and Cloudflare Pages also work.
-3. Open the site on your phone.
-   - **iPhone (Safari):** tap Share, then **Add to Home Screen**.
-   - **Android (Chrome):** tap the menu, then **Install app** or **Add to Home screen**.
+- **iPhone (Safari):** tap Share, then **Add to Home Screen**.
+- **Android (Chrome):** tap the menu, then **Install app** or **Add to Home screen**.
 
 The installed app opens full screen in portrait, keeps your saves, and works offline after the first launch.
+
+**Option 2: the claude.ai link.** Open https://claude.ai/artifact/BCGzG6hs8jdLmkwtF12nnu while signed in to claude.ai. The link is private until you share it from the page's Share menu.
+
+**Releasing an update.** The site is GitHub Pages, deployed by `.github/workflows/pages.yml` from the `dist/` folder on every push to `main`:
+
+1. Make the change, then run the checks: `node tools/smoke.js --scenario all` and `node tools/validate-levels.js`.
+2. Bump `VERSION` in `sw.js` (and the version in `js/main.js` and `package.json`), then run `node tools/package.js --check`. The packager refuses a changed build under an unchanged `VERSION`, so installed phones always pick up the update.
+3. Commit, including `dist/`, and push. The site updates about a minute later; installed apps show an "Update ready" pill and switch on the next launch.
+
+The `dist/` folder also works on any other HTTPS static host, such as Netlify or Cloudflare Pages.
 
 **Option 3: your own Wi-Fi.** On your computer, run `node tools/serve.js 8787` in this folder. Then open `http://<your-computer's-IP>:8787` on a phone on the same Wi-Fi. This plays fine but cannot be installed, because installing needs HTTPS.
 
