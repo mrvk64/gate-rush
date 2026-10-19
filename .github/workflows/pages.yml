@@ -1,0 +1,43 @@
+# Deploys dist/ (the installable web app) to GitHub Pages on every push to main.
+# One-time setup on github.com: repository Settings -> Pages -> Build and deployment -> Source: "GitHub Actions".
+# Release rule: run `node tools/package.js --check` and commit dist/ before pushing (dist/ is what gets served).
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths: ['dist/**', '.github/workflows/pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/configure-pages@v6
+      - name: Check the build is complete
+        run: |
+          test -f dist/index.html && test -f dist/sw.js && test -f dist/manifest.webmanifest
+          test "$(ls dist/js/*.js | wc -l)" -ge 22
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: dist/
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
