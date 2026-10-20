@@ -458,6 +458,7 @@ export class LevelRunner {
     offs.push(ev.on('boss:fight', (p) => this._onBossFight(p)));
     offs.push(ev.on('boss:attack', (p) => this._onBossAttack(p)));      // round-3 FTUE: 'dodge' hint
     offs.push(ev.on('item:pickup', (p) => this._onItemPickup(p)));      // round-3 FTUE: first-pickup hints
+    offs.push(ev.on('weapon:stored', () => this._onWeaponStored()));     // round 6: "TAP THE GUN BUTTON TO FIRE" (once ever)
     offs.push(ev.on('boss:dead', (p) => this._onBossDead(p)));
     offs.push(ev.on('squad:loss', (p) => this._onSquadLoss(p)));
     offs.push(ev.on('squad:dead', (p) => this._onSquadDead(p)));
@@ -2170,6 +2171,16 @@ export class LevelRunner {
     if (this._phase === 'idle' || !p || p.duplicate) return;
     const id = p.item;
     if (typeof id === 'string' && HINTS[id] !== undefined) this.showHint(id);
+  }
+
+  /**
+   * Round 6 (stored weapons): the first weapon ever stored teaches the HUD FIRE button — HINTS.fire, once ever (showHint's
+   * save gate). weapon:stored is emitted inside grantItem before item:pickup, so this hint queues ahead of the weapon's own
+   * name hint: the action first (a stored weapon that is never fired is the one thing this hint must prevent).
+   */
+  _onWeaponStored() {
+    if (this._phase === 'idle') return;
+    this.showHint('fire');
   }
 
   /**

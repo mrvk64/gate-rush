@@ -39,9 +39,11 @@
 //   v4 → v5: the round-5b build of 1.2.0 (boss rigs in 3 draws; GET_BUILD so the pill shows only for another build).
 //            v4 shipped in the 1.2.0 dist/, so this build needs its own cache name (tools/package.js enforces it).
 //   v5 → v6: release 1.2.1 (round 5d: endless numbers not HP, the mini-boss hold, pool-safe waves).
+//   v6 → v7: release 1.2.2, the round-6 build (owner playtest: stored weapons + the FIRE button, the Android Back guard, procedural
+//            textures that survive a GPU-process loss). v6 shipped in the 1.2.1 dist/, so this build needs its own cache.
 'use strict';
 
-const VERSION = 'v6';
+const VERSION = 'v7';
 const APP_CACHE = 'gaterush-' + VERSION;          // §15.4 cache names gaterush-<VERSION> / gaterush-cdn-<VERSION>
 const CDN_CACHE = 'gaterush-cdn-' + VERSION;
 const CACHE_PREFIX = 'gaterush-';

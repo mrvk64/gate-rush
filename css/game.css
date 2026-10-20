@@ -145,11 +145,11 @@ body { margin: 0; background: #0F1626; }
 #ui, .screen { pointer-events: none; }                                   /* drags fall through to #app */
 .screen > *, .btn, .icon-btn, .pill, .seg, input, .card, #error-box, #overlay-msg .panel { pointer-events: auto; }
 #scr-pause, #scr-settings, #scr-boot, #overlay-msg, #scr-complete, #scr-gameover, #scr-endless { pointer-events: auto; }  /* modal: block the game */
-#hud > :not(#btn-pause) { pointer-events: none; }                        /* HUD chrome never swallows a drag */
+#hud > :not(#btn-pause):not(#btn-fire) { pointer-events: none; }         /* HUD chrome never swallows a drag (round 6: FIRE is a button) */
 #flash, #vignette, #coin-flights, #letterbox, #letterbox-bottom { pointer-events: none; }
 
 /* HUD descendants too (power-up pills are .pill, which the rule above would otherwise re-enable) */
-#hud :not(#btn-pause) { pointer-events: none; }
+#hud :not(#btn-pause):not(#btn-fire) { pointer-events: none; }
 
 *, *::before, *::after { box-sizing: border-box; }
 [hidden] { display: none !important; }       /* every screen / pill is toggled with the hidden attribute */
@@ -991,6 +991,124 @@ html.reduced-motion .btn.starting, html.reduced-motion .tile.starting { filter: 
 }
 #letterbox { top: 0; box-shadow: 0 3px 8px rgba(0, 0, 0, 0.55); }           /* UI-19: ≤ 8 px blur (24 px rastered slowly) */
 #letterbox-bottom { bottom: 0; box-shadow: 0 -3px 8px rgba(0, 0, 0, 0.55); }
+
+/* round 6 — FIRE button (stored weapons; owner playtest: "if I pick up a special gun I should be able to use it when I
+   want"). Weapon pickups wait in a 2-weapon slot; this button starts the next one. Round, ≥ 64 css px (76 design px),
+   bottom-right inside the safe area — the one interactive control in the GDD §14 thumb zone (lead decision), kept in the
+   corner below the squad's feet and right of the hint pill, which moves left while it shows (#hud.fire-on). Only the
+   button itself takes pointers (its children are pointer-events none); the engine never starts a steering drag on a
+   button, so a drag anywhere else steers as before. States (ui): .ready = the next stored weapon in a full ring of its
+   colour with a halo pulse and the FIRE tag; .busy = a weapon is running — the ring drains with its time, the pictogram
+   dims (taps are refused with a small head-shake); .fire-badge "×2" with two stored. ui writes the ring gradient and the
+   pictogram (128 px bitmap from the texture factory). */
+#hud {
+  --fire-size: max(64px, calc(76 * var(--u)));
+  --fire-right: calc(var(--safe-right) + 14 * var(--u));
+  --fire-bottom: calc(var(--safe-bottom) + 18 * var(--u));
+}
+#btn-fire {
+  top: auto;
+  left: auto;
+  right: var(--fire-right);
+  bottom: var(--fire-bottom);
+  width: var(--fire-size);
+  height: var(--fire-size);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 30%, rgba(52, 68, 104, 0.96), rgba(12, 18, 32, 0.96) 72%);
+  box-shadow: 0 4px 0 rgba(4, 7, 14, 0.85), 0 8px 18px rgba(0, 0, 0, 0.45);
+  color: var(--text);
+  cursor: pointer;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+  pointer-events: auto;
+  z-index: 4;
+  contain: layout;
+  transition: transform var(--dur-press) ease-out, box-shadow var(--dur-press) ease-out;
+}
+#btn-fire:active { transform: translateY(3px) scale(0.97); box-shadow: 0 1px 0 rgba(4, 7, 14, 0.85), 0 3px 8px rgba(0, 0, 0, 0.4); }
+#btn-fire > span { position: absolute; pointer-events: none; }
+#btn-fire .fire-ring {
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(var(--primary) 0deg 360deg, rgba(15, 22, 38, 0.88) 360deg);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 7 * var(--u)), #000 calc(100% - 6.5 * var(--u)));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 7 * var(--u)), #000 calc(100% - 6.5 * var(--u)));
+}
+#btn-fire .fire-disc {
+  inset: calc(11 * var(--u));
+  border-radius: 50%;
+  background: radial-gradient(circle at 40% 35%, #FFFFFF 0%, #DCE2EC 55%, #B9C2D2 100%);
+  box-shadow: inset 0 -2px 0 rgba(11, 15, 26, 0.35);
+  transition: opacity var(--dur-fast), filter var(--dur-fast);
+}
+#btn-fire .fire-icon {
+  inset: calc(17 * var(--u));
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+  filter: drop-shadow(0 1px 0 rgba(0, 0, 0, 0.6));
+  transition: opacity var(--dur-fast), filter var(--dur-fast);
+}
+#btn-fire .fire-label {
+  left: 50%;
+  bottom: calc(-7 * var(--u));
+  transform: translateX(-50%);
+  padding: calc(1 * var(--u)) calc(9 * var(--u)) 0;
+  border-radius: calc(9 * var(--u));
+  background: linear-gradient(180deg, var(--primary-hi), var(--primary-lo));
+  box-shadow: 0 0 0 2px var(--outline), 0 2px 0 2px rgba(4, 7, 14, 0.6);
+  color: var(--primary-text);
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: max(12px, calc(14px * var(--ui) * var(--text-scale)));
+  line-height: 1.15;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+#btn-fire .fire-badge {
+  top: calc(-5 * var(--u));
+  left: calc(-5 * var(--u));
+  min-width: max(24px, calc(28 * var(--u)));
+  height: max(24px, calc(28 * var(--u)));
+  padding: 0 calc(5 * var(--u));
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(180deg, var(--danger-hi), var(--danger-lo));
+  box-shadow: 0 0 0 2px var(--outline), 0 2px 0 2px rgba(4, 7, 14, 0.6);
+  color: #FFFFFF;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: max(13px, calc(16px * var(--ui) * var(--text-scale)));
+  line-height: 1;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.5);
+}
+#btn-fire .fire-badge[hidden] { display: none !important; }
+/* ready: a halo ring pulses outward (compositor-only: transform + opacity on a pseudo-element) */
+#btn-fire::after {
+  content: "";
+  position: absolute;
+  inset: calc(-3 * var(--u));
+  border-radius: 50%;
+  border: 3px solid var(--primary-hi);
+  opacity: 0;
+  pointer-events: none;
+}
+#btn-fire.ready::after { animation: fire-halo 1.2s ease-out infinite; will-change: transform, opacity; }
+@keyframes fire-halo { 0% { opacity: 0.85; transform: scale(0.94); } 100% { opacity: 0; transform: scale(1.28); } }
+#btn-fire.busy { cursor: default; }
+#btn-fire.busy .fire-disc { opacity: 0.6; }
+#btn-fire.busy .fire-icon { opacity: 0.5; filter: grayscale(0.7) drop-shadow(0 1px 0 rgba(0, 0, 0, 0.6)); }
+#btn-fire.busy .fire-label { display: none; }
+#btn-fire:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+/* the hint pill moves left, clear of the button, while it shows (same bottom band) */
+#hud.fire-on #hint {
+  right: calc(var(--fire-right) + var(--fire-size) + 10 * var(--u));
+  max-width: min(calc(var(--hint-maxw) - var(--safe-left) - var(--safe-right)), calc(100% - var(--safe-left) - var(--fire-right) - var(--fire-size) - 18 * var(--u)));
+}
 
 /* tutorial hint (round-2 QA UI-18): a compact pill bottom-anchored at safe-bottom + JUICE.ui.hintBottomPx (28 design
    px) under the squad, like the tutorial hand in the ads. The round-1 band "below the HUD, above the gates" (and the
@@ -2274,6 +2392,9 @@ html.reduced-motion *::after {
 }
 /* static fallbacks for looping decorations that would otherwise freeze mid-cycle */
 html.reduced-motion #btn-play::after, html.reduced-motion #hint-hand::after, html.reduced-motion .tile.current::after { display: none; }
+/* round 6: the FIRE button's ready halo holds still (visible) instead of pulsing */
+html.reduced-motion #btn-fire.ready::after { animation: none; opacity: 0.7; transform: none; }
+@media (prefers-reduced-motion: reduce) { #btn-fire.ready::after { animation: none; opacity: 0.7; transform: none; } }
 @media (prefers-reduced-motion: reduce) {
   #btn-play::after, #hint-hand::after, .tile.current::after { display: none; }
 }
@@ -2286,6 +2407,7 @@ html.reduced-motion #btn-play::after, html.reduced-motion #hint-hand::after, htm
 #hud.prewarm[hidden], #bossbar.prewarm[hidden], #letterbox.prewarm[hidden], #letterbox-bottom.prewarm[hidden] { display: block !important; }
 #hint.prewarm[hidden], #namecard.prewarm[hidden], #district-banner.prewarm[hidden] { display: flex !important; }
 #shield.prewarm[hidden], #powerups > .pu.prewarm[hidden] { display: inline-flex !important; }
+#btn-fire.prewarm[hidden] { display: block !important; }
 .screen.prewarm { opacity: 0.01 !important; visibility: visible !important; pointer-events: none !important; }
 
 /* short viewports (landscape phones, small artifact panes): tighter title stack */

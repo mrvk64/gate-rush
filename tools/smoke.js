@@ -41,6 +41,12 @@
 // Exit code 1 when boot fails, any uncaught page error occurs, or any console.error is logged; also when a harness check
 // fails (verdict "CHECK FAILED", `report.checkFailures`): round 4, `--scenario all` taps the HOME icon of the results
 // screen it reached (touch on the phone viewport, mouse with --desktop) and expects the title (`report.home`).
+// Round 6 (stored weapons): weapon pickups wait in the HUD FIRE button (#btn-fire). While the bot plays, the harness
+// presses it for real — a touch tap on the phone viewport (a mouse click with --desktop) at the button's centre — when
+// weapons.canFire (a weapon stored, none running) and a living zombie or the boss is within 25 m of the squad
+// (FIRE_RANGE_M). `report.fire` lists every press ({ t, weapon, near, started }: started = weapons.weapon became that
+// weapon within 0.5 s, i.e. the real input path fired it) and every weapon:stored ({ t, id, slots }); a press that did
+// not start its weapon is a harness check failure. --nobot disables the presses too.
 
 import puppeteer from 'puppeteer-core';
 import http from 'node:http';
@@ -137,6 +143,7 @@ const report = {
   boot: { ok: false, ms: 0, state: null, errorBox: null },
   pageErrors: [], consoleErrors: {}, consoleWarnings: {}, failedRequests: [], dialogs: [],
   input: null, timeline: [], frames: null, result: null, ui: [], screenshots: [], home: null, checkFailures: [], verdict: 'unknown',
+  fire: { presses: [], stored: [] },   // round 6: stored weapons and the bot's FIRE presses
 };
 const bump = (bag, text) => { const k = text.slice(0, 400); bag[k] = (bag[k] || 0) + 1; };
 
@@ -235,7 +242,7 @@ async function installProbes() {
   await ev(() => {
     const g = window.__game;
     // frame-interval sampler (independent of the engine)
-    window.__smoke = { intervals: [], stamps: [], last: performance.now(), pickups: [], callsMax: {}, programs: { min: 1e9, max: 0 }, districts: [], drawList: [], peaks: {} };
+    window.__smoke = { intervals: [], stamps: [], last: performance.now(), pickups: [], stored: [], callsMax: {}, programs: { min: 1e9, max: 0 }, districts: [], drawList: [], peaks: {} };
     // round 5: the objects drawn in each frame (renderer.renderBufferDirect, counted only when it really drew), so the
     // frame with the most main-pass draws per district keeps its list (report.callsPeak): what a budget overrun is made of
     try {
@@ -270,10 +277,15 @@ async function installProbes() {
         if (p && s.districts.length < 200) s.districts.push({ t: performance.now(), id: String(p.id), reason: String(p.reason), seconds: +p.seconds || 0, banner: !!p.banner, dist: Math.round(g.world?.distance ?? 0) });
       });
     }
-    // pickup trail (item:pickup payloads are reused by the emitter: copy the fields)
-    if (g && g.events && typeof g.events.on === 'function') {
+    // pickup trail (item:pickup payloads are reused by the emitter: copy the fields). r6 verify: hooked once — installProbes
+    // runs once per scenario (ui + play in --scenario all), and a second set of listeners listed every pickup and every
+    // stored weapon twice; the listeners read window.__smoke at call time, so they feed the current scenario's arrays
+    if (g && g.events && typeof g.events.on === 'function' && !window.__smokePickupHook) {
+      window.__smokePickupHook = true;
       g.events.on('item:pickup', (p) => { const s = window.__smoke; if (p && s.pickups.length < 200) s.pickups.push({ t: Math.round((g.time?.levelTime ?? 0) * 10) / 10, item: String(p.item), duplicate: !!p.duplicate }); });
-      g.events.on('level:start', () => { window.__smoke.pickups.length = 0; });
+      g.events.on('level:start', () => { window.__smoke.pickups.length = 0; window.__smoke.stored.length = 0; });
+      // round 6: stored-weapon trail
+      g.events.on('weapon:stored', (p) => { const s = window.__smoke; if (p && s.stored.length < 200) s.stored.push({ t: Math.round((g.time?.levelTime ?? 0) * 10) / 10, id: String(p.id), slots: p.slots | 0 }); });
     }
     // r3 verify: the cap was 20 000 — at 144 Hz a run over 139 s (e.g. --endless --seconds 150) cleared every earlier interval and
     // reported frame stats for its last few seconds only; 200 000 intervals is 23 min at 144 Hz
@@ -325,7 +337,7 @@ async function snapshot() {
       state: g.state?.current, phase: g.level?.phase,
       dist: Math.round(g.world?.distance ?? 0), len: g.level?.script?.length ?? null,
       count: g.squad?.count, visible: g.squad?.visible, armor: g.squad?.armor,
-      zombies: g.zombies?.alive, bullets: g.weapons?.liveBullets, weapon: g.weapons?.weapon,
+      zombies: g.zombies?.alive, bullets: g.weapons?.liveBullets, weapon: g.weapons?.weapon, stored: g.weapons?.storedCount ?? null,
       gate: (() => { const e = g.gates?.activeEvent; return e ? e.lanes.map((l) => `${l.op}${l.value}${l.maxed ? '(MAX)' : ''}${l.state ? ':' + l.state : ''}`).join('|') : null; })(),
       boss: g.boss?.active ? `${Math.round(g.boss.hp)}/${Math.round(g.boss.maxHp)} p${g.boss.phase}` : null,
       coins: g.run?.coins, kills: g.run?.kills, troops: g.troops?.list?.join?.(',') || '',
@@ -382,6 +394,31 @@ async function runUi() {
 }
 
 // ---------------------------------------------------------------- play scenario
+// round 6: the bot's FIRE press (see the header). Returns the press record, or null when nothing was pressed.
+const FIRE_RANGE_M = 25;
+async function botFire() {
+  const st = await ev((R) => {
+    const g = window.__game, w = g?.weapons, b = document.getElementById('btn-fire');
+    if (!g || !w || !b || b.hidden || !window.__bot?.on || !g.state?.is?.('playing') || !w.canFire) return null;
+    const sx = g.squad?.x ?? 0;
+    let near = null;
+    const out = { id: -1, x: 0, y: 0, z: 0 };
+    if ((g.zombies?.alive ?? 0) > 0 && g.zombies.nearest(sx, 0, out) && Math.hypot(out.x - sx, out.z) <= R) near = 'zombie ' + Math.round(Math.hypot(out.x - sx, out.z)) + ' m';
+    if (!near && g.boss?.active && Math.abs(g.boss.z ?? -1e9) <= R) near = 'boss ' + Math.round(Math.abs(g.boss.z)) + ' m';
+    if (!near) return null;
+    const r = b.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2, w: Math.round(r.width), next: w.storedId(0), near, t: Math.round((g.time?.levelTime ?? 0) * 10) / 10 };
+  }, FIRE_RANGE_M).catch(() => null);
+  if (!st) return null;
+  // (the sandbox shell's iframe fills the page at 0, 0, so frame coordinates are page coordinates in every shell)
+  try {
+    if (!DESKTOP) await page.touchscreen.tap(st.x, st.y);
+    else await page.mouse.click(st.x, st.y);
+  } catch (e) { return { t: st.t, weapon: st.next, near: st.near, started: false, error: String(e.message || e) }; }
+  const started = await gameFrame.waitForFunction((id) => window.__game?.weapons?.weapon === id, { timeout: 500, polling: 16 }, st.next).then(() => true, () => false);
+  return { t: st.t, weapon: st.next, near: st.near, at: [Math.round(st.x), Math.round(st.y)], size: st.w, started };
+}
+
 async function realDrag() {
   // exercises the real input path: touch on #app, drag right 120 px, release
   const before = await ev(() => window.__game?.input?.targetX ?? null);
@@ -456,6 +493,8 @@ async function runPlay(level) {
     }
     while (fadeShots.length && el >= fadeShots[0].at) { const f = fadeShots.shift(); await shot(f.tag); }
     if (el >= nextShot) { await shot(`play-${Math.round(el / 1000)}s`); nextShot += SHOT_EVERY * 1000; }
+    // round 6: the bot fires a stored weapon when zombies / the boss are within 25 m (a real tap on #btn-fire)
+    if (!NOBOT) { const f = await botFire(); if (f) { report.fire.presses.push(f); if (!f.started) report.checkFailures.push(`FIRE press at t=${f.t} did not start ${f.weapon}`); } }
     // capture the boss as soon as it appears
     await sleep(200);
   }
@@ -515,6 +554,7 @@ async function runPlay(level) {
   }
   report.bot = await ev(() => ({ choices: window.__bot.choices, err: window.__bot.err || null }));
   report.pickups = await ev(() => window.__smoke.pickups.slice());
+  report.fire.stored = await ev(() => window.__smoke.stored.slice());
   await sleep(ended ? 3500 : 0);
   const fin = await snapshot();
   report.result = {

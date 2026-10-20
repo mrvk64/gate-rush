@@ -72,6 +72,11 @@ const HINT_QUEUE_AGE_S = 6;                             // DATA-MISSING: JUICE.u
 // UI-18: the hand icon shows inside the pill for these hints only. Round-3 FTUE: both sway (a drag) — the shoot hint used
 // a tap bounce, which told first-time players to TAP to shoot; the squad fires on its own and the finger only steers.
 const HINT_HAND_IDS = Object.freeze({ steer: true, shoot: true });
+// round 6 — the HUD FIRE button (stored weapons, weapons.storeWeapon / requestFire; css #btn-fire)
+const FIRE_ICON_PX = 128;                               // DATA-MISSING: JUICE.ui.fireIconPx — pictogram bitmap (2× the 44 px CSS box, retina)
+const FIRE_CLICK_SUPPRESS_S = 0.6;                      // structural: the click that follows a pointerdown / key activation is not a second FIRE
+const GAMEPAD_FIRE_BUTTON = 0;                          // standard mapping: A / Cross fires (engine owns Start = pause)
+const FIRE_WEAPON_IDS = Object.freeze([WEAPONS.shotgun.id, WEAPONS.minigun.id, WEAPONS.rocket.id, WEAPONS.railgun.id, WEAPONS.laser.id]);
 const ERROR_HIDE_MS = UIJ.errorAutoHideSeconds * 1000;  // non-fatal error toast auto-hide
 const BOSS_IN_MS = UIJ.bossBarInMs;                     // boss bar slide-in
 const BOSS_OUT_S = UIJ.bossBarOutMs / 1000;             // boss bar hides 1.5 s after boss:dead
@@ -81,6 +86,7 @@ const BLINK_LAST = JUICE.powerup.pillBlinkLast;         // pills blink in their 
 const BLINK_HZ = JUICE.powerup.pillBlinkHz;             // … at 2 Hz
 const LETTERBOX_PCT = RENDER.letterboxPct;              // 8 % bars
 const MAX_PILLS = 3;                                    // ARCH §10.1 "≤ 3 power-up pills" (weapon + chip + booster)
+const FIRE_POS = MAX_PILLS + 2;                         // round 6: _puPos slot of the FIRE button's icon (icon-flight target of every weapon pickup)
 const MAX_TICKS = PICKUPS.perLevel.cap * 3;             // ≥ specials per level (PICKUPS.perLevel.cap) — crates + item lanes, with headroom
 const PILL_ICON_PX = 64;                                // DATA-MISSING: JUICE.ui.pillIconPx — DOM icon bitmap size (2× the 28–32 px CSS box for retina)
 const CARD_ICON_PX = 96;                                // DATA-MISSING: JUICE.ui.cardIconPx — shop card icon bitmap size
@@ -207,6 +213,9 @@ const T_FLASH = { duration: UIJ.purchaseFlashMs, easing: 'ease-out' };
 const T_LETTERBOX = { duration: UIJ.bossBarInMs, easing: 'ease-out', fill: 'backwards' };
 const T_HAND = { duration: HAND_SWAY_MS, iterations: Infinity, direction: 'alternate', easing: 'ease-in-out' };
 const T_RAGE = { duration: SKULL_PERIOD_MS * 0.6, iterations: Infinity, easing: 'ease-in-out' };
+// round 6: FIRE refused (a weapon is running) — a small head-shake; FIRE accepted — the J19 punch
+const KF_FIRE_DENY = [{ transform: 'translateX(0)' }, { transform: 'translateX(-5px)' }, { transform: 'translateX(5px)' }, { transform: 'translateX(-3px)' }, { transform: 'translateX(0)' }];
+const T_FIRE_DENY = { duration: 260, easing: 'ease-out' };
 
 // ---------------------------------------------------------------------------------------------
 // Small helpers (no per-frame use except the table lookups)
@@ -412,6 +421,22 @@ export class UI {
     this._bootHold = false;          // the boot screen stays up until the prewarm finished
     this._bootHideReq = false;       // hideBoot() ran while the prewarm was still holding
     this._prewarmAnim = null;        // the prewarmed pill's pop animation (cancelled when the prewarm ends)
+    // round 6: HUD FIRE button (stored weapons). Model read from weapons each frame (storedCount / storedId / weapon /
+    // weaponTimeLeft — a handful of getters); the DOM is written only when a shown value changes
+    this._fireShown = false;         // #btn-fire displayed (a weapon stored or running)
+    this._fireId = '';               // pictogram shown: the next stored weapon, else the running one
+    this._fireBusy = -1;             // 1 = a weapon is running (ring drains, taps refused), 0 = ready, -1 = not drawn yet
+    this._fireCount = -1;            // stored count shown (the "×2" badge at 2)
+    this._fireRingId = '';           // weapon whose colour the ring uses
+    this._fireRingStr = null;        // its conic-gradient strings (_ringStrings)
+    this._fireRing = -1;             // ring step shown (0..RING_STEPS)
+    this._fireDur = 0.5; this._fireDur = 0;   // WEAPONS.*.duration of the ring's weapon (Double field from the start)
+    this._fireClickUntil = 0;        // _realNow() s: a click before this is the tail of a pointer / key activation
+    this._fireAnim = null;
+    this._fireIcons = new Map();     // id → 'url("…")' at FIRE_ICON_PX (encoded at boot, UI-23)
+    this._gpSeen = false;            // a gamepad connected: poll its A button while the FIRE button shows
+    this._gpOk = true;
+    this._gpA = false;
     this._prewarmStarAnim = null;    // round 3: the prewarmed results star's slam animation (cancelled when the prewarm ends)
     this._prewarmDbAnim = null;      // round 5: the prewarmed district banner's animation
     this._prewarmBossAnims = [];     // round 5 integration: the prewarmed boss chrome's animations (bar, letterbox, name card)
@@ -553,8 +578,8 @@ export class UI {
     this._coinX = 0.5; this._coinX = 0; this._coinY = 0.5; this._coinY = 0;
     this._mx = 0.5; this._mx = 0; this._my = 0.5; this._my = 0;      // scratch result of _measureRaw
     this._puPosDirty = true;
-    this._puPos = new Float32Array(MAX_PILLS * 2 + 4);   // pills (x, y) × 3, then the shield, then the generic target
-    this._puPosOk = new Uint8Array(MAX_PILLS + 2);
+    this._puPos = new Float32Array(MAX_PILLS * 2 + 6);   // pills (x, y) × 3, then the shield, the generic target, the FIRE icon (round 6)
+    this._puPosOk = new Uint8Array(MAX_PILLS + 3);
 
     // results
     this._cmp = { level: 1, stars: 0, coins: 0, survivors: 0, eBoss: 0, score: 0, kills: 0, gates: 0, piles: 0, boss: 0, bonus: 0 };
@@ -597,6 +622,8 @@ export class UI {
     this._onInputDom = (e) => this._input(e, false);
     this._onChangeDom = (e) => this._input(e, true);
     this._onKeyDom = (e) => this._key(e);
+    this._onFirePointer = (e) => this._firePointer(e);
+    this._onGamepad = () => { this._gpSeen = true; };
     this._onPointerDom = () => { if (!this._pointerMode) this._setPointerMode(true); };
     this._onFsChange = () => this._syncFullscreenButton();
     this._onMqChange = () => this._mediaChanged();
@@ -784,10 +811,21 @@ export class UI {
       overlayMsg: g('overlay-msg'), overlayText: g('overlay-text'),
       errorBox: g('error-box'), errorText: g('error-text'), btnReload: g('btn-reload'),
       debug: g('debug'),
+      btnFire: g('btn-fire'), fireRing: null, fireIcon: null, fireBadge: null, fireLabel: null,   // round 6
       districtBanner: g('district-banner'), dbText: null, titleDistrict: null, btnUpdate: g('btn-update'), updText: null,   // round 5
     };
     try { if (el.districtBanner) el.dbText = el.districtBanner.querySelector('.db-text'); } catch (_) { el.dbText = null; }
     try { if (el.btnUpdate) el.updText = el.btnUpdate.querySelector('.upd-text'); } catch (_) { el.updText = null; }
+    if (el.btnFire) {
+      try {
+        el.fireRing = el.btnFire.querySelector('.fire-ring');
+        el.fireIcon = el.btnFire.querySelector('.fire-icon');
+        el.fireBadge = el.btnFire.querySelector('.fire-badge');
+        el.fireLabel = el.btnFire.querySelector('.fire-label');
+      } catch (_) { el.fireRing = null; el.fireIcon = null; el.fireBadge = null; el.fireLabel = null; }
+      if (el.fireLabel) el.fireLabel.textContent = STRINGS.fire.label;
+      el.btnFire.setAttribute('aria-label', STRINGS.fire.label);
+    }
     // round 5: the title caption carries a small district line (created once, re-appended by _fillTitle)
     if (el.titleCaption) {
       el.titleDistrict = doc.createElement('span');
@@ -1036,10 +1074,14 @@ export class UI {
     if (typeof window !== 'undefined') {
       this._listen(window, 'keydown', this._onKeyDom, true);
       this._listen(window, 'pointerdown', this._onPointerDom, true);
+      this._listen(window, 'gamepadconnected', this._onGamepad, false);   // round 6: gamepad A fires a stored weapon
     }
     // until the first key press the focus ring stays hidden: _focusFirst() focuses PLAY / NEXT / RETRY
     // programmatically, which Chrome would otherwise paint as :focus-visible on touch devices (UI-14)
     this._setPointerMode(true);
+    // round 6: FIRE answers on pointerdown (no wait for the release, and a thumb that slides off still fired); the
+    // engine never steers from a pointerdown on a button, and the delegated click that follows is swallowed (_click)
+    this._listen(el.btnFire, 'pointerdown', this._onFirePointer, false);
     this._listen(doc, 'fullscreenchange', this._onFsChange, false);
     this._listen(doc, 'webkitfullscreenchange', this._onFsChange, false);
     // RELOAD lives inside #ui (handled by the delegated click); the BOOTGUARD / main.js fallbacks check
@@ -1319,6 +1361,8 @@ export class UI {
     // UI-23: every item icon the pills / shield / coin pill can use is encoded once at boot (no toDataURL in play)
     const ids = RENDER.icons && RENDER.icons.ofItem ? Object.keys(RENDER.icons.ofItem) : [];
     for (let i = 0; i < ids.length; i++) { const id = ids[i]; steps.push(() => { this._iconUrl(id); return null; }, 1); }
+    // round 6: the FIRE button's larger pictograms (one per weapon), encoded at boot too
+    for (let i = 0; i < FIRE_WEAPON_IDS.length; i++) { const id = FIRE_WEAPON_IDS[i]; steps.push(() => { this._fireIconUrl(id); return null; }, 1); }
     steps.push(() => {
       const c = this._cmp;
       // one earned + two empty stars: both star images get rastered
@@ -1383,7 +1427,14 @@ export class UI {
         try { db.style.setProperty('--db-accent', hexCss(DISTRICTS[0].accent)); db.style.setProperty('--db-glow', rgbaCss(DISTRICTS[0].accent, DB_GLOW_ALPHA)); } catch (_) { /* cosmetic */ }
         if (typeof db.animate === 'function') { try { this._prewarmDbAnim = db.animate(KF_DB, T_DB); } catch (_) { this._prewarmDbAnim = null; } }
       }
-      return [el.hud, el.hint, el.shield, pu ? pu.root : null, db];
+      // round 6: the FIRE button (ring mask, disc, pictogram, badge and its ready pulse) rasters here, not at the first pickup
+      if (el.btnFire) {
+        this._applyIcon(el.fireIcon, this._fireIconUrl(WEAPONS.rocket.id));
+        if (el.fireRing) el.fireRing.style.background = this._ringStrings(WEAPONS.rocket.id)[RING_STEPS];
+        if (el.fireBadge) { el.fireBadge.textContent = STRINGS.fire.badge(2); el.fireBadge.hidden = false; }
+        try { el.btnFire.classList.add('ready'); } catch (_) { /* cosmetic */ }
+      }
+      return [el.hud, el.hint, el.shield, pu ? pu.root : null, db, el.btnFire];
     }, W);
     return steps;
   }
@@ -1399,6 +1450,9 @@ export class UI {
     this._puShownId[0] = '';
     this._puRing[0] = -1;
     this._puSec[0] = -1;
+    // round 6: the sample FIRE button content is rewritten by the first real show
+    this._fireId = ''; this._fireRingId = ''; this._fireRing = -1; this._fireCount = -1; this._fireBusy = -1;
+    if (this._el.btnFire) { try { this._el.btnFire.classList.remove('ready'); } catch (_) { /* cosmetic */ } }
     if (this._prewarmAnim) { this._cancelAnim(this._prewarmAnim); this._prewarmAnim = null; }
     if (this._prewarmStarAnim) { this._cancelAnim(this._prewarmStarAnim); this._prewarmStarAnim = null; }
     if (this._prewarmDbAnim) { this._cancelAnim(this._prewarmDbAnim); this._prewarmDbAnim = null; }
@@ -1679,14 +1733,22 @@ export class UI {
   }
 
   /**
-   * Target of an item's icon flight (J12): its power-up pill (weapons, chip, booster), the shield pill (armor),
-   * the coin icon ('coins'), otherwise the centre of the power-up row (troops, magnet). Pending pill DOM is
-   * synced first so a pill created by this same pickup is measured where it will be drawn.
+   * Target of an item's icon flight (J12): round 6 — a weapon flies into the FIRE button (stored, not started; the
+   * button is synced first, so the one this pickup shows is measured where it is drawn); its power-up pill (chip,
+   * booster), the shield pill (armor), the coin icon ('coins'), otherwise the centre of the power-up row (troops,
+   * magnet). Pending pill DOM is synced first so a pill created by this same pickup is measured where it will be drawn.
    */
   powerupIconScreenPos(item, out) {
     if (!out) return out;
     if (item === 'coins') return this.coinIconScreenPos(out);
     if (this._puPosDirty) { this._puPosOk.fill(0); this._puPosDirty = false; }
+    if (isWeaponId(item) && this._el && this._el.btnFire) {
+      this._updateFire();
+      if (this._fireShown) {
+        if (!this._puPosOk[FIRE_POS]) this._measureInto(this._el.fireIcon || this._el.btnFire, FIRE_POS);
+        if (this._puPosOk[FIRE_POS]) { out.x = this._puPos[FIRE_POS * 2]; out.y = this._puPos[FIRE_POS * 2 + 1]; return out; }
+      }
+    }
     let slot = -1;
     for (let i = 0; i < this._puCount; i++) if (this._puId[i] === item) { slot = i; break; }
     if (slot >= 0) {
@@ -2267,6 +2329,8 @@ export class UI {
     if (this._dbShown || this._dbReq || this._dbHideReq) this._updateBanner(tnow, paused);
     if (this._swDirty) this._syncUpdatePill();
     this._updateBlink(now);
+    this._updateFire();
+    if (this._fireShown && this._gpSeen) this._pollGamepadFire();
     if (this._plates > 0 || this._platesShown > 0) { this._placeShield(); this._syncShield(); }
 
     this._hudAcc += dt;
@@ -3285,6 +3349,9 @@ export class UI {
     }
     if (btn.disabled) return;
     const id = btn.id || '';
+    // round 6: FIRE fired on its pointerdown (or the key); only a click with no activation just before it (Enter on the
+    // focused button, assistive tech) fires here. No ui:button — the weapon's own sting is the feedback, not ui_tap
+    if (id === 'btn-fire') { if (this._realNow() >= this._fireClickUntil) this._fireTap(); return; }
     P_BUTTON.id = id || this._buttonKind(btn);
     const events = this.ctx.events;
     if (events) events.emit('ui:button', P_BUTTON);
@@ -3442,6 +3509,7 @@ export class UI {
     if (!e) return;
     if (this._pointerMode) this._setPointerMode(false);      // keyboard user: show the focus ring again
     const code = e.code || e.key;
+    if (code === 'Space' || code === ' ') { this._fireKey(e); return; }   // round 6: Space fires a stored weapon
     if (code !== 'Escape' || e.repeat) return;
     const cur = this._current;
     if (cur !== 'settings' && cur !== 'levels' && cur !== 'shop') return;
@@ -3592,6 +3660,157 @@ export class UI {
     const css = url ? 'url("' + url + '")' : '';
     this._iconCache.set(id, css);
     return css;
+  }
+
+  /** Round 6: 'url("data:…")' of a weapon pictogram at FIRE_ICON_PX for the FIRE button (cached; encoded at boot). */
+  _fireIconUrl(id) {
+    const hit = this._fireIcons.get(id);
+    if (hit !== undefined) return hit;
+    const render = this.ctx.render;
+    const tex = render ? render.textures : null;
+    if (!tex || typeof tex.iconDataURL !== 'function') return this._iconUrl(id);
+    let url = '';
+    try { url = tex.iconDataURL(id, FIRE_ICON_PX) || ''; } catch (_) { url = ''; }
+    const css = url ? 'url("' + url + '")' : this._iconUrl(id);
+    if (css) this._fireIcons.set(id, css);
+    return css;
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Round 6 — HUD FIRE button (stored weapons)
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * Model → DOM, every frame (cheap getter reads; DOM writes only on change). Shown while a weapon is stored or running
+   * (ready: the next stored pictogram in a full ring of its colour, pulsing; busy: the ring drains with the running
+   * weapon's time left and the pictogram dims — the next stored one if any, else the running one). "×2" badge with two
+   * stored. #hud.fire-on while shown (css moves the hint pill clear of it).
+   */
+  _updateFire() {
+    const el = this._el;
+    const b = el ? el.btnFire : null;
+    if (!b) return;
+    const w = this.ctx.weapons;
+    let count = 0, active = null, next = null, left = 0;
+    if (w && typeof w.storedId === 'function') {
+      try {
+        count = w.storedCount | 0;
+        active = w.weapon;
+        next = count > 0 ? w.storedId(0) : null;
+        left = active !== null ? w.weaponTimeLeft : 0;
+      } catch (_) { count = 0; active = null; next = null; left = 0; }
+    }
+    const show = count > 0 || active !== null;
+    if (show !== this._fireShown) {
+      this._fireShown = show;
+      b.hidden = !show;
+      this._puPosOk[FIRE_POS] = 0;
+      const hud = el.hud;
+      if (hud) { try { hud.classList.toggle('fire-on', show); } catch (_) { /* ignore */ } }
+      if (show) { this._cancelAnim(this._fireAnim); this._fireAnim = this._animate(b, KF_POP_IN, T_NAMECARD); }
+      else this._gpA = false;
+    }
+    if (!show) return;
+    const busy = active !== null;
+    const id = next !== null ? next : active;
+    if (id !== this._fireId) {
+      this._fireId = id;
+      b.dataset.id = id;
+      this._applyIcon(el.fireIcon, this._fireIconUrl(id));
+      this._fireAria(busy, active, id);
+    }
+    const busyI = busy ? 1 : 0;
+    if (busyI !== this._fireBusy) {
+      const wasBusy = this._fireBusy === 1;
+      this._fireBusy = busyI;
+      try { b.classList.toggle('busy', busy); b.classList.toggle('ready', !busy); } catch (_) { /* ignore */ }
+      b.setAttribute('aria-disabled', busy ? 'true' : 'false');
+      this._fireAria(busy, active, id);
+      if (busy && !wasBusy) { this._cancelAnim(this._fireAnim); this._fireAnim = this._animate(b, KF_PUNCH, T_PUNCH); }   // accepted
+    }
+    if (count !== this._fireCount) {
+      this._fireCount = count;
+      if (el.fireBadge) {
+        const on = count >= 2;
+        if (on) el.fireBadge.textContent = STRINGS.fire.badge(count);
+        if (el.fireBadge.hidden === on) el.fireBadge.hidden = !on;
+      }
+    }
+    const ringId = busy ? active : id;
+    if (ringId !== this._fireRingId) {
+      this._fireRingId = ringId;
+      this._fireRingStr = this._ringStrings(ringId);
+      this._fireRing = -1;
+      const entry = itemEntry(ringId);                 // on change only (itemEntry slices the id)
+      this._fireDur = entry && entry.duration > 0 ? entry.duration : 0;
+    }
+    const dur = this._fireDur;
+    const r = busy && dur > 0 ? Math.round(clamp(left / dur, 0, 1) * RING_STEPS) : RING_STEPS;
+    if (r !== this._fireRing) {
+      this._fireRing = r;
+      if (el.fireRing && this._fireRingStr) el.fireRing.style.background = this._fireRingStr[r];
+    }
+  }
+
+  /** Screen-reader name of the FIRE button ("Fire rocket" / "shotgun firing"); built on change only. */
+  _fireAria(busy, active, id) {
+    const b = this._el.btnFire;
+    if (!b) return;
+    const name = (busy ? active : id) || '';
+    const short = name.indexOf('.') >= 0 ? name.slice(name.indexOf('.') + 1) : name;
+    b.setAttribute('aria-label', busy ? STRINGS.fire.ariaBusy(short) : STRINGS.fire.aria(short));
+  }
+
+  /** pointerdown on the FIRE button (primary button / touch / pen): fire now; no focus, no compat mouse events. */
+  _firePointer(e) {
+    if (!e || (typeof e.button === 'number' && e.button > 0)) return;
+    try { e.preventDefault(); } catch (_) { /* ignore */ }   // the button never takes focus: keyboard steering stays on #app
+    this._fireTap();
+  }
+
+  /** Space while playing (not repeated): FIRE. preventDefault so a focused button's own Space click never doubles it. */
+  _fireKey(e) {
+    const st = this.ctx.state;
+    if (e.repeat || !st || typeof st.is !== 'function' || !st.is('playing')) return;
+    try { e.preventDefault(); } catch (_) { /* ignore */ }
+    this._fireTap();
+  }
+
+  /** Gamepad A (rising edge) while the FIRE button shows; polled only after a gamepadconnected event (guarded). */
+  _pollGamepadFire() {
+    if (!this._gpOk || typeof navigator === 'undefined' || typeof navigator.getGamepads !== 'function') return;
+    let down = false;
+    try {
+      const pads = navigator.getGamepads();
+      if (pads) {
+        for (let i = 0; i < pads.length; i++) {
+          const p = pads[i];
+          if (!p || !p.connected || !p.buttons || p.buttons.length <= GAMEPAD_FIRE_BUTTON) continue;
+          const bt = p.buttons[GAMEPAD_FIRE_BUTTON];
+          if (bt && bt.pressed) { down = true; break; }
+        }
+      }
+    } catch (_) { this._gpOk = false; return; }
+    if (down && !this._gpA) this._fireTap();
+    this._gpA = down;
+  }
+
+  /**
+   * One FIRE press (pointer, Space, gamepad A, or a bare click): weapons.requestFire() while playing. Refused (a weapon
+   * is running — the stored one waits for it, lead decision) → a small head-shake on the button (none under reduced
+   * motion); accepted → the button turns busy on the next step's weapon:start (punch, draining ring).
+   */
+  _fireTap() {
+    this._fireClickUntil = this._realNow() + FIRE_CLICK_SUPPRESS_S;
+    const st = this.ctx.state;
+    if (!st || typeof st.is !== 'function' || !st.is('playing')) return;
+    const w = this.ctx.weapons;
+    let ok = false;
+    if (w && typeof w.requestFire === 'function') { try { ok = w.requestFire() === true; } catch (_) { ok = false; } }
+    if (!ok && this._fireShown && this._el.btnFire) {
+      this._cancelAnim(this._fireAnim);
+      this._fireAnim = this._animate(this._el.btnFire, KF_FIRE_DENY, T_FIRE_DENY);
+    }
   }
 
   _applyIcon(node, css) {

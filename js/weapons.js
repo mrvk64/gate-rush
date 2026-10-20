@@ -3,7 +3,7 @@
 // (shotgun / minigun / rocket / railgun / laser) and the gear timers (armor / magnet / chip / booster).
 //
 // Contract: docs/ARCHITECTURE.md §6.11 (class shape, ownership), §7 (hit-test table and priority),
-// §5.1 (event payloads: shot, weapon:start/end, weapon:fire, gear:start/end, explosion, coin:pickup
+// §5.1 (event payloads: shot, weapon:stored, weapon:start/end, weapon:fire, gear:start/end, explosion, coin:pickup
 // 'refund'/'duplicate'), §9.1/§9.2 (meshes, instancing), §14 (coding rules); docs/GDD.md §3.3 (fire
 // model), §8.1 (weapons), §8.2 (gear), §12 J1/J13/J21 (juice). Numbers come from data.js (FIRE, WEAPONS,
 // GEAR, PICKUPS, PALETTE, BOSSES, JUICE, QUALITY_TIERS, WORLD); the few visual constants data.js has no
@@ -34,7 +34,13 @@
 //         hitTestSegment, applyHit, activeEvent), ctx.pickups (hitTestSeg | hitTestSegment, hit, setMagnet),
 //         ctx.world (roadSpeed, bossActive, squadHalfWidth), ctx.quality (params.tracers), ctx.rngFx, ctx.fx (emit,
 //         addTrauma, fovKick, flash), ctx.render (scene, camera, materials, textures.muzzle, lights.laser),
-//         ctx.models.geo (tracer, muzzle, rocket), ctx.state, ctx.debug.
+//         ctx.models.geo (tracer, muzzle, rocket), ctx.state, ctx.debug, ctx.level (phase: the stored-weapon refund at level end).
+//
+// Stored weapons (round 6, owner playtest: "a lot of the time the 10 seconds gets wasted"): pickups.grantItem calls
+// storeWeapon(id) instead of startWeapon — a FIFO of PICKUPS.weaponSlots (2) weapons, weapon:stored { id, slots }; a
+// pickup into a full slot replaces nothing and pays PICKUPS.replaceRefund ('refund'). requestFire() (ui: the HUD FIRE
+// button, Space, gamepad A) starts the head with its full duration at the top of the next step, only while no weapon
+// is active. Stored weapons survive the boss intro / fight and are refunded at level end (_stepStored).
 // Writes: nothing on ctx except ctx.debug.dropped counters and ctx.debug.shotsPerSec / beamsPerSec (overlay, WPN-7);
 //         emits the events listed above.
 import {
@@ -133,6 +139,10 @@ const TRACER_GLOW_LEN = 1.25;         // DATA-MISSING: FIRE.tracerGlow.lengthMul
 const SPARKS_RAIL = WEAPONS.railgun.sparks;                 // fx.emit('spark') count at the rail muzzle (data key; wired round-2 cross-group)
 const SPARKS_LASER = WEAPONS.laser.sparks;                // per laser impact puff at the boss (data key; wired round-2 cross-group)
 const REFUND_Y = 1;                   // ARCH §6.11: refund coin:pickup origin y = 1
+// round 6 (owner playtest 1, lead decision): weapon pickups are STORED in a FIFO slot and started by the player (HUD
+// FIRE button / Space / gamepad A → requestFire). PICKUPS.weaponSlots (2) weapons fit; a pickup while it is full pays
+// PICKUPS.replaceRefund ('refund'); unused ones are paid back the same way when the level is won (see _stepStored).
+const SLOTS = PICKUPS.weaponSlots > 0 ? PICKUPS.weaponSlots | 0 : 2;
 const GATE_ITER_MAX = 4;              // structural: max gate panels a piercing line can cross in one call
 const EPS = 1e-6;
 
@@ -204,6 +214,7 @@ function boxSeg() {
 // event payloads (reused; listeners must not retain them, ARCH §5)
 const P_SHOT = { count: 0, x: -0, z: -0, weapon: 'rifle' };
 const P_WSTART = { id: '', duration: -0 };
+const P_WSTORED = { id: '', slots: 0 };
 const P_WEND = { id: '' };
 const P_GSTART = { id: '', duration: -0 };
 const P_GEND = { id: '' };
@@ -393,6 +404,12 @@ export class Weapons {
     this._shakeEst = D0;           // estimate of the minigun's share of fx trauma (holds the 0.03 m shake)
     this._shotCount = 0;
     this._t = D0;                  // scaled simulation clock (s), drives visual lifetimes
+
+    // round 6: stored weapons (FIFO of W_* indices; _stored[0] fires next) and the pending FIRE request (requestFire
+    // from ui's DOM handlers; consumed at the top of the next step so the start happens inside the fixed step)
+    this._stored = new Int8Array(SLOTS).fill(W_NONE);
+    this._storedN = 0;
+    this._fireReq = false;
 
     // gear
     this._gear = {};               // id → seconds left (Infinity for armor / magnet); a key exists only while active
@@ -614,6 +631,11 @@ export class Weapons {
       this._emit('weapon:end', P_WEND);
     }
     this._wLeft = 0;
+    // round 6: a reset (level start, RESTART, QUIT) drops the stored weapons without a payout (the run is abandoned, or a
+    // finished level already settled them when its phase turned 'won' / 'lost', see _stepStored)
+    this._storedN = 0;
+    this._stored.fill(W_NONE);
+    this._fireReq = false;
     if (this._armorOn) this._endGear(ID_ARMOR);
     if (this._magnetOn) this._endGear(ID_MAGNET);
     if (this._chipLeft > 0) this._endGear(ID_CHIP);
@@ -679,6 +701,12 @@ export class Weapons {
   get weapon() { return this._w === W_NONE ? null : WEAPON_IDS[this._w]; }
   /** Seconds left on the active weapon (0 when none). */
   get weaponTimeLeft() { return this._w === W_NONE ? 0 : (this._wLeft > 0 ? this._wLeft : 0); }
+  /** Round 6: number of stored (picked-up, not yet started) weapons, 0..PICKUPS.weaponSlots. */
+  get storedCount() { return this._storedN; }
+  /** Round 6: id of the stored weapon at FIFO position i (0 = the one FIRE starts next), or null. */
+  storedId(i) { return i >= 0 && i < this._storedN ? WEAPON_IDS[this._stored[i]] : null; }
+  /** Round 6: true when FIRE would start a weapon now (one is stored and none is active). */
+  get canFire() { return this._storedN > 0 && this._w === W_NONE; }
   /** Active gear: id → seconds left (Infinity for gear.armor / gear.magnet). Only active ids are present. */
   get gear() { return this._gear; }
   /** Fire-rate multiplier from gear (fire-rate chip +40 %). */
@@ -741,16 +769,84 @@ export class Weapons {
   // -------------------------------------------------------------------------------------------
   // Power-ups and gear (ARCH §6.11, GDD §8.1 / §8.2)
   // -------------------------------------------------------------------------------------------
-  /** Starts (or replaces + refreshes) a timed weapon. Replacing an active weapon refunds PICKUPS.replaceRefund. */
+  /**
+   * Round 6 (lead decision): a weapon pickup (crate / item gate, via pickups.grantItem) is stored, not started. The
+   * FIFO slot holds PICKUPS.weaponSlots weapons → weapon:stored { id, slots } (slots = stored count after the pickup).
+   * With the slot full nothing is replaced: coin:pickup { amount: PICKUPS.replaceRefund, source:'refund' } at the squad,
+   * and no weapon:stored. Returns true when the weapon was stored.
+   */
+  storeWeapon(id) {
+    const idx = WEAPON_IDS.indexOf(id);
+    if (idx < 0) { warnOnce('weapons.unknown.' + id, 'weapons.storeWeapon: unknown weapon id ' + id); return false; }
+    if (this._storedN >= SLOTS) {
+      this._emitRefund();
+      return false;
+    }
+    this._stored[this._storedN++] = idx;
+    P_WSTORED.id = id; P_WSTORED.slots = this._storedN;
+    this._emit('weapon:stored', P_WSTORED);
+    return true;
+  }
+
+  /**
+   * Round 6: the player's FIRE (HUD button, Space, gamepad A). Returns whether it will start a weapon: false while a
+   * weapon is active (the stored one waits — a second tap never cuts the running weapon short nor burns the stored
+   * one) or when nothing is stored. The start happens at the top of the next step (startWeapon: the full
+   * WEAPONS.*.duration, weapon:start, the sting) — inside the fixed step, like every other gameplay event.
+   */
+  requestFire() {
+    if (!this.canFire) return false;
+    this._fireReq = true;
+    return true;
+  }
+
+  /** coin:pickup { amount: PICKUPS.replaceRefund, source:'refund' } at the squad (ARCH §6.11 refund origin). */
+  _emitRefund() {
+    const squad = this.ctx.squad;
+    P_COIN.amount = PICKUPS.replaceRefund; P_COIN.source = 'refund';
+    P_COIN.x = squad ? squad.x : 0; P_COIN.y = REFUND_Y; P_COIN.z = 0;
+    this._emit('coin:pickup', P_COIN);
+  }
+
+  /**
+   * Step A of step(): consumes a pending FIRE request (pops the FIFO head into startWeapon), then — once the level
+   * has ended — clears the unused stored weapons: level.phase 'won' (the boss died) pays PICKUPS.replaceRefund per
+   * weapon through coin:pickup 'refund' (coin flight, credited before the commit); 'lost' (the squad died — every
+   * endless run ends so) pays nothing and emits nothing: level ignores refunds once lost (QA LVL-20), and a refund
+   * emitted anyway would fly coins to the HUD that are never credited.
+   */
+  _stepStored() {
+    if (this._fireReq) {
+      this._fireReq = false;
+      if (this._storedN > 0 && this._w === W_NONE) {
+        const idx = this._stored[0];
+        for (let i = 1; i < this._storedN; i++) this._stored[i - 1] = this._stored[i];
+        this._storedN--;
+        this._stored[this._storedN] = W_NONE;
+        this.startWeapon(WEAPON_IDS[idx]);
+      }
+    }
+    if (this._storedN === 0) return;
+    const level = this.ctx.level;
+    const phase = level ? level.phase : null;
+    if (phase !== 'won' && phase !== 'lost') return;
+    const n = phase === 'won' ? this._storedN : 0;
+    this._storedN = 0;
+    this._stored.fill(W_NONE);
+    for (let i = 0; i < n; i++) this._emitRefund();
+  }
+
+  /**
+   * Starts (or replaces + refreshes) a timed weapon. Replacing an active weapon refunds PICKUPS.replaceRefund. Round 6:
+   * pickups no longer call this (they store — storeWeapon); FIRE does, and only while no weapon is active, so the
+   * replace branch serves debug / test callers only.
+   */
   startWeapon(id) {
     const idx = WEAPON_IDS.indexOf(id);
     if (idx < 0) { warnOnce('weapons.unknown.' + id, 'weapons.startWeapon: unknown weapon id ' + id); return; }
-    const squad = this.ctx.squad;
     if (this._w !== W_NONE) {
-      // GDD §8: "a new weapon pickup replaces and refreshes (old remaining time refunded as 25 c)"
-      P_COIN.amount = PICKUPS.replaceRefund; P_COIN.source = 'refund';
-      P_COIN.x = squad ? squad.x : 0; P_COIN.y = REFUND_Y; P_COIN.z = 0;
-      this._emit('coin:pickup', P_COIN);
+      // GDD §8 (pre-round-6 rule, kept for direct callers): replace and refresh, the old remaining time refunded as 25 c
+      this._emitRefund();
       P_WEND.id = WEAPON_IDS[this._w];
       const wasLaser = this._w === W_LASER;
       this._w = W_NONE;
@@ -886,6 +982,7 @@ export class Weapons {
     if (!this._inited) return;
     const ctx = this.ctx;
     this._t += dt;
+    this._stepStored();
     this._stepTimers(dt);
     this._detectQueries();
 

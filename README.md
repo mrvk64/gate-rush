@@ -4,7 +4,7 @@ The zombie gate-runner from the mobile ads, built as the real game. Your squad m
 
 It runs in any modern phone or desktop browser and installs to the home screen like an app. Everything is generated in code: the 3D models, textures, effects and sound. There are no image, model or audio files to download.
 
-This is version 1.2.1.
+This is version 1.2.2.
 
 ## What's in the game
 
@@ -15,6 +15,7 @@ This is version 1.2.1.
   - Weapons: shotgun, minigun, rocket launcher, railgun and laser.
   - Gear: armor plates, magnet, fire-rate chip and damage booster.
   - Troops: sniper, medic, flamethrower trooper, drone turret and APC.
+- **Weapons you fire when you choose.** A picked-up weapon is stored, not started. Up to two wait in the slot behind the round FIRE button at the bottom right, and each one runs its full time from the moment you fire it. A third pickup while the slot is full pays 25 coins, and so does each weapon still unused when you win a level. Save a rocket for the boss if you like.
 - **30 campaign levels in six districts.** Level 1 is the ad, played straight. Every five levels the road moves to a new district with its own light, fog, props and weather: Sunset Boulevard (drifting dust), Overcast Highway (rain), Night City (falling ash under neon), Toxic Industrial (spores), Ash Wasteland (embers) and Frozen Outskirts (snow).
 - **Endless mode.** It unlocks after level 10. The road is generated as you go, rotates through all six districts, and sends a mini-boss every fifth stretch of road. While a mini-boss is alive, the next gates and waves wait. The horde keeps growing, in numbers more than toughness, until it overruns your squad. How far you get is your score.
 - **A shop with permanent upgrades.** Start squad, fire rate, damage, coin multiplier and boss damage, ten ranks each. Your progress is saved on the device.
@@ -23,7 +24,7 @@ This is version 1.2.1.
 
 ## Controls
 
-Drag anywhere on the screen to steer, left or right. Your squad fires on its own. On a computer you can also use A/D or the arrow keys, P or Esc to pause, and M to mute.
+Drag anywhere on the screen to steer, left or right. Your squad fires on its own. To use a stored weapon, tap the FIRE button at the bottom right (you can keep steering with another finger), or press Space on a computer. On a computer you can also use A/D or the arrow keys, P or Esc to pause, and M to mute.
 
 ## Play it on your phone
 

@@ -51,6 +51,20 @@ const TEXT_ENTRY_SELECTOR = 'input:not([type]), input[type="text"], input[type="
 // standard gamepad mapping: button 9 = Start
 const GAMEPAD_START_BUTTON = 9;
 
+// Back guard (round 6, ARCH §6.2 "Back guard"): the history.state of the one entry engine keeps above the page's own
+// while the player is anywhere but the title, so the Android back gesture / button pauses (or steps back a screen)
+// instead of closing the installed app. Protocol values, not tuning: the marker only has to be recognisable.
+const BACK_GUARD_STATE = Object.freeze({ gateRush: 'back-guard' });
+const BACK_GUARD_RESYNC_MS = 1000;   // a dropped guard whose popstate never arrived re-reads history.state after this
+// r6 verify: after a Back the guard is re-armed by stepping FORWARD onto the entry the Back just left (a traversal adds
+// no entry). A pushState from popstate never has a fresh user activation, and Chrome's history-manipulation
+// intervention then marks the page's own entry skippable, so the second Back in a row closed the app (measured with a
+// browser-initiated Back, chrome.tabs.goBack, docs/build/r6-verify.md §2.2). A forward whose popstate never arrives
+// (no forward entry) falls back to the push after this.
+const BACK_GUARD_FORWARD_MS = 600;
+// the results screens' Back is their HOME icon (they have no [data-back] button)
+const BACK_HOME_BTN = Object.freeze({ complete: 'btn-complete-home', gameover: 'btn-home', endless: 'btn-endless-home' });
+
 const VALID_STATES = Object.freeze(['boot', 'title', 'levels', 'shop', 'playing', 'paused', 'complete', 'gameover']);
 
 // Reused payload objects (§5: emitters reuse module-level payloads; listeners never retain them)
@@ -63,6 +77,10 @@ const _errorPayload = { message: '', fatal: false };
 function nowMs() {
   if (typeof performance !== 'undefined' && performance !== null && typeof performance.now === 'function') return performance.now();
   return Date.now();
+}
+
+function isBackGuardState(s) {
+  return s !== null && typeof s === 'object' && s.gateRush === BACK_GUARD_STATE.gateRush;
 }
 
 function tierIndex(tier) {
@@ -330,6 +348,15 @@ export class Engine {
     // settings cache
     this._sensitivity = 1;
 
+    // back guard (armBackGuard): one history entry above the page's own while not on the title
+    this._guardOk = false;       // armed: popstate listened to, history usable, top-level index shell
+    this._guardOn = false;       // the guard entry is the current history entry
+    this._guardDropping = false; // history.back() issued to leave the guard on arriving at the title; its popstate is ours
+    this._guardTimer = 0;
+    this._guardForwarding = false; // history.forward() issued to re-arm the guard after a Back; its popstate is ours
+    this._guardFwdTimer = 0;
+    this._screen = 'boot';       // last ui:screen id (null = HUD only); 'settings' is an overlay, not a state
+
     // listeners (bound once; removed in dispose)
     this._onFrame = (now) => this._frameSafe(now);
     this._onPointerDown = (e) => this._pointerDown(e);
@@ -353,6 +380,10 @@ export class Engine {
     this._onSettingsChange = (p) => this._settingsChange(p);
     this._onAudioUnlocked = () => this._removeUnlockListeners();
     this._onDebugHistogram = (p) => this._histogram(p);
+    this._onPopState = (e) => this._popState(e);
+    this._onUiScreen = (p) => this._uiScreen(p);
+    this._onGuardResync = () => this._guardResync();
+    this._onGuardForwardTimeout = () => this._guardForwardTimeout();
     this._unsubs = [];
     this._unlockArmed = false;
     this._resizeTimer = 0;
@@ -489,8 +520,19 @@ export class Engine {
         window.removeEventListener('gamepadconnected', this._onGamepadConnected);
         window.removeEventListener('resize', this._onResizeAny);
         window.removeEventListener('orientationchange', this._onResizeAny);
+        window.removeEventListener('popstate', this._onPopState);
       } catch (_) { /* ignore */ }
     }
+    if (this._guardTimer) {
+      try { clearTimeout(this._guardTimer); } catch (_) { /* ignore */ }
+      this._guardTimer = 0;
+    }
+    if (this._guardFwdTimer) {
+      try { clearTimeout(this._guardFwdTimer); } catch (_) { /* ignore */ }
+      this._guardFwdTimer = 0;
+    }
+    this._guardForwarding = false;
+    this._guardOk = false;
     if (typeof document !== 'undefined') {
       try { document.removeEventListener('visibilitychange', this._onVisibility); } catch (_) { /* ignore */ }
     }
@@ -896,6 +938,200 @@ export class Engine {
       this._resetScalerWindow();   // the first visible frame carries a huge interval; start clean
       this.requestRedraw();
       this.measureRefresh();       // the panel may have changed while hidden (external display, power mode)
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Back guard (round 6, ARCH §6.2): the Android back gesture / button never closes the app mid-run
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * Boot step 13 (main): arms the back guard. In a standalone PWA with no history entry of its own, Back (an edge
+   * swipe with gesture navigation) closes the app, and a page cannot block the gesture — so while the player is
+   * anywhere but the title, engine keeps exactly one history entry (state BACK_GUARD_STATE) above the page's own,
+   * and Back pops it: popstate → pause / the screen's own back (`_backAction`) → the guard is re-armed by stepping
+   * forward onto that same entry (`_rearmGuard`, history.forward(): no new entry). On the title the guard is dropped, so
+   * one Back leaves the app as before. The entry is pushed on the first screen change away from the title, which
+   * normally follows a tap (Chrome's history-manipulation intervention skips entries a page added without a user
+   * activation — which is also why the re-arm steps forward instead of pushing). Not armed in the artifact shells or any framed page (pushState there writes the
+   * host tab's joint session history, and a history.back() could navigate the host), nor when history is unusable.
+   */
+  armBackGuard() {
+    if (this._guardOk) return;
+    const ctx = this._ctx;
+    if (ctx.config && ctx.config.isArtifact) return;
+    try {
+      if (typeof window === 'undefined' || window === null || typeof history === 'undefined' || history === null) return;
+      if (typeof history.pushState !== 'function' || typeof history.back !== 'function') return;
+      if (window.top !== window.self) return;
+      this._guardOn = isBackGuardState(history.state);   // a reload on the guard entry keeps it (no second push)
+      window.addEventListener('popstate', this._onPopState);
+    } catch (_) {
+      return;   // SecurityError (opaque origin) or no history: Back keeps the browser's default
+    }
+    this._guardOk = true;
+    const st = ctx.state;
+    if (st) this._screen = st.is('playing') ? null : (st.is('paused') ? 'pause' : st.current);
+    if (ctx.events) this._unsubs.push(ctx.events.on('ui:screen', this._onUiScreen));
+    this._syncGuard();
+  }
+
+  /** True while the current screen needs the guard: anything but the title (settings over the title included). */
+  _wantsGuard() {
+    if (this._screen === 'settings') return true;
+    const st = this._ctx.state;
+    return !!st && !st.is('title') && !st.is('boot');
+  }
+
+  _syncGuard() {
+    if (!this._guardOk || this._guardDropping || this._guardForwarding) return;   // a pending drop / re-arm re-syncs from its popstate
+    const want = this._wantsGuard();
+    if (want && !this._guardOn) this._pushGuard();
+    else if (!want && this._guardOn) this._dropGuard();
+  }
+
+  _pushGuard() {
+    try {
+      history.pushState(BACK_GUARD_STATE, '');
+      this._guardOn = true;
+    } catch (err) {
+      // pushState rate limit or a blocked history: this Back keeps the browser's default
+      warnOnce('engine.backGuard', 'back guard: pushState failed: ' + ((err && err.message) ? err.message : String(err)));
+    }
+  }
+
+  /** Arriving at the title: leaves the guard entry (history.back(); its popstate is consumed by `_popState`). */
+  _dropGuard() {
+    this._guardOn = false;
+    try {
+      if (!isBackGuardState(history.state)) return;   // not on the guard any more (navigated elsewhere in the history)
+      this._guardDropping = true;
+      history.back();
+    } catch (_) {
+      this._guardDropping = false;
+      return;
+    }
+    if (this._guardTimer) clearTimeout(this._guardTimer);
+    this._guardTimer = setTimeout(this._onGuardResync, BACK_GUARD_RESYNC_MS);
+  }
+
+  /** The drop's popstate never came (history.back() was a no-op): trust history.state. */
+  _guardResync() {
+    this._guardTimer = 0;
+    if (!this._guardDropping) return;
+    this._guardDropping = false;
+    try { this._guardOn = isBackGuardState(history.state); } catch (_) { this._guardOn = false; }
+    this._syncGuard();
+  }
+
+  /**
+   * r6 verify: re-arms the guard after a Back popped it by stepping forward onto that same entry (history.forward(): a
+   * traversal, so no entry is added and Chrome's history-manipulation intervention has nothing to mark skippable; a
+   * pushState here would have no fresh user activation, and the next Back would skip the page's entry and close the
+   * app). Its popstate is consumed by `_popState`; without one (no forward entry) `_guardForwardTimeout` pushes.
+   */
+  _rearmGuard() {
+    try {
+      history.forward();
+    } catch (_) {
+      this._guardForwarding = false;
+      this._syncGuard();
+      return;
+    }
+    if (this._guardFwdTimer) clearTimeout(this._guardFwdTimer);
+    this._guardFwdTimer = setTimeout(this._onGuardForwardTimeout, BACK_GUARD_FORWARD_MS);
+  }
+
+  /** The re-arm's popstate never came (no forward entry, or the traversal was dropped): trust history.state, then push. */
+  _guardForwardTimeout() {
+    this._guardFwdTimer = 0;
+    if (!this._guardForwarding) return;
+    this._guardForwarding = false;
+    try { this._guardOn = isBackGuardState(history.state); } catch (_) { this._guardOn = false; }
+    this._syncGuard();
+  }
+
+  _uiScreen(p) {
+    this._screen = p ? p.id : null;
+    this._syncGuard();
+  }
+
+  _popState(e) {
+    let onGuard = false;
+    try { onGuard = isBackGuardState(e && e.state !== undefined ? e.state : history.state); } catch (_) { onGuard = false; }
+    if (this._guardDropping) {
+      // our own history.back() on arriving at the title
+      this._guardDropping = false;
+      if (this._guardTimer) { clearTimeout(this._guardTimer); this._guardTimer = 0; }
+      this._guardOn = onGuard;
+      this._syncGuard();   // the player may have left the title again meanwhile
+      return;
+    }
+    if (this._guardForwarding) {
+      // our own history.forward() re-arming the guard after a Back
+      this._guardForwarding = false;
+      if (this._guardFwdTimer) { clearTimeout(this._guardFwdTimer); this._guardFwdTimer = 0; }
+      this._guardOn = onGuard;
+      this._syncGuard();   // pushes if the forward did not land on the guard; drops it if the title came meanwhile
+      return;
+    }
+    if (onGuard) {        // Forward onto the guard entry
+      this._guardOn = true;
+      this._syncGuard();
+      return;
+    }
+    // Back popped the guard: the page is on its own entry now. The screen's Back runs with the nested ui:screen syncs
+    // held (_guardForwarding), then the guard is re-armed by stepping forward onto the entry this Back left — unless
+    // this Back landed on the title (one more Back leaves the app there)
+    this._guardOn = false;
+    this._guardForwarding = true;
+    try { this._backAction(); } catch (err) { warnOnce('engine.backAction', 'back guard: back action failed: ' + ((err && err.message) ? err.message : String(err))); }
+    if (this._wantsGuard()) this._rearmGuard();
+    else { this._guardForwarding = false; this._syncGuard(); }
+  }
+
+  /**
+   * What Back does on the current screen: settings overlay → its BACK; playing → pause(); paused → stays paused;
+   * levels / shop → their BACK; results → their HOME icon; title → nothing (the guard is gone: the next Back leaves).
+   * Buttons are clicked rather than re-implemented, so ui runs its own flow (ui:button tap cue, _back, quitToTitle).
+   */
+  _backAction() {
+    const ctx = this._ctx;
+    const st = ctx.state;
+    if (!st) return;
+    if (this._screen === 'settings' && this._clickIn('scr-settings', '[data-back]')) return;
+    if (st.is('playing')) { this.pause(); return; }
+    if (st.is('paused')) return;
+    if (st.is('levels')) { this._clickIn('scr-levels', '[data-back]'); return; }
+    if (st.is('shop')) { this._clickIn('scr-shop', '[data-back]'); return; }
+    if (st.is('complete') || st.is('gameover')) {
+      let id = BACK_HOME_BTN[this._screen];
+      if (id === undefined) id = st.is('gameover') ? BACK_HOME_BTN.gameover : BACK_HOME_BTN.complete;
+      if (!this._clickId(id) && ctx.level && typeof ctx.level.quitToTitle === 'function') ctx.level.quitToTitle();
+    }
+  }
+
+  /** Clicks the first `selector` inside #`screenId` (guarded); false when it is missing. */
+  _clickIn(screenId, selector) {
+    try {
+      const scr = document.getElementById(screenId);
+      const btn = scr ? scr.querySelector(selector) : null;
+      if (!btn || typeof btn.click !== 'function') return false;
+      btn.click();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  _clickId(id) {
+    try {
+      const btn = document.getElementById(id);
+      if (!btn || typeof btn.click !== 'function') return false;
+      btn.click();
+      return true;
+    } catch (_) {
+      return false;
     }
   }
 

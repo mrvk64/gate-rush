@@ -7,7 +7,9 @@
 // moment (grantItem) and fx answers item:pickup with the J12 icon flight. Coins: InstancedMesh 64, spinning and
 // bobbing, pulled at PICKUPS.magnetPull inside the magnet radius (GEAR.magnet.baseRadius, or GEAR.magnet.radius
 // after the magnet gear) and collected at PICKUPS.coinCollect → coin:pickup { source:'pile' }.
-// grantItem routes 'weapon.*' → weapons.startWeapon, 'gear.*' → weapons.startGear, 'troop.*' → troops.add
+// grantItem routes 'weapon.*' → weapons.storeWeapon (round 6: stored in the FIFO weapon slot, started by the player's
+// FIRE; a full slot pays PICKUPS.replaceRefund as coin:pickup { source:'refund' } — weapons emits it — and the pickup
+// reports duplicate), 'gear.*' → weapons.startGear, 'troop.*' → troops.add
 // (a duplicate troop pays PICKUPS.duplicateCoins as coin:pickup { source:'duplicate' }), 'coins' →
 // coin:pickup { amount: PICKUPS.crateCoins, source:'crate' }; it always emits item:pickup { item, x, z, duplicate }.
 // An opened crate pops its lid (J12), then shrinks away and frees its slot; the J12 icon flight is fx's.
@@ -430,8 +432,8 @@ export class Pickups {
   // -------------------------------------------------------------------------------------------
   /**
    * Grants an item immediately (crate open or item gate pass): routes to weapons / troops, pays duplicates,
-   * always emits item:pickup { item, x, z, duplicate }. `duplicate` = a PICKUPS.duplicateCoins payout happened
-   * instead of a new effect (duplicate troop; second magnet — weapons pays that one itself, ARCH §6.11).
+   * always emits item:pickup { item, x, z, duplicate }. `duplicate` = a coin payout happened instead of a new effect
+   * (duplicate troop; second magnet; round 6: a weapon while the weapon slot is full — weapons pays those itself, ARCH §6.11).
    */
   grantItem(item, x, z) {
     const ctx = this.ctx;
@@ -446,8 +448,10 @@ export class Pickups {
         events.emit('coin:pickup', P_COIN);
       }
     } else if (item.startsWith('weapon.')) {
+      // round 6: stored, not started (the HUD FIRE button starts it); a full slot pays the refund (weapons emits it)
       const weapons = ctx.weapons;
-      if (weapons && typeof weapons.startWeapon === 'function') weapons.startWeapon(item);   // replace + refresh; weapons pays the refund itself
+      if (weapons && typeof weapons.storeWeapon === 'function') duplicate = weapons.storeWeapon(item) !== true;
+      else if (weapons && typeof weapons.startWeapon === 'function') weapons.startWeapon(item);   // pre-round-6 weapons
     } else if (item.startsWith('gear.')) {
       const weapons = ctx.weapons;
       if (weapons) {

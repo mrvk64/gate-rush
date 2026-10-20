@@ -488,8 +488,19 @@ class OverlayRenderPass extends RenderPass {
 }
 
 // ---------------------------------------------------------------------------------------------
-// TextureFactory — every canvas is drawn once at boot (§9.6); no texture uploads after build().
+// TextureFactory — every canvas is drawn at boot (§9.6) and re-drawn from the same code (fixed seeds) whenever its
+// contents may be gone: webglcontextrestored (rebuild → restoreAll), a 2D 'contextrestored' on the canvas, and a
+// resume (visibilitychange → visible, pageshow, the lifecycle 'resume') whose probe pixels read blank (round 6).
 // ---------------------------------------------------------------------------------------------
+// Round 6 (owner's phone, "the numbers were gone from the boards" after 2 h asleep): Chrome GPU-backs these 2D canvases
+// by default, and when Android reclaims the GPU process every one of them loses its pixels ('contextlost' →
+// 'contextrestored' with a blank bitmap) while the WebGL context is lost and restored — whose rebuild re-uploaded the
+// blank canvases (digits, road paint, windows, icons all gone; reproduced with CDP Browser.crashGpuProcess). A
+// CPU-backed canvas (willReadFrequently) that only ever receives pixels (paths, text, putImageData — never a drawImage of
+// a GPU canvas, see _paintRec) has no GPU state to lose, so this is the first line of defence; it also makes the resume
+// probe (getImageData of single pixels) a plain memory read (≈ 0.04 ms for all canvases). The re-draw paths above cover
+// a browser that ignores the hint.
+const CANVAS_CPU = Object.freeze({ willReadFrequently: true });
 function makeCanvas(w, h) {
   if (typeof document === 'undefined') throw new Error('render: TextureFactory needs a DOM');
   const c = document.createElement('canvas');
@@ -497,9 +508,28 @@ function makeCanvas(w, h) {
   return c;
 }
 function ctx2d(c) {
-  const g = c.getContext('2d');
+  const g = c.getContext('2d', CANVAS_CPU);
   if (!g) throw new Error('render: canvas 2d context unavailable');
   return g;
+}
+/** The 2D context of `c` back to its default state with a transparent bitmap (a re-draw must start exactly like the
+ *  boot draw did on a fresh context: same transform, compositing, line and text state). */
+function resetCtx(g, c) {
+  if (typeof g.reset === 'function') { g.reset(); return; }
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.globalAlpha = 1; g.globalCompositeOperation = 'source-over';
+  g.lineWidth = 1; g.lineCap = 'butt'; g.lineJoin = 'miter';
+  g.textAlign = 'start'; g.textBaseline = 'alphabetic';
+  g.fillStyle = '#000000'; g.strokeStyle = '#000000';
+  g.clearRect(0, 0, c.width, c.height);
+}
+/** Alpha (0..255) of one pixel of `c`; -1 when it cannot be read (no context, a lost context, a throwing readback). */
+function probeAlpha(c, x, y) {
+  try {
+    const g = c.getContext('2d', CANVAS_CPU);
+    if (!g || (typeof g.isContextLost === 'function' && g.isContextLost())) return -1;
+    return g.getImageData(x, y, 1, 1).data[3];
+  } catch (_) { return -1; }
 }
 function rgbaCss(hex, a) { return 'rgba(' + ((hex >> 16) & 255) + ',' + ((hex >> 8) & 255) + ',' + (hex & 255) + ',' + a + ')'; }
 function roundRectPath(g, x, y, w, h, r) {
@@ -584,6 +614,10 @@ const ICON_STROKE = 4;           // shape constant: icon outline width in design
 const ICON_SEAM = 1.5;           // shape constant: width of the dark seam lines drawn over a fill (design units)
 const ICON_GUN_TILT = -0.6;      // shape constant: gun icons are side views rotated muzzle-up by this angle (rad)
 const ICON_FIT = 0.86;           // shape constant: geometry is designed to ±15.5 units; × this plus the outline stays inside the ±16 cell
+// shape constants: radial-disc gradient stops (offset, alpha pairs) of the glow / particle / dust canvases
+const GLOW_STOPS = Object.freeze([0, 1, 0.22, 0.85, 0.55, 0.3, 1, 0]);
+const PARTICLE_STOPS = Object.freeze([0, 1, 0.35, 0.75, 1, 0]);
+const DUST_STOPS = Object.freeze([0, 1, 0.45, 0.4, 1, 0]);
 
 export class TextureFactory {
   constructor(ctx) {
@@ -596,22 +630,72 @@ export class TextureFactory {
     this._iconsCanvas = null;
     this._iconCache = new Map();
     this._atlasWithFont = false;
+    // round 6: one record per paint recipe { name, canvases, texes, paint, px, py, expect, lostMask } (see _record)
+    this._recs = [];
+    this._roadRec = null; this._atlasRec = null;
+    this._divProbeX = 0; this._divProbeY = 0;   // centre of the ÷ bar (always inked), set by _paintDivide
+    this._fontWaiting = false;
+    this.onRepaint = null;                       // RenderSystem: () => render.dirty = true (a re-draw needs a frame while paused)
+    // debug / harness: re-draws since boot and the last one's cause and cost
+    this.repaints = 0; this.lastRepaint = ''; this.lastRepaintMs = 0;
+    this._listening = false;
+    this._onResume = () => { this._resumeCheck(); };
+    this._fontSet = null;                        // document.fonts while its 'loadingdone' listener is installed
+    this._onFontsDone = () => {
+      // the display font arrived after build()'s wait (slow network): the atlas leaves the fallback face once
+      if (!this._atlasWithFont && this._atlasRec && this._atlasRec.lostMask === 0 && this._recs.length && this._fontLoaded()) this._repaint(this._atlasRec, 'font');
+    };
   }
 
   /** Draws every canvas (progress 0..1), waits for the display font ≤ RENDER.textures.fontWaitMs and
    *  redraws the atlas once if the font arrives after the first paint (ARCH §6.3 note on fonts). The
-   *  font request starts before any drawing so it downloads in parallel. */
+   *  font request starts before any drawing so it downloads in parallel. Round 6: every canvas is kept with its paint
+   *  recipe (fixed seeds, so a re-draw is pixel-identical), its probe pixel and its 2D context-loss listeners, and the
+   *  resume listeners are installed (see restoreAll / verify). */
   async build(progressCb) {
     const report = (t) => { if (typeof progressCb === 'function') { try { progressCb(t); } catch (_) { /* ignore */ } } };
     const fontWait = this._waitFont();
+    const T = RENDER.textures;
     const steps = [
-      () => { this.road = this._drawRoad(); },
-      () => { this.digitAtlas = this._drawAtlas(); },
-      () => { this.glow = this._drawGlow(); this.particle = this._drawParticle(); this.dust = this._drawDust(); },
-      () => { this.smoke = this._drawSmoke(); },
-      () => { this._drawWindows(); },
-      () => { this.muzzle = this._drawMuzzle(); },
-      () => { this.icons = this._drawIcons(); },
+      () => {
+        this._roadRec = this._record('road', [makeCanvas(T.road[0], T.road[1])], (c) => this._paintRoad(c[0]),
+          [{ repeat: true, mips: true, aniso: 1 }], 1, 1);
+        this.road = this._roadRec.texes[0];
+      },
+      () => {
+        this._atlasCanvas = makeCanvas(T.digitAtlas[0], T.digitAtlas[1]);
+        // probe: the centre of the ÷ bar (a shape, inked whatever the font)
+        this._atlasRec = this._record('digitAtlas', [this._atlasCanvas], (c) => this._paintAtlas(c[0]),
+          [{ mips: true, premult: true, aniso: RENDER.atlas.anisotropy }], -1, -1);
+        this._setProbe(this._atlasRec, this._divProbeX, this._divProbeY);
+        this.digitAtlas = this._atlasRec.texes[0];
+      },
+      () => {
+        this.glow = this._discRecord('glow', T.glow[0], GLOW_STOPS);
+        this.particle = this._discRecord('particle', T.particle[0], PARTICLE_STOPS);
+        this.dust = this._discRecord('dust', T.dust[0], DUST_STOPS);
+      },
+      () => {
+        this.smoke = this._record('smoke', [makeCanvas(T.smoke[0], T.smoke[1])], (c) => this._paintSmoke(c[0]),
+          [{ repeat: true, mips: true, linear: true }], T.smoke[0] >> 1, T.smoke[1] >> 1, true).texes[0];   // direct: CPU-made pixels
+      },
+      () => {
+        const W = T.windows[0], H = T.windows[1];
+        const r = this._record('windows', [makeCanvas(W, H), makeCanvas(W, H)], (c) => this._paintWindows(c[0], c[1]),
+          [{ repeat: true, mips: true }, { repeat: true, mips: true }], 1, 1);
+        this.windows = r.texes[0];
+        this.facade = r.texes[1];
+      },
+      () => {
+        this.muzzle = this._record('muzzle', [makeCanvas(T.muzzle[0], T.muzzle[1])], (c) => this._paintMuzzle(c[0]),
+          [{ premult: true }], T.muzzle[1] >> 1, T.muzzle[1] >> 1).texes[0];
+      },
+      () => {
+        this._iconsCanvas = makeCanvas(T.icons[0], T.icons[1]);
+        const r = this._record('icons', [this._iconsCanvas], (c) => this._paintIcons(c[0]), [{ mips: true, premult: true }], -1, -1);
+        this._findInk(r, ICON_CELL, ICON_CELL);   // probe: the first inked pixel of the first icon cell
+        this.icons = r.texes[0];
+      },
     ];
     let slice = performance.now();
     for (let i = 0; i < steps.length; i++) {
@@ -622,10 +706,8 @@ export class TextureFactory {
       if (performance.now() - slice >= PAINT_SLICE_MS) { await yieldPaint(); slice = performance.now(); } else await yieldFrame();
     }
     const fontArrived = await fontWait;
-    if ((fontArrived || this._fontLoaded()) && !this._atlasWithFont) {
-      this._paintAtlas();
-      this.digitAtlas.needsUpdate = true;
-    }
+    if ((fontArrived || this._fontLoaded()) && !this._atlasWithFont) this._repaint(this._atlasRec, 'font');
+    this._installListeners();
     report(1);
   }
 
@@ -676,17 +758,224 @@ export class TextureFactory {
     return url;
   }
 
-  /** Road anisotropy by tier (§9.6); re-uploads the road canvas once when it changes. */
+  /** Road anisotropy by tier (§9.6); re-uploads the road canvas once when it changes (round 6: re-drawn first when its
+   *  probe pixel reads blank, so a tier change can never upload a lost canvas). */
   setRoadAnisotropy(n) {
-    if (this.road && this.road.anisotropy !== n) { this.road.anisotropy = n; this.road.needsUpdate = true; }
+    if (this.road && this.road.anisotropy !== n) {
+      this.road.anisotropy = n;
+      if (this._roadRec && this._isBlank(this._roadRec)) this._repaint(this._roadRec, 'aniso');
+      this.road.needsUpdate = true;
+    }
   }
 
-  /** After a context restore: the canvases persist, so only flag re-upload (§9.5). */
+  /** Flags every canvas texture for re-upload as it is (no re-draw). Kept for callers that know the canvases are
+   *  intact; a context restore uses restoreAll(). */
   markAllNeedsUpdate() { for (let i = 0; i < this._all.length; i++) this._all[i].needsUpdate = true; }
 
-  dispose() { for (let i = 0; i < this._all.length; i++) this._all[i].dispose(); this._all.length = 0; this._iconCache.clear(); }
+  /** Round 6, after webglcontextrestored (RenderSystem.rebuild, §9.5): re-draws EVERY procedural canvas from its recipe
+   *  and flags its texture(s) for re-upload — a GPU-process loss takes GPU-backed 2D canvases with it, so "the
+   *  canvases persist" is not something a restore may assume. The display font is re-checked first (the atlas uses
+   *  Lilita One when loaded, else the system fallback and a re-draw once the font arrives). One longer frame, behind
+   *  the 'Reloading graphics…' overlay; a canvas whose 2D context is still lost is re-drawn by its own 'contextrestored'. */
+  restoreAll() { this._repaintAll('webgl'); }
+
+  /** Round 6: cheap integrity check — one 1 × 1 getImageData per canvas at a pixel its recipe always inks (CPU-backed
+   *  canvases: a memory read). Any blank canvas → every canvas is re-drawn and re-uploaded (a loss never takes just
+   *  one). Also re-draws the atlas once the display font is available when it was drawn with the fallback. Returns
+   *  true when something was re-drawn. Called on resume (visibilitychange → visible, pageshow, 'resume'). */
+  verify() {
+    for (let i = 0; i < this._recs.length; i++) {
+      if (this._isBlank(this._recs[i])) { this._repaintAll('blank:' + this._recs[i].name); return true; }
+    }
+    if (!this._atlasWithFont && this._atlasRec && this._atlasRec.lostMask === 0) {
+      if (this._fontLoaded()) { this._repaint(this._atlasRec, 'font'); return true; }
+      this._ensureFont();
+    }
+    return false;
+  }
+
+  dispose() {
+    this._removeListeners();
+    for (let i = 0; i < this._all.length; i++) this._all[i].dispose();
+    this._all.length = 0; this._recs.length = 0; this._iconCache.clear();
+    this.onRepaint = null;
+  }
 
   // ---- internals -----------------------------------------------------------------------------
+  /** Creates the canvas textures of one paint recipe, paints it (_paintRec), records its probe pixel (px, py; < 0 =
+   *  set later) and listens for its 2D context loss. `paint(canvases)` draws the given canvases completely from code,
+   *  identically on every call (fixed seeds); `direct` paints straight into the kept canvases (smoke: putImageData of
+   *  CPU-made pixels gains nothing from a GPU scratch). */
+  _record(name, canvases, paint, texOpts, px, py, direct) {
+    const rec = { name, canvases, texes: [], paint, direct: !!direct, px: 0, py: 0, expect: new Int16Array(canvases.length), lostMask: 0 };
+    this._paintRec(rec);
+    for (let i = 0; i < canvases.length; i++) rec.texes.push(this._tex(canvases[i], texOpts[i]));
+    if (px >= 0) this._setProbe(rec, px, py);
+    for (let i = 0; i < canvases.length; i++) this._listen2d(rec, i);
+    this._recs.push(rec);
+    return rec;
+  }
+
+  /** Round 6: paints `rec` fast and keeps it safe. The recipe runs on fresh scratch canvases with the browser's default
+   *  (GPU-rasterised) 2D context, then each result is copied as PIXELS (getImageData → putImageData: one read-back)
+   *  into the kept CPU-backed canvas and the scratch is released. Not drawImage: Chrome turns a willReadFrequently
+   *  canvas that receives a GPU canvas through drawImage into a GPU-backed one (it was lost with the GPU process in the
+   *  crash test, and every 1-px read became a 0.4 ms GPU round trip); a putImageData'd canvas survives. The un- /
+   *  re-premultiply round trip is exact (|error| < 0.5 before rounding). Boot cost at 4× CPU throttling: GPU-only
+   *  111 ms for all canvases, this way ≈ the same, rasterised on the CPU 206 ms. A scratch that is lost (the GPU is gone
+   *  right now) or missing, or a read-back that throws, falls back to painting straight into the kept canvases. Boot
+   *  and re-draws only (allocates). */
+  _paintRec(rec) {
+    const cs = rec.canvases;
+    let scratch = null;
+    if (!rec.direct) {
+      try {
+        scratch = [];
+        for (let i = 0; i < cs.length; i++) {
+          const sc = makeCanvas(cs[i].width, cs[i].height);
+          const sg = sc.getContext('2d');                      // default context: GPU-rasterised where the browser can
+          if (!sg) { scratch = null; break; }
+          scratch.push(sc);
+        }
+      } catch (_) { scratch = null; }
+    }
+    if (scratch) {
+      rec.paint(scratch);
+      let ok = true;
+      for (let i = 0; i < cs.length; i++) {
+        const sg = scratch[i].getContext('2d');
+        if (typeof sg.isContextLost === 'function' && sg.isContextLost()) { ok = false; break; }
+      }
+      if (ok) {
+        try {
+          for (let i = 0; i < cs.length; i++) {
+            const img = scratch[i].getContext('2d').getImageData(0, 0, cs[i].width, cs[i].height);
+            const g = ctx2d(cs[i]);
+            resetCtx(g, cs[i]);
+            g.putImageData(img, 0, 0);
+          }
+        } catch (_) { ok = false; }
+      }
+      for (let i = 0; i < scratch.length; i++) scratch[i].width = 0;   // free the scratch backing store now
+      if (ok) return;
+    }
+    rec.paint(cs);
+  }
+
+  /** A radial-disc canvas record (glow / particle / dust); returns its texture. */
+  _discRecord(name, size, stops) {
+    return this._record(name, [makeCanvas(size, size)], (c) => this._paintDisc(c[0], stops), [{ premult: true }], size >> 1, size >> 1).texes[0];
+  }
+
+  /** Sets the probe pixel of `rec` and the alpha each canvas has there now (a read ≤ 0 keeps the previous
+   *  expectation: a paint onto a still-lost context must not disable the probe). */
+  _setProbe(rec, x, y) {
+    rec.px = Math.max(0, Math.floor(x)); rec.py = Math.max(0, Math.floor(y));
+    for (let i = 0; i < rec.canvases.length; i++) {
+      const a = probeAlpha(rec.canvases[i], rec.px, rec.py);
+      if (a > 0) rec.expect[i] = a;
+    }
+  }
+
+  /** Probe = the first clearly inked pixel of the top-left w × h rect of rec's first canvas (boot only, one readback). */
+  _findInk(rec, w, h) {
+    try {
+      const d = ctx2d(rec.canvases[0]).getImageData(0, 0, w, h).data;
+      for (let i = 3; i < d.length; i += 4) {
+        if (d[i] >= 200) { const p = (i - 3) >> 2; this._setProbe(rec, p % w, (p / w) | 0); return; }
+      }
+    } catch (_) { /* no probe: verify() cannot see this canvas blank; the 2D events and restoreAll still cover it */ }
+  }
+
+  /** True when a canvas of `rec` that is not inside a 2D context loss reads blank (alpha 0) at its probe pixel. */
+  _isBlank(rec) {
+    for (let i = 0; i < rec.canvases.length; i++) {
+      if (rec.expect[i] > 0 && (rec.lostMask & (1 << i)) === 0 && probeAlpha(rec.canvases[i], rec.px, rec.py) === 0) return true;
+    }
+    return false;
+  }
+
+  /** Re-draws one recipe from code and flags its texture(s) for re-upload. */
+  _repaint(rec, why) {
+    if (!rec) return;
+    const t0 = performance.now();
+    try { this._paintRec(rec); } catch (err) { warnOnce('render.repaint.' + rec.name, 'texture re-draw failed (' + rec.name + '): ' + ((err && err.message) ? err.message : String(err))); }
+    if (rec === this._atlasRec) this._setProbe(rec, this._divProbeX, this._divProbeY);   // the ÷ bar follows the font's metrics
+    for (let i = 0; i < rec.texes.length; i++) rec.texes[i].needsUpdate = true;
+    this.repaints++; this.lastRepaint = rec.name + ':' + why; this.lastRepaintMs = performance.now() - t0;
+    if (typeof this.onRepaint === 'function') { try { this.onRepaint(); } catch (_) { /* ignore */ } }
+  }
+
+  /** Re-draws every recipe (font re-checked first). */
+  _repaintAll(why) {
+    this._ensureFont();
+    const t0 = performance.now();
+    for (let i = 0; i < this._recs.length; i++) this._repaint(this._recs[i], why);
+    this.lastRepaint = 'all:' + why; this.lastRepaintMs = performance.now() - t0;
+  }
+
+  /** When the display font is not loaded: (re)request it, one request at a time; when it arrives, the atlas is re-drawn. */
+  _ensureFont() {
+    if (this._fontLoaded() || this._fontWaiting) return;
+    this._fontWaiting = true;
+    this._waitFont().then((ok) => {
+      this._fontWaiting = false;
+      if ((ok || this._fontLoaded()) && !this._atlasWithFont && this._atlasRec && this._atlasRec.lostMask === 0 && this._recs.length) {
+        this._repaint(this._atlasRec, 'font');
+      }
+    }, () => { this._fontWaiting = false; });
+  }
+
+  /** 2D canvas context loss (Chrome fires these on GPU-backed canvases): 'contextlost' marks the canvas (NOT
+   *  preventDefault — on a 2D context that forbids the restore), 'contextrestored' (a blank bitmap) re-draws the
+   *  recipe once none of its canvases is lost any more. Init only (two closures per canvas). */
+  _listen2d(rec, i) {
+    const c = rec.canvases[i], bit = 1 << i;
+    try {
+      c.addEventListener('contextlost', () => { rec.lostMask |= bit; });
+      c.addEventListener('contextrestored', () => {
+        rec.lostMask &= ~bit;
+        if (rec.lostMask === 0 && this._recs.length) this._repaint(rec, '2d');
+      });
+    } catch (_) { /* no events: restoreAll / verify still cover this canvas */ }
+  }
+
+  /** Resume listeners: visibilitychange (→ visible), pageshow (incl. a bfcache restore), the Page Lifecycle 'resume'
+   *  after a freeze; plus document.fonts 'loadingdone' (a display font later than build()'s wait re-draws the atlas). */
+  _installListeners() {
+    if (this._listening) return;
+    try {
+      if (typeof document !== 'undefined') {
+        document.addEventListener('visibilitychange', this._onResume);
+        document.addEventListener('resume', this._onResume);
+      }
+      if (typeof window !== 'undefined') window.addEventListener('pageshow', this._onResume);
+      this._listening = true;
+      const fset = typeof document !== 'undefined' ? document.fonts : null;
+      if (fset && typeof fset.addEventListener === 'function') { fset.addEventListener('loadingdone', this._onFontsDone); this._fontSet = fset; }
+    } catch (_) { /* no resume check; restoreAll and the 2D events remain */ }
+  }
+
+  _removeListeners() {
+    if (!this._listening) return;
+    this._listening = false;
+    try {
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', this._onResume);
+        document.removeEventListener('resume', this._onResume);
+      }
+      if (typeof window !== 'undefined') window.removeEventListener('pageshow', this._onResume);
+      if (this._fontSet) { this._fontSet.removeEventListener('loadingdone', this._onFontsDone); this._fontSet = null; }
+    } catch (_) { /* ignore */ }
+  }
+
+  _resumeCheck() {
+    try {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    } catch (_) { /* treat as visible */ }
+    if (this._recs.length) this.verify();
+  }
+
   _iconCol(id) {
     const key = RENDER.icons.ofItem[id] !== undefined ? RENDER.icons.ofItem[id] : id;
     return RENDER.icons.order.indexOf(key);
@@ -731,11 +1020,13 @@ export class TextureFactory {
     } catch (_) { return Promise.resolve(false); }
   }
 
-  /** Draws fn three times (y, y − H, y + H) so shapes wrap across the vertical tile seam. */
-  _wrapY(g, H, fn) {
-    fn();
-    g.save(); g.translate(0, -H); fn(); g.restore();
-    g.save(); g.translate(0, H); fn(); g.restore();
+  /** Draws fn at y, y − H and y + H so shapes wrap across the vertical tile seam; [y0, y1] is the shape's vertical
+   *  extent at offset 0, and a copy that lies wholly outside the canvas is skipped (round 6: it would draw nothing —
+   *  same pixels — but on a CPU-backed canvas each skipped radial-gradient copy is real rasterisation time). */
+  _wrapY(g, H, y0, y1, fn) {
+    if (y1 >= 0 && y0 <= H) fn();
+    if (y1 - H >= 0) { g.save(); g.translate(0, -H); fn(); g.restore(); }
+    if (y0 + H <= H) { g.save(); g.translate(0, H); fn(); g.restore(); }
   }
 
   /** Lane paint stripe with `worn` fraction eroded by asphalt-coloured stamps. */
@@ -751,9 +1042,10 @@ export class TextureFactory {
   }
 
   // road 512×1024 = 8 m × 15 m (RENDER.road.textureM): asphalt, wear, patches, cracks, tyre marks, lane paint, grain
-  _drawRoad() {
-    const W = RENDER.textures.road[0], H = RENDER.textures.road[1];
-    const c = makeCanvas(W, H), g = ctx2d(c);
+  _paintRoad(c) {
+    const W = c.width, H = c.height;
+    const g = ctx2d(c);
+    resetCtx(g, c);
     const R = PALETTE.road;
     const pxX = W / RENDER.road.textureM[0], pxY = H / RENDER.road.textureM[1];
     const rnd = mulberry32(0x6F0B13);                               // fixed cosmetic seed: the road never changes
@@ -761,7 +1053,7 @@ export class TextureFactory {
     // soft wear blotches
     for (let i = 0; i < 70; i++) {
       const x = rnd() * W, y = rnd() * H, r = (0.4 + rnd() * 1.8) * pxX, col = rnd() < 0.5 ? R.crack : R.patch;
-      this._wrapY(g, H, () => {
+      this._wrapY(g, H, y - r, y + r, () => {
         const grd = g.createRadialGradient(x, y, 0, x, y, r);
         grd.addColorStop(0, rgbaCss(col, 0.2)); grd.addColorStop(1, rgbaCss(col, 0));
         g.fillStyle = grd; g.fillRect(x - r, y - r, r * 2, r * 2);
@@ -770,7 +1062,8 @@ export class TextureFactory {
     // tar patches
     for (let i = 0; i < 12; i++) {
       const x = rnd() * W, y = rnd() * H, w = (0.6 + rnd() * 1.6) * pxX, h = (0.8 + rnd() * 2.2) * pxY, rot = (rnd() - 0.5) * 0.2;
-      this._wrapY(g, H, () => {
+      const ext = 0.5 * Math.sqrt(w * w + h * h);                    // bound of the rotated patch
+      this._wrapY(g, H, y - ext, y + ext, () => {
         g.save(); g.translate(x, y); g.rotate(rot);
         g.fillStyle = rgbaCss(R.patch, 0.85); roundRectPath(g, -w / 2, -h / 2, w, h, 6); g.fill();
         g.restore();
@@ -811,8 +1104,11 @@ export class TextureFactory {
       const n = 6 + Math.floor(rnd() * 10), lw = 1.5 + rnd() * 2.5;
       pts[0] = x; pts[1] = y;
       for (let s = 1; s <= n; s++) { a += (rnd() - 0.5) * 1.2; const len = 10 + rnd() * 24; x += Math.cos(a) * len; y += Math.sin(a) * len; pts[s * 2] = x; pts[s * 2 + 1] = y; }
-      this._wrapY(g, H, () => {
-        g.lineWidth = lw; g.beginPath(); g.moveTo(pts[0], pts[1]);
+      let y0 = pts[1], y1 = pts[1];
+      for (let s = 1; s <= n; s++) { const py = pts[s * 2 + 1]; if (py < y0) y0 = py; else if (py > y1) y1 = py; }
+      g.lineWidth = lw;
+      this._wrapY(g, H, y0 - lw, y1 + lw, () => {
+        g.beginPath(); g.moveTo(pts[0], pts[1]);
         for (let s = 1; s <= n; s++) g.lineTo(pts[s * 2], pts[s * 2 + 1]);
         g.stroke();
       });
@@ -826,7 +1122,6 @@ export class TextureFactory {
     // asphalt × (1 ± amp), like the old per-pixel multiply) instead of a getImageData loop over the whole 512×1024 canvas
     // (≈ 140 ms at 4× CPU throttling — round-2 QA VIS-17)
     this._grain(g, W, H, R.asphaltNoise, rnd);
-    return this._tex(c, { repeat: true, mips: true, aniso: 1 });
   }
 
   /** Overlays a GRAIN_TILE × GRAIN_TILE white-noise tile (grey 0.5 ± amp/2, so 'overlay' scales dark pixels by 1 ± amp)
@@ -849,21 +1144,15 @@ export class TextureFactory {
   }
 
   // digit atlas 1024×256: 2 rows × 10 cells of 102×128, glyph 100 px Lilita One, RENDER.atlas.strokePx outline (§6.3)
-  _drawAtlas() {
-    const W = RENDER.textures.digitAtlas[0], H = RENDER.textures.digitAtlas[1];
-    this._atlasCanvas = makeCanvas(W, H);
-    this._paintAtlas();
-    return this._tex(this._atlasCanvas, { mips: true, premult: true, aniso: RENDER.atlas.anisotropy });
-  }
 
   /** Paints both atlas rows. Digits / ops / letters share one baseline (centred on the cap box of '0')
    *  so mixed strings line up; ÷, ★ and ⚡ are shapes (_paintDivide, _paintSymbol), ★ / ⚡ centred on their own box. A glyph wider
    *  or taller than the padded cell (cell − 2·padPx − strokePx) is scaled down to fit, and every glyph is
    *  clipped to its own cell so nothing bleeds into a neighbour. */
-  _paintAtlas() {
-    const c = this._atlasCanvas, g = ctx2d(c);
+  _paintAtlas(c) {
+    const g = ctx2d(c);
     const A = RENDER.atlas, cw = A.cell[0], chh = A.cell[1];
-    g.clearRect(0, 0, c.width, c.height);
+    resetCtx(g, c);
     const fontOk = this._fontLoaded();
     const family = '"' + RENDER.textures.font + '", ' + A.fallbackFont;
     const maxW = cw - 2 * A.padPx - A.strokePx, maxH = chh - 2 * A.padPx - A.strokePx;
@@ -934,6 +1223,7 @@ export class TextureFactory {
     }
     const lim = half + A.strokePx * 0.5;                              // keep the outline inside the cell
     cy = Math.min(y0 + chh - lim, Math.max(y0 + lim, cy));
+    this._divProbeX = cx; this._divProbeY = cy;                       // round 6: the bar centre is the atlas probe pixel
     const dy = barH * 0.5 + gap + r;                                  // dot centre offset from the bar centre
     const bx = cx - barW * 0.5, by = cy - barH * 0.5, br = barH * 0.5;
     g.save();
@@ -980,22 +1270,21 @@ export class TextureFactory {
     g.restore();
   }
 
-  _radialDisc(size, stops) {
-    const c = makeCanvas(size, size), g = ctx2d(c);
+  _paintDisc(c, stops) {
+    const size = c.width, g = ctx2d(c);
+    resetCtx(g, c);
     const grd = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
     for (let i = 0; i < stops.length; i += 2) grd.addColorStop(stops[i], 'rgba(255,255,255,' + stops[i + 1] + ')');
     g.fillStyle = grd; g.fillRect(0, 0, size, size);
     return c;
   }
 
-  _drawGlow() { return this._tex(this._radialDisc(RENDER.textures.glow[0], [0, 1, 0.22, 0.85, 0.55, 0.3, 1, 0]), { premult: true }); }
-  _drawParticle() { return this._tex(this._radialDisc(RENDER.textures.particle[0], [0, 1, 0.35, 0.75, 1, 0]), { premult: true }); }
-  _drawDust() { return this._tex(this._radialDisc(RENDER.textures.dust[0], [0, 1, 0.45, 0.4, 1, 0]), { premult: true }); }
 
   // smoke 256×256: tileable fbm in rgb (column shader reads .r), soft blob × noise in alpha (particles)
-  _drawSmoke() {
-    const W = RENDER.textures.smoke[0], H = RENDER.textures.smoke[1];
-    const c = makeCanvas(W, H), g = ctx2d(c);
+  _paintSmoke(c) {
+    const W = c.width, H = c.height;
+    const g = ctx2d(c);
+    resetCtx(g, c);
     const img = g.createImageData(W, H), d = img.data;
     // the 4 octaves' lattice values are hashed once (4² + 8² + 16² + 32² values) instead of 4 hashes per octave per
     // pixel (VIS-17: the same tileable value noise, a fraction of the boot cost)
@@ -1019,14 +1308,13 @@ export class TextureFactory {
       }
     }
     g.putImageData(img, 0, 0);
-    return this._tex(c, { repeat: true, mips: true, linear: true });
   }
 
   // windows 256×256 (emissive, lit windows only) + facade (colour map) with the same layout: tile = 6 m × 6 m, 2 storeys × 4 windows
-  _drawWindows() {
-    const W = RENDER.textures.windows[0], H = RENDER.textures.windows[1];
-    const ce = makeCanvas(W, H), ge = ctx2d(ce);
-    const cf = makeCanvas(W, H), gf = ctx2d(cf);
+  _paintWindows(ce, cf) {
+    const W = ce.width, H = ce.height;
+    const ge = ctx2d(ce), gf = ctx2d(cf);
+    resetCtx(ge, ce); resetCtx(gf, cf);
     const P = PALETTE.props;
     const rnd = mulberry32(0x7E6B45);
     ge.fillStyle = '#000000'; ge.fillRect(0, 0, W, H);
@@ -1064,14 +1352,13 @@ export class TextureFactory {
     this._grain(gf, W, H, FACADE_GRAIN, rnd);
     gf.fillStyle = 'rgba(0,0,0,0.12)';
     for (let i = 0; i < 10; i++) { const x = rnd() * W, w = 2 + rnd() * 5, y = rnd() * H, h = 20 + rnd() * 90; gf.fillRect(x, y, w, h); }
-    this.windows = this._tex(ce, { repeat: true, mips: true });
-    this.facade = this._tex(cf, { repeat: true, mips: true });
   }
 
   // muzzle 128×64: two flash frames (4-point star, 6-point star), white premultiplied
-  _drawMuzzle() {
-    const W = RENDER.textures.muzzle[0], H = RENDER.textures.muzzle[1];
-    const c = makeCanvas(W, H), g = ctx2d(c);
+  _paintMuzzle(c) {
+    const W = c.width, H = c.height;
+    const g = ctx2d(c);
+    resetCtx(g, c);
     const star = (cx, cy, points, rOut, rIn, glowR) => {
       const grd = g.createRadialGradient(cx, cy, 0, cx, cy, glowR);
       grd.addColorStop(0, 'rgba(255,255,255,0.9)'); grd.addColorStop(0.5, 'rgba(255,255,255,0.35)'); grd.addColorStop(1, 'rgba(255,255,255,0)');
@@ -1086,15 +1373,12 @@ export class TextureFactory {
     };
     star(H / 2, H / 2, 4, 28, 7, 22);
     star(W - H / 2, H / 2, 6, 18, 6, 16);
-    return this._tex(c, { premult: true });
   }
 
   // icons 512×64: RENDER.icons.order pictograms in square ICON_CELL cells along the top row
-  _drawIcons() {
-    const W = RENDER.textures.icons[0], H = RENDER.textures.icons[1];
-    const c = makeCanvas(W, H), g = ctx2d(c);
-    this._iconsCanvas = c;
-    g.clearRect(0, 0, W, H);
+  _paintIcons(c) {
+    const g = ctx2d(c);
+    resetCtx(g, c);
     const order = RENDER.icons.order;
     const s = ICON_CELL / ICON_DESIGN;
     for (let i = 0; i < order.length; i++) {
@@ -1103,7 +1387,6 @@ export class TextureFactory {
       this._paintIcon(g, order[i], i * ICON_CELL + ICON_CELL / 2, ICON_CELL / 2, s);
       g.restore();
     }
-    return this._tex(c, { mips: true, premult: true });
   }
 
   /** Paints one pictogram centred at (cx, cy), scaled by `scale` from its 32-unit design space (±16).
@@ -1291,6 +1574,7 @@ export class RenderSystem {
       if (Array.isArray(m)) { for (let i = 0; i < m.length; i++) this._stampMat(m[i]); } else this._stampMat(m);
     };
     this.blobShadows = null;                                  // Low-tier disc InstancedMesh (BLOB_CAP)
+    this._onTexRepaint = () => { this.dirty = true; };
     this.renderPass = null;
     this.bloomPass = null;
     this.gradePass = null;
@@ -1456,6 +1740,7 @@ export class RenderSystem {
     // textures (awaits the display font ≤ 1.5 s)
     this.textures = new TextureFactory(ctx);
     await this.textures.build((t) => this._progress(0.1 + 0.6 * t));
+    this.textures.onRepaint = this._onTexRepaint;   // round 6: a re-drawn canvas needs a frame, also while paused
     await yieldPaint();            // round-3 boot polish: each step below gets a frame of its own (CORE-9 / VIS-17)
 
     // materials, then the quality-dependent pipeline, then the environment
@@ -2993,7 +3278,7 @@ export class RenderSystem {
     // exposure, bloom, grade, uRoadBg, eye glow) from _cur — never setDistrict, never an environment re-layout
     this._applyDistrictState(true);
     r.shadowMap.needsUpdate = true;
-    if (this.textures) this.textures.markAllNeedsUpdate();
+    if (this.textures) this.textures.restoreAll();                 // round 6: re-draw every canvas from code + re-upload
     if (this.blobShadows) { this._blobMin = 0; this._blobMax = BLOB_CAP - 1; this.blobShadows.instanceMatrix.needsUpdate = true; }
     this.dirty = true;
   }

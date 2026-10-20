@@ -24,7 +24,7 @@ import { Weapons } from './weapons.js';
 import { Troops } from './troops.js';
 import { LevelRunner } from './level.js';
 
-const VERSION = '1.2.1';            // ARCHITECTURE §3 ctx.version (= package.json version; round-5d release 1.2.1, sw.js v6)
+const VERSION = '1.2.2';            // ARCHITECTURE §3 ctx.version (= package.json version; round-6 release 1.2.2, sw.js v7)
 const RNG_BOOT_SEED = 1;            // §4.1 step 1: boot RNG for the title idle scene
 const RNG_FX_FORK = 7;              // §3: ctx.rngFx = ctx.rng.fork(7) — cosmetics never perturb gameplay
 const MAX_LEVEL_PARAM = 999;        // ?level= sanity cap (the campaign loops beyond LEVELS.count, §6.16)
@@ -441,6 +441,13 @@ export async function boot() {
 
   // 12. loop
   ctx.engine.start();
+
+  // 13. back guard (round 6, ARCH §6.2): the Android back gesture pauses / steps back a screen instead of closing the
+  // installed app; armed after boot so a Back during the boot screen still leaves, and guarded inside (artifact shells,
+  // framed pages and a blocked history keep the browser's default)
+  if (typeof ctx.engine.armBackGuard === 'function') {
+    try { ctx.engine.armBackGuard(); } catch (err) { warnOnce('boot.backGuard', 'back guard failed: ' + errorMessage(err)); }
+  }
   return ctx;
 }
 

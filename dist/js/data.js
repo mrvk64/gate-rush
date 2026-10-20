@@ -725,6 +725,10 @@ export const PICKUPS = deepFreeze({
   gateShare: 0.5,                                                      // 50 % of specials arrive by item lane, 50 % by crate
   perLevel: { base: 2, perLevels: 4, cap: 5 },                         // specials per level = min(5, 2 + floor(L/4))
   duplicateCoins: 25, replaceRefund: 25,
+  // round 6 (owner playtest, lead decision): weapon pickups are stored, not started — a FIFO slot of this many weapons,
+  // fired from the HUD FIRE button (weapons.storeWeapon / requestFire); a pickup into a full slot pays replaceRefund, and so
+  // does each weapon still stored when the level is won
+  weaponSlots: 2,
   items: ['weapon.shotgun', 'weapon.minigun', 'weapon.rocket', 'weapon.railgun', 'weapon.laser',
           'gear.armor', 'gear.magnet', 'gear.chip', 'gear.booster',
           'troop.sniper', 'troop.medic', 'troop.flamer', 'troop.drone', 'troop.apc', 'coins'],   // extra: every grantable item id
@@ -1972,6 +1976,10 @@ export const HINTS = deepFreeze({
   'troop.flamer': 'A FLAMETHROWER JOINS YOUR SQUAD!',
   'troop.drone': 'A DRONE TURRET JOINS YOUR SQUAD!',
   'troop.apc': 'AN APC JOINS\u00A0— IT SOAKS UP BITES',
+  // round 6: the first weapon ever stored (weapon:stored; level shows it once ever) — the FIRE button bottom-right starts
+  // it. It shows before that weapon's own name hint (weapon:stored is emitted before item:pickup); text only — the touch
+  // icon's side arrows mean "drag", and the pulsing button beside the pill is the pointer
+  fire: 'TAP THE GUN BUTTON TO FIRE',
 });
 
 // ==== STRINGS ================================================================================
@@ -2023,5 +2031,7 @@ export const STRINGS = deepFreeze({
             listener: name => `Listener error in ${name}`, reload: 'RELOAD', contextLost: 'Reloading graphics…' },
   update: { ready: 'Update ready — tap to reload', aria: 'Update ready. Reload to update the game' },   // round 5 (ui): the title pill when sw.js has a new build waiting
   aria: { pause: 'Pause', settings: 'Settings', fullscreen: 'Fullscreen', back: 'Back', close: 'Close', star: 'Star', coins: 'Coins', home: 'Home', level: n => `Level ${n}` },   // home: the results screens' HOME icon (round 4)
+  // round 6: the HUD FIRE button (stored weapons): caption under the icon, the "×2" badge, screen-reader name
+  fire: { label: 'FIRE', badge: n => `×${n}`, aria: name => `Fire ${name}`, ariaBusy: name => `${name} firing` },
   common: { back: 'BACK', ok: 'OK', coins: 'coins', star: '★', starEmpty: '☆', separator: ' · ', plus: n => `+${n}`, minus: n => `−${n}`, times: n => `x${n}` },
 });
