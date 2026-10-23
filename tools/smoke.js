@@ -11,6 +11,11 @@
 //   node tools/smoke.js --shell sandbox         # artifact.html inside a sandboxed iframe (storage throws, opaque origin)
 //   node tools/smoke.js --quality low|med|high  # forces ?quality=
 //   node tools/smoke.js --desktop               # 1280x800 instead of a 390x844 phone
+//   node tools/smoke.js --viewport 1024x594     # round 7: any CSS viewport (DPR 1 with --desktop, else a DPR 2 touch phone)
+//   node tools/smoke.js --gpu sw                # round 7: no-GPU emulation — WebGL on SwiftShader with software compositing
+//                                              #   (--disable-gpu --use-angle=swiftshader --enable-unsafe-swiftshader), like a
+//                                              #   GPU-less Linux box; --gpu swauto = Chrome's automatic fallback (--disable-gpu
+//                                              #   --enable-unsafe-swiftshader); default --gpu hw (D3D11, the real GPU)
 //   node tools/smoke.js --shots 5               # screenshot every 5 s of play (default 8)
 //   node tools/smoke.js --nobot                 # play without steering (squad stays centred)
 //   node tools/smoke.js --out docs/build/smoke  # where PNGs + report.json go
@@ -21,6 +26,7 @@
 //   node tools/smoke.js --after "<js>"          # JS run right after the level starts (g = window.__game), e.g. --after "g.squad.setCount(150,'debug')"
 //   node tools/smoke.js --boss                  # jump the level to just before the boss (distance = length - 20)
 //   node tools/smoke.js --bootTimeout 60        # seconds to wait for the boot (default 30; raise it on a loaded host)
+//   node tools/smoke.js --root <dir>            # round 7: serve another tree with this harness (a before / after A/B)
 //
 // Output: a JSON report on stdout (and <out>/report.json) with boot status, every page error,
 // console error/warning (deduped with counts), failed request, a 2 s timeline of game state,
@@ -47,6 +53,13 @@
 // (FIRE_RANGE_M). `report.fire` lists every press ({ t, weapon, near, started }: started = weapons.weapon became that
 // weapon within 0.5 s, i.e. the real input path fired it) and every weapon:stored ({ t, id, slots }); a press that did
 // not start its weapon is a harness check failure. --nobot disables the presses too.
+// Round 7 (perf): `report.perf` = { gpu, tier, software, auto, clockRatio (Σ engine time.unscaledDt / Σ real frame
+// interval over the frames spent playing: 1 = the game clock is real time), gameRatio (level time / wall time while
+// playing, includes slow-mo), fps (frames while playing / wall), sustainedFrameMs, renderScale { first, last, min, max },
+// scaleChanges (every quality:scale), canvas }. Screenshots stall the compositor, so measure ratios with a large --shots.
+// `report.boot` also carries software / renderScale / maxAutoTier / antialias; `report.diag` is the engine's diagnostics log
+// (engine.diagText(), the window.__gateRushDiag() report without the console print) at the end of the run. A FIRE press
+// waits max(500 ms, 10 frames) for its weapon (a slow software-GL frame rate needs more than 500 ms).
 
 import puppeteer from 'puppeteer-core';
 import http from 'node:http';
@@ -64,6 +77,8 @@ const opt = (name, dflt) => {
   const v = argv[i + 1];
   return v === undefined || v.startsWith('--') ? true : v;
 };
+// round 7: --root <dir> serves another tree (e.g. an exported baseline) with this harness; the default is this repo
+const SERVE_ROOT = (() => { const r = opt('root', null); return typeof r === 'string' ? path.resolve(r) : ROOT; })();
 const SCENARIO = String(opt('scenario', 'play'));
 const SHELL = String(opt('shell', 'index'));
 const QUALITY = opt('quality', null);
@@ -78,6 +93,21 @@ const PRE = opt('pre', null);
 const BOSS = !!opt('boss', false);
 const AFTER = opt('after', null);
 const BOOT_TIMEOUT_MS = Math.max(5, Number(opt('bootTimeout', 30)) || 30) * 1000;
+// round 7: --gpu hw | sw | swauto (see the header) and --viewport WxH
+const GPU = String(opt('gpu', 'hw'));
+const GPU_ARGS = {
+  hw: ['--enable-gpu', '--ignore-gpu-blocklist', '--use-angle=d3d11'],
+  sw: ['--disable-gpu', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'],
+  swauto: ['--disable-gpu', '--enable-unsafe-swiftshader'],
+}[GPU];
+if (!GPU_ARGS) { console.error(`--gpu must be hw, sw or swauto (got ${GPU})`); process.exit(2); }
+const VIEWPORT = (() => {
+  const v = opt('viewport', null);
+  if (v === null) return null;
+  const m = /^(\d+)x(\d+)$/.exec(String(v));
+  if (!m) { console.error(`--viewport must be WxH, e.g. 1024x594 (got ${v})`); process.exit(2); }
+  return { w: Number(m[1]), h: Number(m[2]) };
+})();
 const OUT = path.resolve(ROOT, String(opt('out', 'docs/build/smoke')));
 const CHROME = [
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
@@ -113,7 +143,7 @@ const server = http.createServer((req, res) => {
     let p = decodeURIComponent(url.pathname);
     // virtual pages
     if (p === '/__artifact.html' || p === '/__sandbox-inner.html') {
-      const art = fs.readFileSync(path.join(ROOT, 'artifact.html'), 'utf8');
+      const art = fs.readFileSync(path.join(SERVE_ROOT, 'artifact.html'), 'utf8');
       res.writeHead(200, { 'Content-Type': MIME['.html'], 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' });
       return res.end(hostSkeleton(art, 'Gate Rush (artifact)'));
     }
@@ -125,8 +155,8 @@ const server = http.createServer((req, res) => {
 <body><iframe id="f" sandbox="allow-scripts allow-pointer-lock" allow="autoplay" src="/__sandbox-inner.html${url.search}"></iframe></body></html>`);
     }
     if (p.endsWith('/')) p += 'index.html';
-    const file = path.normalize(path.join(ROOT, p));
-    if (!file.startsWith(ROOT)) { res.writeHead(403); return res.end(); }
+    const file = path.normalize(path.join(SERVE_ROOT, p));
+    if (!file.startsWith(SERVE_ROOT)) { res.writeHead(403); return res.end(); }
     fs.readFile(file, (err, data) => {
       if (err) { res.writeHead(404, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' }); return res.end('404 ' + p); }
       res.writeHead(200, { 'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' });
@@ -138,8 +168,12 @@ await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const PORT = server.address().port;
 
 // ---------------------------------------------------------------- report
+const VP = VIEWPORT
+  ? (DESKTOP ? { width: VIEWPORT.w, height: VIEWPORT.h, deviceScaleFactor: 1 } : { width: VIEWPORT.w, height: VIEWPORT.h, deviceScaleFactor: 2, isMobile: true, hasTouch: true })
+  : (DESKTOP ? { width: 1280, height: 800, deviceScaleFactor: 1 } : { width: 390, height: 844, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
 const report = {
-  scenario: SCENARIO, shell: SHELL, quality: QUALITY, level: ENDLESS ? 'endless' : LEVEL, pre: PRE, boss: BOSS, viewport: DESKTOP ? '1280x800@1' : '390x844@2 mobile+touch',
+  scenario: SCENARIO, shell: SHELL, quality: QUALITY, level: ENDLESS ? 'endless' : LEVEL, pre: PRE, boss: BOSS,
+  viewport: `${VP.width}x${VP.height}@${VP.deviceScaleFactor}${VP.hasTouch ? ' mobile+touch' : ''}`, gpu: GPU,
   boot: { ok: false, ms: 0, state: null, errorBox: null },
   pageErrors: [], consoleErrors: {}, consoleWarnings: {}, failedRequests: [], dialogs: [],
   input: null, timeline: [], frames: null, result: null, ui: [], screenshots: [], home: null, checkFailures: [], verdict: 'unknown',
@@ -152,11 +186,11 @@ const browser = await puppeteer.launch({
   executablePath: CHROME,
   headless: HEADFUL ? false : true,
   args: ['--no-first-run', '--no-default-browser-check', '--autoplay-policy=no-user-gesture-required',
-    '--enable-gpu', '--ignore-gpu-blocklist', '--use-angle=d3d11', '--disable-background-timer-throttling',
+    ...GPU_ARGS, '--disable-background-timer-throttling',
     '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows'],
 });
 const page = await browser.newPage();
-await page.setViewport(DESKTOP ? { width: 1280, height: 800, deviceScaleFactor: 1 } : { width: 390, height: 844, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
+await page.setViewport(VP);
 page.on('pageerror', (e) => report.pageErrors.push(String(e && (e.stack || e.message) || e).slice(0, 1500)));
 page.on('console', (m) => {
   const t = m.type();
@@ -188,7 +222,10 @@ const shot = async (name) => {
 const ev = (fn, ...args) => gameFrame.evaluate(fn, ...args);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function finish(code) {
+async function finish(code) {
+  // round 7: the engine's diagnostics log (window.__gateRushDiag without the console print) — states, screens, pointer
+  // targets, blur / focus, pauses, frame gaps — so an unexpected pause or stall in a run is visible in the report
+  report.diag = await ev(() => { const e = window.__game && window.__game.engine; return e && typeof e.diagText === 'function' ? e.diagText(false).split('\n') : null; }).catch(() => null);
   const errCount = report.pageErrors.length + Object.keys(report.consoleErrors).length;
   const checkCount = report.checkFailures.length;
   report.verdict = !report.boot.ok ? 'BOOT FAILED' : errCount ? `ERRORS (${errCount})` : checkCount ? `CHECK FAILED (${checkCount})` : 'CLEAN';
@@ -225,6 +262,9 @@ const bootInfo = await ev(() => {
     hasGame: !!g,
     tier: g?.quality?.tier ?? null,
     dpr: g?.render?.size?.dpr ?? null,
+    // round 7: software-GL detection, render scale, auto ceiling, canvas AA (a context-creation flag)
+    software: g?.quality?.software ?? null, renderScale: g?.quality?.renderScale ?? null, maxAutoTier: g?.quality?.maxAutoTier ?? null, auto: g?.quality?.auto ?? null,
+    antialias: (() => { try { return g?.render?.renderer?.getContext()?.getContextAttributes()?.antialias ?? null; } catch { return null; } })(),
     gpu: (() => { try { const c = g?.render?.renderer?.getContext(); const d = c?.getExtension('WEBGL_debug_renderer_info'); return d ? c.getParameter(d.UNMASKED_RENDERER_WEBGL) : null; } catch { return null; } })(),
     storageVolatile: g?.save?.volatile ?? null,
     isArtifact: g?.config?.isArtifact ?? null,
@@ -242,7 +282,13 @@ async function installProbes() {
   await ev(() => {
     const g = window.__game;
     // frame-interval sampler (independent of the engine)
-    window.__smoke = { intervals: [], stamps: [], last: performance.now(), pickups: [], stored: [], callsMax: {}, programs: { min: 1e9, max: 0 }, districts: [], drawList: [], peaks: {} };
+    window.__smoke = { intervals: [], stamps: [], last: performance.now(), pickups: [], stored: [], callsMax: {}, programs: { min: 1e9, max: 0 }, districts: [], drawList: [], peaks: {},
+      // round 7: game clock vs real time over the frames spent playing, and the render scale (report.perf)
+      perf: { wall: 0, clock: 0, frames: 0, lt0: null, lt1: 0, wall0: null, wall1: 0, rsFirst: null, rsLast: null, rsMin: 9, rsMax: 0, scale: [] } };
+    if (g && g.events && typeof g.events.on === 'function' && !window.__smokeScaleHook) {
+      window.__smokeScaleHook = true;
+      g.events.on('quality:scale', (p) => { const s = window.__smoke; if (p && s.perf.scale.length < 100) s.perf.scale.push({ t: Math.round((g.time?.levelTime ?? 0) * 10) / 10, scale: p.scale, reason: String(p.reason), meanMs: Math.round((p.meanInt || 0) * 10) / 10 }); });
+    }
     // round 5: the objects drawn in each frame (renderer.renderBufferDirect, counted only when it really drew), so the
     // frame with the most main-pass draws per district keeps its list (report.callsPeak): what a budget overrun is made of
     try {
@@ -290,7 +336,16 @@ async function installProbes() {
     // r3 verify: the cap was 20 000 — at 144 Hz a run over 139 s (e.g. --endless --seconds 150) cleared every earlier interval and
     // reported frame stats for its last few seconds only; 200 000 intervals is 23 min at 144 Hz
     const tick = (now) => {
-      const s = window.__smoke; s.intervals.push(now - s.last); s.stamps.push(now); s.last = now; if (s.intervals.length > 200000) { s.intervals.length = 0; s.stamps.length = 0; }
+      const s = window.__smoke; const iv = now - s.last; s.intervals.push(iv); s.stamps.push(now); s.last = now; if (s.intervals.length > 200000) { s.intervals.length = 0; s.stamps.length = 0; }
+      // round 7: report.perf — the engine's clamped frame clock (time.unscaledDt) against the real interval while playing
+      // (iv > 0: with --scenario all installProbes runs twice and a second tick chain sees the same frame with iv 0)
+      if (iv > 0 && g && g.state && typeof g.state.is === 'function' && g.state.is('playing') && g.time) {
+        const P = s.perf;
+        if (P.lt0 === null) { P.lt0 = g.time.levelTime; P.wall0 = now; } else { P.wall += iv; P.clock += (g.time.unscaledDt || 0) * 1000; P.frames++; }
+        P.lt1 = g.time.levelTime; P.wall1 = now;
+        const rs = g.quality ? g.quality.renderScale : null;
+        if (typeof rs === 'number') { if (P.rsFirst === null) P.rsFirst = rs; P.rsLast = rs; if (rs < P.rsMin) P.rsMin = rs; if (rs > P.rsMax) P.rsMax = rs; }
+      }
       // round 5: per-district maximum of the overlay's call split, and the program count, while a run is played
       const cs = g && g.render ? g.render.callStats : null;
       if (cs && g.state && typeof g.state.is === 'function' && g.state.is('playing')) {
@@ -346,6 +401,9 @@ async function snapshot() {
       district: g.level?.district?.id ?? null,
       callsMain: g.render?.callStats?.main, callsShadow: g.render?.callStats?.shadow, callsPost: g.render?.callStats?.post,
       programs: r?.programs?.length,
+      // round 7: render scale, backing store and the engine's sustained frame time
+      rscale: g.quality?.renderScale ?? null, canvas: (() => { const c = document.getElementById('gl-canvas'); return c ? `${c.width}x${c.height}` : null; })(),
+      sustainedMs: typeof g.engine?.sustainedFrameMs === 'number' ? Math.round(g.engine.sustainedFrameMs * 10) / 10 : null,
     };
   }).catch((e) => ({ snapshotError: String(e.message || e).slice(0, 300) }));
 }
@@ -407,7 +465,10 @@ async function botFire() {
     if (!near && g.boss?.active && Math.abs(g.boss.z ?? -1e9) <= R) near = 'boss ' + Math.round(Math.abs(g.boss.z)) + ' m';
     if (!near) return null;
     const r = b.getBoundingClientRect();
-    return { x: r.left + r.width / 2, y: r.top + r.height / 2, w: Math.round(r.width), next: w.storedId(0), near, t: Math.round((g.time?.levelTime ?? 0) * 10) / 10 };
+    // round 7: the frame time decides how long the press may take to start the weapon (it lands in ui.update, a frame later)
+    const iv = window.__smoke ? window.__smoke.intervals : [];
+    let sum = 0, n = 0; for (let i = Math.max(0, iv.length - 20); i < iv.length; i++) { if (iv[i] > 0 && iv[i] < 1000) { sum += iv[i]; n++; } }
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2, w: Math.round(r.width), next: w.storedId(0), near, t: Math.round((g.time?.levelTime ?? 0) * 10) / 10, frameMs: n ? sum / n : 16.7 };
   }, FIRE_RANGE_M).catch(() => null);
   if (!st) return null;
   // (the sandbox shell's iframe fills the page at 0, 0, so frame coordinates are page coordinates in every shell)
@@ -415,8 +476,10 @@ async function botFire() {
     if (!DESKTOP) await page.touchscreen.tap(st.x, st.y);
     else await page.mouse.click(st.x, st.y);
   } catch (e) { return { t: st.t, weapon: st.next, near: st.near, started: false, error: String(e.message || e) }; }
-  const started = await gameFrame.waitForFunction((id) => window.__game?.weapons?.weapon === id, { timeout: 500, polling: 16 }, st.next).then(() => true, () => false);
-  return { t: st.t, weapon: st.next, near: st.near, at: [Math.round(st.x), Math.round(st.y)], size: st.w, started };
+  // round 7: 500 ms, or 10 frames on a slow (software-GL) frame rate, for the press to start the weapon
+  const waitMs = Math.max(500, Math.round(10 * st.frameMs));
+  const started = await gameFrame.waitForFunction((id) => window.__game?.weapons?.weapon === id, { timeout: waitMs, polling: 16 }, st.next).then(() => true, () => false);
+  return { t: st.t, weapon: st.next, near: st.near, at: [Math.round(st.x), Math.round(st.y)], size: st.w, started, waitMs };
 }
 
 async function realDrag() {
@@ -522,6 +585,26 @@ async function runPlay(level) {
   report.frames = frameStats(kept);
   report.framesRaw = frameStats(intervals);
   report.shotStallsExcluded = intervals.length - kept.length;
+  // round 7: game clock vs real time while playing, render scale (see the header)
+  {
+    const p = await ev(() => {
+      const g = window.__game, P = window.__smoke.perf, c = document.getElementById('gl-canvas');
+      return { P, tier: g.quality?.tier ?? null, software: g.quality?.software ?? null, auto: g.quality?.auto ?? null,
+        sustainedMs: typeof g.engine?.sustainedFrameMs === 'number' ? g.engine.sustainedFrameMs : null, canvas: c ? `${c.width}x${c.height} css ${c.clientWidth}x${c.clientHeight}` : null };
+    }).catch(() => null);
+    if (p && p.P) {
+      const P = p.P, wallS = (P.wall1 - (P.wall0 ?? P.wall1)) / 1000;
+      report.perf = {
+        gpu: GPU, tier: p.tier, software: p.software, auto: p.auto,
+        clockRatio: P.wall > 0 ? +(P.clock / P.wall).toFixed(3) : null,
+        gameRatio: wallS > 0 ? +((P.lt1 - (P.lt0 ?? P.lt1)) / wallS).toFixed(3) : null,
+        fps: wallS > 0 ? +(P.frames / wallS).toFixed(1) : null, playingFrames: P.frames, playingWallS: +wallS.toFixed(1),
+        sustainedFrameMs: p.sustainedMs !== null ? +p.sustainedMs.toFixed(1) : null,
+        renderScale: { first: P.rsFirst, last: P.rsLast, min: P.rsMin === 9 ? null : P.rsMin, max: P.rsMax || null },
+        scaleChanges: P.scale, canvas: p.canvas,
+      };
+    }
+  }
   // diagnostics: every kept interval > 50 ms with its end time (s since play start) and the screenshot windows
   report.longFrames = [];
   for (let i = 0; i < intervals.length; i++) {

@@ -48,7 +48,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { OutputShader } from 'three/addons/shaders/OutputShader.js';
 import { clamp, lerp, lerpExp, ease, mulberry32, isIOS, warnOnce } from './util.js';
 import { WORLD, QUALITY_TIERS, RENDER, PALETTE, GATE_RULES, JUICE, STRINGS, WEAPONS, GEAR, DISTRICTS } from './data.js';
-import { detectTier, maxAutoTierFor } from './engine.js';
+import { detectTier, maxAutoTierFor, isSoftwareGpu } from './engine.js';
 import { MaterialLibrary } from './materials.js';
 import { Environment } from './environment.js';
 
@@ -64,6 +64,12 @@ const BLOB_CAP = RENDER.blobShadow.capacity;             // 567 discs (ARCH §6.
 const SCROLL_RESET_M = WORLD.segmentLength;              // a frame never scrolls a whole road segment: larger jumps are resets
 const FOV_EPS = 1e-4;                                    // shape constant: skip updateProjectionMatrix for sub-epsilon FOV changes
 const PROBE_ATTRS = Object.freeze({ failIfMajorPerformanceCaveat: false });   // ARCH §9.4 probe attributes
+// r7 (perf-render:2): the first probe asks for a context WITHOUT a major performance caveat; Chrome refuses it for its
+// automatic SwiftShader fallback and for WARP (software rendering / a blocklisted driver), and the second probe then
+// tells WebGL 2 is still there but slow — such a device is treated as software GL like a matching GPU string
+const PROBE_CAVEAT_ATTRS = Object.freeze({ failIfMajorPerformanceCaveat: true });
+// r7 (perf-render:1): render-scale floor (ARCH §9.5): the backing store never gets shorter than this many device px
+const RS_MIN_BACKING_PX = QUALITY_TIERS.renderScale.minBackingPx;
 /** GPU strings that carry no information (masked RENDERER): treated as "no string" (fallback tier). */
 const GENERIC_GPU = /^(WebKit WebGL|Mozilla|WebGL( ?2)?|Generic Renderer)$/i;
 
@@ -294,20 +300,26 @@ function readGpuString(gl) {
 /**
  * WebGL 2 probe on a throwaway canvas: the GPU string decides the tier, and the tier decides the
  * real canvas's `antialias` context flag, which can only be chosen once (ARCH §9.4). The probe
- * context is released immediately. Returns { ok, gpu } (ok false: probe impossible or WebGL 2 absent).
+ * context is released immediately. Returns { ok, gpu, caveat } (ok false: probe impossible or WebGL 2 absent).
+ * Round 7 (perf-render:2): the first attempt sets failIfMajorPerformanceCaveat; when only the second one (on a fresh
+ * canvas, without it) gets a context, `caveat` is true — the browser itself judges this WebGL slow (software).
  */
 function probeWebGL2() {
-  let canvas = null;
-  try { canvas = document.createElement('canvas'); } catch (_) { return { ok: false, gpu: null }; }
   let gl = null;
-  try { gl = canvas.getContext('webgl2', PROBE_ATTRS); } catch (_) { gl = null; }
-  if (!gl) return { ok: false, gpu: null };
+  let caveat = false;
+  for (let pass = 0; pass < 2 && !gl; pass++) {
+    let canvas = null;
+    try { canvas = document.createElement('canvas'); } catch (_) { return { ok: false, gpu: null, caveat: false }; }
+    try { gl = canvas.getContext('webgl2', pass === 0 ? PROBE_CAVEAT_ATTRS : PROBE_ATTRS); } catch (_) { gl = null; }
+    if (gl && pass === 1) caveat = true;
+  }
+  if (!gl) return { ok: false, gpu: null, caveat: false };
   const gpu = readGpuString(gl);
   try {
     const lose = gl.getExtension('WEBGL_lose_context');
     if (lose) lose.loseContext();
   } catch (_) { /* ignore */ }
-  return { ok: true, gpu };
+  return { ok: true, gpu, caveat };
 }
 
 /** Persistent {start, count} update range re-pushed into attr.updateRanges (three clears it after upload). */
@@ -1558,8 +1570,13 @@ export class RenderSystem {
     this.materials = null;
     this.env = null;
     this.uniforms = { uTime: { value: 0 } };                 // the ONE shared time uniform (ARCH §6.3)
-    this.size = { w: 0, h: 0, dpr: 1, portrait: true };
+    this.size = { w: 0, h: 0, dpr: 0.5, portrait: true };     // dpr holds a fraction (render scale): seeded as a Double
+    this.size.dpr = 1;
     this.dirty = true;
+    // r7 (perf-render:1 / :6): a render scale set by engine applies at the start of the next draw (re-allocation and
+    // redraw in one task); _sizeDirty = the drawing buffer was re-allocated (cleared) and not drawn since
+    this._scalePending = false;
+    this._sizeDirty = false;
     this.lights = { sun: null, hemi: null, bossCore: null, laser: null };
     this.callStats = { main: 0, shadow: 0, post: 0, total: 0, materials: 0 };   // sampled by draw() (engine debug overlay);
     // materials = distinct materials of the visible drawables (VIS-13), resampled every MAT_SAMPLE_FRAMES draws
@@ -1688,19 +1705,29 @@ export class RenderSystem {
       gpu = readGpuString(gl);
     }
 
-    // (d) quality (detectTier / maxAutoTierFor are engine's pure exports)
+    // (d) quality (detectTier / maxAutoTierFor / isSoftwareGpu are engine's pure exports)
     const cfgQuality = ctx.config && ctx.config.quality != null ? ctx.config.quality : null;
-    const tier = detectTier(gpu, deviceMemoryGB(), cfgQuality);
+    let tier = detectTier(gpu, deviceMemoryGB(), cfgQuality);
+    // r7 (perf-render:2): software GL — the GPU string names a software rasteriser, or the browser refused a context
+    // without a major performance caveat — starts on Low with a Low auto ceiling (unless ?quality= forces a tier), no
+    // canvas AA, and the render scale at QUALITY_TIERS.renderScale.softwareStart (Auto only: engine sets 1 for a manual tier)
+    const software = isSoftwareGpu(gpu) || probe.caveat === true;
+    if (software && cfgQuality == null) tier = TIER_LOW;
+    // dpr / renderScale hold fractions: created from 0.5 (ARCH §14 rule 11), then set
     ctx.quality = {
-      tier, initialTier: tier, maxAutoTier: maxAutoTierFor(gpu, tier), auto: cfgQuality == null,
-      params: QUALITY_TIERS[tier], dpr: 1, frozenUntil: 0,
+      tier, initialTier: tier, maxAutoTier: software && cfgQuality == null ? TIER_LOW : maxAutoTierFor(gpu, tier), auto: cfgQuality == null,
+      params: QUALITY_TIERS[tier], dpr: 0.5, frozenUntil: 0,
+      renderScale: 0.5, software,
     };
+    ctx.quality.dpr = 1;
+    ctx.quality.renderScale = software && cfgQuality == null ? QUALITY_TIERS.renderScale.softwareStart : 1;
     this.gpu = gpu;
     const params = ctx.quality.params;
 
-    // (b) renderer — antialias is a context-creation flag decided once from the initial tier (§9.4)
+    // (b) renderer — antialias is a context-creation flag decided once from the initial tier (§9.4); r7: never on software
+    // GL, where 4x MSAA on the default framebuffer was the largest single cost after resolution
     const opts = {
-      canvas, antialias: tier === TIER_LOW, alpha: false, stencil: false, depth: true,
+      canvas, antialias: tier === TIER_LOW && !software, alpha: false, stencil: false, depth: true,
       powerPreference: 'high-performance', preserveDrawingBuffer: false, failIfMajorPerformanceCaveat: false,
     };
     if (gl) opts.context = gl;
@@ -1737,7 +1764,7 @@ export class RenderSystem {
     this._readSettings();
     await yieldPaint();            // round-3 boot polish: the context creation and the first texture never share a frame
 
-    // textures (awaits the display font ≤ 1.5 s)
+    // textures (awaits the display font ≤ RENDER.textures.fontWaitMs, 0.5 s since r7; a later font re-draws the atlas)
     this.textures = new TextureFactory(ctx);
     await this.textures.build((t) => this._progress(0.1 + 0.6 * t));
     this.textures.onRepaint = this._onTexRepaint;   // round 6: a re-drawn canvas needs a frame, also while paused
@@ -2025,6 +2052,13 @@ export class RenderSystem {
   draw() {
     const r = this.renderer;
     if (!r) return;
+    // r7 (perf-render:1): a new render scale re-allocates the canvas HERE, so the cleared buffer is filled by this same
+    // draw (no blank frame between the re-allocation and the next rAF)
+    if (this._scalePending) {
+      this._scalePending = false;
+      if (this.size.w > 0 && this.size.h > 0) this._applySize(this.size.w, this.size.h, false);
+    }
+    this._sizeDirty = false;
     this._flushBlobs();
     const info = r.info.render;
     const c0 = info.calls;
@@ -2097,27 +2131,50 @@ export class RenderSystem {
       try { if (typeof window !== 'undefined') { w = window.innerWidth | 0; h = window.innerHeight | 0; } } catch (_) { w = 0; h = 0; }
     }
     if (!(w > 0) || !(h > 0)) { w = JUICE.ui.refBox[0]; h = JUICE.ui.refBox[1]; }
-    this._applySize(w, h, true);
+    // r7 (perf-render:6): no forced re-allocation — the trailing resize of every burst (and a zoom step whose CSS box did
+    // not change) used to re-allocate, i.e. clear, an unchanged canvas; only a real size / DPR change does now
+    this._applySize(w, h, false);
     const ui = ctx.ui;
     if (ui && typeof ui.refit === 'function') {
       try { ui.refit(); } catch (_) { /* ignore */ }
     }
+    if (this._sizeDirty) this.dirty = true;
+  }
+
+  /**
+   * r7 (perf-render:1): sets the render scale (ctx.quality.renderScale, the QUALITY_TIERS.renderScale.ladder rung engine's
+   * auto-scaler chose; 1 = off) — applied at the start of the next draw(), which re-allocates the canvas and fills it in
+   * the same task, so no blank frame shows.
+   */
+  setRenderScale(s) {
+    const q = this.ctx.quality;
+    if (q && s > 0) q.renderScale = s;
+    this._scalePending = true;
     this.dirty = true;
   }
 
-  /** DPR = max(1, min(devicePixelRatio, params.dpr, √(pixelCap / (w·h)))) (§9.5); renderer.setSize only
-   *  when something changed (it clears the drawing buffer); composer.setPixelRatio BEFORE setSize. */
+  /** DPR = max(1, min(devicePixelRatio, params.dpr, √(pixelCap / (w·h)))) (§9.5) × the render scale (r7 perf-render:1:
+   *  ctx.quality.renderScale, floored so the backing store stays ≥ QUALITY_TIERS.renderScale.minBackingPx tall);
+   *  renderer.setSize only when something changed (it clears the drawing buffer: _sizeDirty until the next draw);
+   *  composer.setPixelRatio BEFORE setSize. */
   _applySize(w, h, force) {
     const r = this.renderer;
     const q = this.ctx.quality;
     const params = q && q.params ? q.params : QUALITY_TIERS.med;
     const cap = Math.sqrt(QUALITY_TIERS.pixelCap / Math.max(1, w * h));
-    const dpr = Math.max(1, Math.min(devicePixelRatio(), params.dpr, cap));
+    const base = Math.max(1, Math.min(devicePixelRatio(), params.dpr, cap));
+    const rs = q && q.renderScale > 0 && q.renderScale < 1 ? q.renderScale : 1;
+    let dpr = base;
+    if (rs < 1) {
+      const floor = RS_MIN_BACKING_PX / (h * base);                // the scale that keeps the backing RS_MIN_BACKING_PX tall
+      dpr = base * Math.max(rs, Math.min(1, floor));
+    }
     const size = this.size;
     const changed = force || dpr !== size.dpr || w !== size.w || h !== size.h;
     if (changed) {
       r.setPixelRatio(dpr);
       r.setSize(w, h, false);                                  // CSS size stays 100 % (game.css)
+      this._sizeDirty = true;                                  // r7: the drawing buffer is cleared until the next draw
     }
     if (this.composer) {
       this.composer.setPixelRatio(dpr);

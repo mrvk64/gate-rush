@@ -405,6 +405,17 @@ export class Pickups {
     this._cliveSlots[this._cliveCount++] = c;
   }
 
+  /** r7 fix round 2: a closed crate is still on the road ahead of the squad (z < 0) — level's "GRAB THE CRATE" row shows
+   *  nothing without one (the squad may shoot its crate open before the row, 30 m after the spawn). Event time, ≤ 8 slots.
+   *  r7 fix round 3: level also polls it each step while that hint is out, and releases the hint once it turns false. */
+  hasClosedCrateAhead() {
+    for (let i = 0; i < this._cliveCount; i++) {
+      const c = this._cliveSlots[i];
+      if (this._cstate[c] === ST_CLOSED && this._cz[c] < 0) return true;
+    }
+    return false;
+  }
+
   /** Spawns `count` coins of PICKUPS.coinLine.value, PICKUPS.coinLine.gap apart along the road at x. */
   spawnCoinLine(x, count = PICKUPS.coinLine.count, z = WORLD.spawnZ) {
     const gap = PICKUPS.coinLine.gap;

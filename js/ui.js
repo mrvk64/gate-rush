@@ -13,7 +13,9 @@
 //            shows #scr-boot, applies the settings to <html> classes and writes --ui (refit).
 //   update() (every frame, step F, also while paused): pending screen, coin tween, flash / vignette,
 //            hint / name card / letterbox / boss bar timers, the 10 Hz HUD block (progress, pills, shield,
-//            boss fill), results animations, shop count-down, confirm-reset timeout.
+//            boss fill), results animations, confirm-reset timeout. Round 7 (r7, flow-coins:2): a state's screen
+//            is also applied at the end of the click / key task that caused it and by a 250 ms fallback timer;
+//            one wallet model writes every coin pill (HUD, title, shop: flow-coins:5).
 //   dispose() removes every DOM listener, event subscription, timer and running animation.
 //
 // Methods other modules call (CALLSITES.md + §6.14): setBootProgress, hideBoot, showScreen, refit,
@@ -27,7 +29,8 @@
 // (hint pill, shield pill, progress bar); the level grid's scroll target is read at the start of the next
 // update() (read-first phase); the screen fade restarts by itself when a screen goes display:none → shown.
 // Theatre deadlines (name card, hint, boss bar out, hint queue ages) run on _tclock, which stops while the
-// state is 'paused' (UI-28, ARCH §2.2); flashes, vignette, coin tweens and the reset confirm use _clock.
+// state is 'paused' (UI-28, ARCH §2.2); flashes, vignette and the reset confirm use _clock. Round 7 (r7, flow-coins:6):
+// the coin tweens and the results theatre run on real time (performance.now() steps, each clamped to JUICE.ui.realDtMax).
 //
 // Per-frame rule (§14 rule 2): update() allocates nothing in steady state. Percent / opacity / seconds
 // strings come from tables built once in init(); other strings are built only when the displayed value
@@ -35,10 +38,12 @@
 // discrete transitions (a screen, a star, a purchase), never per frame, and are skipped under reduced
 // motion. Browser APIs (matchMedia, fullscreen, element.animate, canvas, focus) are all guarded; the
 // module touches no browser global at import time.
-import { clamp, ease, fmtCoins, storage, hasHaptics } from './util.js';
+import { clamp, ease, fmtCoins, fmtCompact, storage, hasHaptics } from './util.js';
 import {
   STRINGS, HINTS, JUICE, LEVELS, BOSSES, UPGRADES, upgradeCost, PALETTE, RENDER, WEAPONS, GEAR, PICKUPS, SQUAD,
   DISTRICTS, DISTRICT_RULES, districtForLevel,
+  starNeed, eBossOf,                                    // round 7 (r7, explain:0): star thresholds on the results / title captions
+  CODEX, GATE_RULES,                                    // round 7 (r7, teaching:5): the FIELD GUIDE and its gate chips
 } from './data.js';
 
 // ---------------------------------------------------------------------------------------------
@@ -52,9 +57,63 @@ const UI_MIN = UIJ.uiScaleClamp[0];                     // 0.85
 const UI_MAX = UIJ.uiScaleClamp[1];                     // 1.25
 const HUD_PERIOD = 1 / UIJ.hudHz;                       // 10 Hz HUD block
 const FADE_MS = UIJ.screenFadeMs;                       // 160 ms screen fade (exported to CSS as --screen-fade)
-const COIN_TWEEN_S = UIJ.coinTweenMs / 1000;            // 300 ms HUD coin tween
-const SHOP_TWEEN_S = UIJ.purchaseFlashMs / 1000;        // 300 ms purchase flash + coin count-down
-const HINT_S = UIJ.hintSeconds;                         // 2.5 s hint display (real time)
+const COIN_TWEEN_S = UIJ.coinTweenMs / 1000;            // 300 ms coin tween (r7: the ONE wallet display — HUD, title and shop pills)
+// Hint timings run on the THEATRE clock (_tclock: the engine's frame step, paused time excluded — not real time below
+// 20 fps until WP-A's frame-following step lands). Round 7 (r7, teaching:0 A): a hint stays max(HINT_S, base + per word ×
+// words) s, at most HINT_MAX_S (the 9-word red lesson 3.7 s)
+const HINT_S = UIJ.hintSeconds;                         // 3.0 s minimum
+const HINT_BASE_S = UIJ.hintBaseSeconds > 0 ? UIJ.hintBaseSeconds : 0;
+const HINT_WORD_S = UIJ.hintPerWordSeconds > 0 ? UIJ.hintPerWordSeconds : 0;
+const HINT_MAX_S = UIJ.hintMaxSeconds > HINT_S ? UIJ.hintMaxSeconds : HINT_S;
+const HINT_MARK_S = UIJ.hintMarkSeconds > 0 ? UIJ.hintMarkSeconds : 0;          // r7 (teaching:0 F): marked done after this long on screen
+const HINT_IDLE_S = UIJ.hintIdleS > 0 ? UIJ.hintIdleS : Infinity;              // r7 final fix: ...and only with trusted input this recent (_attended)
+const HINT_HOLD_MAX_S = UIJ.hintHoldMaxSeconds > 0 ? UIJ.hintHoldMaxSeconds : HINT_MAX_S;   // r7: a subject-bound hint's longest stay
+const HINT_CUT_S = UIJ.hintCutSeconds >= 0 ? UIJ.hintCutSeconds : 0.15;          // r7: a priority hint cuts a normal one to this
+const HINT_WORD_RE = /\s+/;                             // words of a hint (\s includes the no-break spaces HINTS use)
+// r7 (teaching:0 D): the pill's 2 px rim by what the lesson is about — warn (it costs soldiers / dodge it), gain (it grows
+// the squad); the rest are info (no rim). Hint ids with a prefix match by prefix ('dodge.*', 'boss.<arch>.<n>')
+const HINT_TONE = Object.freeze({ red: 'warn', single: 'warn', bite: 'warn', brute: 'warn', spitter: 'warn', runner: 'warn',
+  crawler: 'warn', lesser: 'warn', 'boss.stomp': 'warn', more: 'gain', x2: 'gain', div: 'gain', tryx2: 'gain' });
+// r7 (teaching:0, lead decision): the core gate lessons get a brief slow-mo the first time they are on screen (JUICE.slowmo.lesson)
+const LESSON_SLOWMO = Object.freeze({ red: true, single: true, div: true });
+const HINT_BACK_OPTS = { hold: 0, until: null, event: -1 };   // reused: the options of a cut hint re-queued (_hideHintDom)
+// r7 (teaching:5): the FIELD GUIDE's entry ids in order, and their save keys ('seen:<id>' set by level at the first
+// encounter, 'read:<id>' set when the guide that showed it closes), built once; 'codex:v1' = the one-time migration ran
+const GUIDE_IDS = Object.freeze(CODEX.sections.reduce((a, s) => a.concat(s.ids), []));
+const SEEN_K = Object.freeze(GUIDE_IDS.reduce((o, id) => { o[id] = 'seen:' + id; return o; }, {}));
+const READ_K = Object.freeze(GUIDE_IDS.reduce((o, id) => { o[id] = 'read:' + id; return o; }, {}));
+const CODEX_MIGRATED = 'codex:v1';
+// r7 (teaching:5): how each entry's icon is drawn (css .ci-*): an item pictogram (texture factory), a gate chip in the
+// gate's colours (GATE_RULES.colors) with its glyph, a key cap, a zombie face (PALETTE.zombie), the boss skull, or a small
+// drawing of a HUD part. Presentation only — the numbers in the copy come from data.js
+const CODEX_ICON_DEFAULT = Object.freeze({ k: 'key', t: '?' });
+const CODEX_ICON = (() => {
+  const o = {
+    'ctl.steer': { k: 'key', t: '← →' }, 'ctl.fire': { k: 'key', t: 'SPACE' }, 'ctl.pause': { k: 'key', t: 'ESC' }, 'ctl.mute': { k: 'key', t: 'M' },
+    'gate.plus': { k: 'gate', g: 'plus', t: '+5' }, 'gate.max': { k: 'gate', g: 'max', t: 'MAX' }, 'gate.minus': { k: 'gate', g: 'minus', t: '−8' },
+    'gate.mult': { k: 'gate', g: 'mult', t: '×2' }, 'gate.div': { k: 'gate', g: 'div', t: '÷2' }, 'gate.zero': { k: 'gate', g: 'zero', t: '×1' },
+    'gate.item': { k: 'gate', g: 'item', t: '' }, 'gate.single': { k: 'gate', g: 'minus', t: '−N', wide: true },
+    'gate.guards': { k: 'zombie', z: 'walker', t: '' },
+    'pickup.crate': { k: 'crate' }, 'pickup.coins': { k: 'item', id: 'coins' }, coins: { k: 'item', id: 'coins' },
+    'pickup.duplicate': { k: 'item', id: 'coins' },
+    'hud.progress': { k: 'bar' }, 'hud.bossbar': { k: 'bossbar' }, 'hud.stars': { k: 'stars', t: '★★★' }, 'hud.fire': { k: 'fire', t: 'FIRE' },
+    'hud.shield': { k: 'item', id: 'gear.armor' }, 'hud.pills': { k: 'pill' },
+  };
+  for (let s = 0; s < CODEX.sections.length; s++) {
+    const sec = CODEX.sections[s];
+    for (const id of sec.ids) {
+      if (o[id]) continue;
+      if (sec.id === 'weapons' || sec.id === 'gear' || sec.id === 'troops') o[id] = { k: 'item' };
+      else if (sec.id === 'zombies') o[id] = { k: 'zombie', z: id.slice(id.indexOf('.') + 1) };
+      else if (sec.id === 'bosses') o[id] = { k: 'boss' };
+    }
+  }
+  return Object.freeze(o);
+})();
+// r7 (teaching:5): the NEW card (#newcard) — JUICE.ui.newCardSeconds on screen, JUICE.ui.newCardQueueMax waiting
+const NEWCARD_S = UIJ.newCardSeconds > 0 ? UIJ.newCardSeconds : 3.5;
+const NEWCARD_QMAX = UIJ.newCardQueueMax > 0 ? UIJ.newCardQueueMax : 2;
+const PHASE_LABEL_S = UIJ.bossPhaseLabelSeconds > 0 ? UIJ.bossPhaseLabelSeconds : 1.5;   // r7 (teaching:3): "PHASE 2" in the bar's name
 const STAR_STAGGER = UIJ.starStagger;                   // 0.25 s per star
 const STAR_FROM = UIJ.starScaleFrom;                    // stars slam in from 3× scale
 const COUNT_RATE = UIJ.countUpPerSec;                   // results coin count-up rate (coins / s)
@@ -68,7 +127,7 @@ const HINT_QMAX = UIJ.hintQueueMax;                     // UI-25: hints waiting 
 // "GRAB THE CRATE", "×3 MULTIPLIES YOUR SQUAD", the first pickup and "RED TAKES SOLDIERS" within 5 s, and in strict
 // 2.5 s turns the ×3 lesson came 2 s after its pass and the red one 3 s after its gate appeared
 const HINT_MIN_S = UIJ.hintMinSeconds > 0 ? Math.min(UIJ.hintMinSeconds, HINT_S) : HINT_S;
-const HINT_QUEUE_AGE_S = 6;                             // DATA-MISSING: JUICE.ui.hintQueueMaxAgeS — a queued hint older than this is dropped (UI-25)
+const HINT_QUEUE_AGE_S = UIJ.hintQueueMaxAgeS > 0 ? UIJ.hintQueueMaxAgeS : 10;   // UI-25: a queued hint older than this is dropped
 // UI-18: the hand icon shows inside the pill for these hints only. Round-3 FTUE: both sway (a drag) — the shoot hint used
 // a tap bounce, which told first-time players to TAP to shoot; the squad fires on its own and the finger only steers.
 const HINT_HAND_IDS = Object.freeze({ steer: true, shoot: true });
@@ -139,6 +198,47 @@ const ENDLESS_CHUNK = LEVELS.endless.chunk;             // 300 m
 const MINI_EVERY = LEVELS.endless.miniBossEvery;        // mini-boss every 5th chunk (levelgen: D % miniBossEvery === 0)
 const FULLSCREEN_OPTS = { navigationUI: 'hide' };
 const NOOP = () => {};
+// round 7 (r7, layout:0 / :1): the scroll box of each screen that has one, by screen id (SCREEN_EL_ID keys) → element
+// id. While that screen is up, a wheel anywhere on it (ui._wheel) and PageUp / PageDown / Home / End with the focus
+// outside the box (ui._pageKey) scroll it: the boxes are narrower than their screens, and the screens let the pointer
+// through to the canvas, so a wheel beside the grid or next to BACK (where the pointer rests after the title button that
+// opened the screen) scrolled nothing, and SHOP opens with the focus on BACK. To give another screen the same
+// forwarding, add one entry here (its element is looked up once, in _cacheDom).
+const SCROLL_LIST_ID = Object.freeze({ title: 'scr-title', levels: 'level-grid', shop: 'shop-list', endless: 'endless-stats',
+  guide: 'guide-list' });                               // r7 (teaching:5): the FIELD GUIDE's list
+// r7 fix round 3 (layout verifier): the scroll boxes whose edges fade (css mask). The fade marks more content beyond an
+// edge, so each edge fades only while there is some: .fade-t once scrolled down, .fade-b until the end is reached (the
+// last shop card's "~1 run away" read dimmed when the list fitted exactly at 568 × 320 / 585 × 340 / 640 × 360, and up to
+// 340 px tall even scrolled to the end: the 18 px fade outlasted the 3–7 px bottom pad). Set on scroll and on any size
+// change of the box or its rows (ResizeObserver), never per frame
+const FADE_LIST_IDS = Object.freeze(['level-grid', 'shop-list', 'guide-list']);
+// r7 (layout:3): a key typed into one of these is text, not the F (fullscreen) command — engine.js's TEXT_ENTRY_SELECTOR
+const TEXT_ENTRY_SELECTOR = 'input:not([type]), input[type="text"], input[type="search"], input[type="number"], input[type="email"], input[type="password"], input[type="tel"], input[type="url"], textarea, select, [contenteditable]:not([contenteditable="false"])';
+const WHEEL_LINE_PX = 40;                               // structural: px per wheel "line" (deltaMode 1, Firefox) — Chrome's own line step
+const PAGE_FRAC = 0.85;                                 // structural: a PageUp / PageDown step in box heights (the browser's own page step is ≈ 0.85–0.9)
+const BOSS_NAME_PAD_R = 4;                              // structural: #boss-name's right padding in px (css), which may sit under the coin pill
+// round 7 (r7, flow-coins:2): screen switches no longer wait for a frame — the click / key task that changed the state shows
+// its screen, a state change from elsewhere shows at the next frame or after this fallback (rAF starved: a busy no-GPU box)
+const PENDING_FALLBACK_MS = UIJ.pendingScreenFallbackMs > 0 ? UIJ.pendingScreenFallbackMs : 250;   // JUICE.ui.pendingScreenFallbackMs
+// r7 (flow-coins:2): stale-click guard — a trusted pointer click pressed before the screen under it was painted was aimed at
+// the screen before (a second NEXT restarted the level; a late results HOME hit the HUD pause button in the same corner).
+// "Painted" = the end of the frame that renders the switch (see showScreen / _armPaintMark), at most this long after it
+const STALE_CLICK_MAX_MS = UIJ.staleClickMaxMs > 0 ? UIJ.staleClickMaxMs : 2000;   // JUICE.ui.staleClickMaxMs
+// r7 fix (flow-coins:0 / :2): the HUD's pause and FIRE buttons take pointer presses only this long after the HUD of a new run
+// has painted — results HOME sits where the HUD pause button appears, and a HOME press 0.73 s after the next level painted
+// paused it (a press that soon was aimed at the results; nobody pauses a level in its first second)
+const HUD_ARM_MS = UIJ.hudArmMs > 0 ? UIJ.hudArmMs : 1000;   // JUICE.ui.hudArmMs
+// r7 (flow-coins:6): coin tweens and the results theatre on real time, one frame's step clamped (JUICE.ui.realDtMax)
+const REAL_DT_MAX = UIJ.realDtMax > 0 ? UIJ.realDtMax : 0.25;
+// r7 (explain:7): results chip order (run.breakdown keys; 'bonus' becomes the ★ and Survivors chips when split)
+const BD_KEYS = Object.freeze(['kills', 'gates', 'piles', 'boss', 'bonus']);
+// r7 fix (teaching:3): the boss tagline's phrase separators (STRINGS.boss.tagline: " · ", and data.js's DASH — a no-break
+// space, "—", a space), split with the separator kept: each phrase but the last ends with its own mark, glued to its last
+// word by a no-break space, so a wrap comes only after the mark (and _breakTagline then removes it)
+const TAG_SPLIT = /( · |\u00A0— )/;
+const TAG_MARK_DOT = '\u00A0·';
+const TAG_MARK_DASH = '\u00A0—';
+const TAG_SPLIT_DOT = ' · ';
 
 // round 5: district banner (DISTRICTS.md §5, DISTRICT_RULES.banner): fade + 6 px rise in, hold, fade out, on the theatre
 // clock (the Web Animation is paused with the game). One keyframe list per motion setting, built once.
@@ -156,6 +256,22 @@ const KF_DB_RM = [                                                    // html.re
   { opacity: 0, easing: 'ease-out' }, { opacity: 1, offset: DB_IN }, { opacity: 1, offset: 1 - DB_OUT, easing: 'ease-in' }, { opacity: 0 },
 ];
 const T_DB = { duration: DB_S * 1000, fill: 'both' };
+// round 7 (r7, explain:4): the big "NEW DISTRICT" card (DISTRICT_RULES.banner.newSeconds) has its own keyframe offsets (the
+// same in / out seconds over a longer hold). Both animations are paused at creation and driven by the theatre clock
+// (_updateBanner sets currentTime), so a slow machine still shows the whole fade, held while paused
+const DB_NEW_S = DB.newSeconds > DB_S ? DB.newSeconds : DB_S;
+const DB_NEW_IN = clamp(DB.inSeconds / DB_NEW_S, 0, 0.5);
+const DB_NEW_OUT = clamp(DB.outSeconds / DB_NEW_S, 0, 0.5);
+const KF_DB_NEW = [
+  { opacity: 0, transform: 'translateY(-' + DB.risePx + 'px) scale(0.96)', easing: 'ease-out' },
+  { opacity: 1, transform: 'translateY(0) scale(1)', offset: DB_NEW_IN },
+  { opacity: 1, transform: 'translateY(0) scale(1)', offset: 1 - DB_NEW_OUT, easing: 'ease-in' },
+  { opacity: 0, transform: 'translateY(0) scale(1)' },
+];
+const KF_DB_NEW_RM = [
+  { opacity: 0, easing: 'ease-out' }, { opacity: 1, offset: DB_NEW_IN }, { opacity: 1, offset: 1 - DB_NEW_OUT, easing: 'ease-in' }, { opacity: 0 },
+];
+const T_DB_NEW = { duration: DB_NEW_S * 1000, fill: 'both' };
 const DB_GLOW_ALPHA = 0.32;                                           // DATA-MISSING: JUICE.ui.bannerGlowAlpha — accent glow under the banner rule
 const TILE_BAND_LEVELS = DISTRICT_RULES && DISTRICT_RULES.levelsPerDistrict > 0 ? DISTRICT_RULES.levelsPerDistrict : 5;   // DISTRICT_RULES.levelsPerDistrict
 const TILE_TINT_ALPHA = 0.16;                                        // DATA-MISSING: JUICE.ui.levelTileTintAlpha — district tint at the foot of a level tile
@@ -172,12 +288,14 @@ const SW_BUILD_MSG = Object.freeze({ type: 'GET_BUILD' });             // sw.js 
 const SW_ASK_MS = 3000;                                               // DATA-MISSING: JUICE.ui.swBuildAskMs — how long a worker has to answer GET_BUILD (a waiting worker may need a cold start)
 const SW_ASK_PAGE = 0, SW_ASK_CAND = 1;                               // _swAsk slots: the page's own controller (at boot), the update candidate
 
-// Screens (§10.1). Non-overlay screens are exclusive; overlays stack above them.
+// Screens (§10.1). Non-overlay screens are exclusive; overlays stack above them. Round 7 (r7, teaching:5): 'guide' (the
+// FIELD GUIDE) is an overlay like 'settings' — over the title or in place of the pause panel — and never a state
 const SCREEN_EL_ID = Object.freeze({
   boot: 'scr-boot', title: 'scr-title', levels: 'scr-levels', shop: 'scr-shop', settings: 'scr-settings',
-  pause: 'scr-pause', complete: 'scr-complete', gameover: 'scr-gameover', endless: 'scr-endless',
+  pause: 'scr-pause', complete: 'scr-complete', gameover: 'scr-gameover', endless: 'scr-endless', guide: 'scr-guide',
 });
-const SCREEN_IDS = Object.freeze(['boot', 'title', 'levels', 'shop', 'settings', 'pause', 'complete', 'gameover', 'endless']);
+const SCREEN_IDS = Object.freeze(['boot', 'title', 'levels', 'shop', 'settings', 'pause', 'complete', 'gameover', 'endless', 'guide']);
+const OVERLAY_IDS = Object.freeze({ settings: true, guide: true });
 // screens behind which the HUD stays visible (§10.1 "HUD is visible in playing, paused and during complete/gameover")
 const HUD_UNDER = Object.freeze({ pause: true, complete: true, gameover: true, endless: true });
 // BACK returns to these states, anything else falls back to the title (§10.3)
@@ -216,6 +334,14 @@ const T_RAGE = { duration: SKULL_PERIOD_MS * 0.6, iterations: Infinity, easing: 
 // round 6: FIRE refused (a weapon is running) — a small head-shake; FIRE accepted — the J19 punch
 const KF_FIRE_DENY = [{ transform: 'translateX(0)' }, { transform: 'translateX(-5px)' }, { transform: 'translateX(5px)' }, { transform: 'translateX(-3px)' }, { transform: 'translateX(0)' }];
 const T_FIRE_DENY = { duration: 260, easing: 'ease-out' };
+// round 7 (r7, controls:3): Space / gamepad A with nothing stored — the empty slot fades in, shakes "no", holds and fades out
+// (JUICE.ui.fireEmptyMs); reduced motion: _animate is skipped and the slot just shows for that long
+const FIRE_EMPTY_S = (UIJ.fireEmptyMs > 0 ? UIJ.fireEmptyMs : 900) / 1000;
+const KF_FIRE_EMPTY = [
+  { opacity: 0, transform: 'scale(0.9)' }, { opacity: 1, transform: 'translateX(-5px)', offset: 0.12 }, { transform: 'translateX(5px)', offset: 0.24 },
+  { transform: 'translateX(-3px)', offset: 0.36 }, { opacity: 1, transform: 'translateX(0)', offset: 0.75 }, { opacity: 0, transform: 'scale(0.96)' },
+];
+const T_FIRE_EMPTY = { duration: FIRE_EMPTY_S * 1000, easing: 'ease-out' };
 
 // ---------------------------------------------------------------------------------------------
 // Small helpers (no per-frame use except the table lookups)
@@ -242,6 +368,10 @@ function itemEntry(id) {
 }
 
 function isWeaponId(id) { return typeof id === 'string' && id.indexOf('weapon.') === 0; }
+
+/** r7 (teaching:3): a lesson about the boss fight ('boss', 'bossFire', 'boss.<arch>.<n>', 'boss.stomp', 'dodge.*') — dropped
+ *  when the boss dies. */
+function isBossHint(id) { return typeof id === 'string' && (id.indexOf('boss') === 0 || id.indexOf('dodge.') === 0); }
 
 function prefersReducedMotion() {
   try {
@@ -411,6 +541,32 @@ export class UI {
     this._beforeSettings = null;
     this._pendingSet = false;
     this._pendingId = null;
+    this._pendingTimer = 0;          // r7 (flow-coins:2): PENDING_FALLBACK_MS timer for a state change no click / frame has shown yet
+    this._onPendingTimer = () => { this._pendingTimer = 0; if (this._pendingSet) this._flushPendingScreen(); };
+    // r7 (flow-coins:2) stale-click guard, performance.now() ms: the last trusted press (_downStamp); the switch to the current
+    // screen (_shownAt) and the end of the frame that painted it (_shownStamp, Infinity until known). _shownWait = updates
+    // until the painting frame (1: a switch from a click / key / timer task paints in the next frame); _paintArmed = that
+    // frame ran and its post-frame mark (_onPaintMark, a 0 ms timer: runs once the frame's rendering is done) is due
+    this._downStamp = 0;
+    this._shownStamp = 0;
+    this._shownWait = 0;
+    this._shownAt = 0;
+    this._paintArmed = false;
+    this._inUpdate = false;
+    this._hudArm = false;            // r7 fix: the current HUD opened a run (not a resume) — its buttons wait HUD_ARM_MS after its paint
+    // r7 fix: a switch outside update() (a click / key / timer task) has its paint marked from ui's own animation frame too,
+    // so a stopped engine loop (frame error, fatal box) does not leave the screen "unpainted" for STALE_CLICK_MAX_MS
+    this._paintRaf = 0;
+    this._onPaintFrame = () => { this._paintRaf = 0; if (this._shownWait > 0) { this._shownWait = 0; this._armPaintMark(); } };
+    this._onPaintMark = () => {
+      if (!this._paintArmed) return;
+      this._paintArmed = false;
+      this._shownStamp = Math.min(this._perfMs(), this._shownAt + STALE_CLICK_MAX_MS);
+    };
+    this._lastReal = 0.5; this._lastReal = 0;           // r7 (flow-coins:6): _realNow() of the previous update (real-time rdt)
+    this._ncTagText = '';            // r7 fix (teaching:3): the tagline the name card's phrase spans hold, the gap spans between
+    this._ncTagGaps = [];            // them, and a wrap check due in the next update's read-first phase (_breakTagline)
+    this._ncTagCheck = false;
     this._bootHiding = false;
     this._bootProgress = 0.5; this._bootProgress = 0;
     this._bootPct = -1;              // integer percent last written to #boot-bar aria-valuenow
@@ -432,6 +588,7 @@ export class UI {
     this._fireRing = -1;             // ring step shown (0..RING_STEPS)
     this._fireDur = 0.5; this._fireDur = 0;   // WEAPONS.*.duration of the ring's weapon (Double field from the start)
     this._fireClickUntil = 0;        // _realNow() s: a click before this is the tail of a pointer / key activation
+    this._fireEmptyUntil = 0;        // r7 (controls:3): _realNow() s at which the empty-slot flash ends (0 = not showing)
     this._fireAnim = null;
     this._fireIcons = new Map();     // id → 'url("…")' at FIRE_ICON_PX (encoded at boot, UI-23)
     this._gpSeen = false;            // a gamepad connected: poll its A button while the FIRE button shows
@@ -538,17 +695,54 @@ export class UI {
     this._ncUntil = 0.5; this._ncUntil = 0;
     this._ncShown = false;
 
-    // HUD: hint (UI-25 queue: the one on screen + ≤ HINT_QMAX waiting, de-duplicated by id, marked done on display)
+    // HUD: hint (UI-25 queue: the one on screen + ≤ HINT_QMAX waiting, de-duplicated by id). Round 7 (r7, teaching:0 / :3):
+    // each slot also keeps its hold (s it cannot be cut by a waiting hint), its release key (null = none), priority, the
+    // gate event that pulses while it is up (−1) and whether it is a cut hint coming back (no second ui_tap); a hint is
+    // marked done only after HINT_MARK_S on screen (_hintMarked)
     this._hintId = '';
     this._hintText = '';
     this._hintHideReq = false;
     this._hintShown = false;
     this._hintUntil = 0.5; this._hintUntil = 0;
+    this._hintAt = 0.5; this._hintAt = 0;          // _tclock when the hint on screen appeared
+    this._hintHold = 0.5; this._hintHold = 0;
+    this._hintKey = null;
+    this._hintPri = false;
+    this._hintEv = -1;
+    this._hintMarked = false;
+    this._hintCut = false;                          // a priority hint cut it (it comes back unless it was marked)
+    this._hintTone = '';                            // #hint data-tone written
     this._handAnim = null;
     this._hqId = new Array(HINT_QMAX).fill('');
     this._hqText = new Array(HINT_QMAX).fill('');
     this._hqAt = new Float64Array(HINT_QMAX);
+    this._hqHold = new Float64Array(HINT_QMAX);
+    this._hqKey = new Array(HINT_QMAX).fill(null);
+    this._hqPri = new Uint8Array(HINT_QMAX);
+    this._hqEv = new Float64Array(HINT_QMAX).fill(-1);
+    this._hqBack = new Uint8Array(HINT_QMAX);       // a cut hint re-queued (no second ui_tap when it comes back)
     this._hqLen = 0;
+    this._slowedRun = [];                           // r7: lesson ids slowed this run (JUICE.slowmo.lesson, once per run and ever)
+    // r7 (teaching:5): NEW card queue (codex:new ids) and the card on screen
+    this._ncdQ = [];
+    this._ncdShown = false;
+    this._ncOn = false;                             // r7 INT: #hud.nc-on while the card is up (narrow landscape: the pill row steps aside, css)
+    this._ncdUntil = 0.5; this._ncdUntil = 0;
+    this._ncdHideReq = false;
+    // r7 (teaching:5): FIELD GUIDE — built on first fill; the ids shown as seen at the last fill (marked read on close)
+    this._guideBuilt = false;
+    this._guideRows = null;                         // id → { row, icon, name, tag, line, state }
+    this._guideSeen = [];
+    this._guideScrollTo = null;                     // read-first: the first NEW row to bring into view after an open
+    this._guideNew = -1;                            // the "?" buttons' has-new state written (−1 = never)
+    this._codexMigrated = false;
+    // r7 (teaching:3 / explain:3 / :6): boss archetype (boss:spawn), the boss bar's phase label flash, the letterbox dock
+    this._bossArch = '';
+    this._bossPhaseLabel = '';                      // "PHASE 2" / "ENRAGED" pending / shown (in place of the name; css)
+    this._bossPhaseUntil = 0.5; this._bossPhaseUntil = 0;
+    this._bossPhaseReq = false;
+    this._lbDock = false;
+    this._lbDockN = -1;
     // UI-18 label avoidance (wide boxes): pill box from the ResizeObserver (offset*, no forced layout), sideways shift
     this._ro = null;
     this._hintBoxOk = false;
@@ -570,6 +764,7 @@ export class UI {
     this._vigCssDirty = false;
     this._vigDur = 0.5; this._vigDur = 0;
     this._vigT = 0.5; this._vigT = 0;
+    this._vigA0 = 0.5; this._vigA0 = 1;   // r7 (teaching:1): the vignette's strength (vignette's optional alpha)
     this._vigOn = false;
     this._vigOpa = -1;
 
@@ -581,24 +776,26 @@ export class UI {
     this._puPos = new Float32Array(MAX_PILLS * 2 + 6);   // pills (x, y) × 3, then the shield, the generic target, the FIRE icon (round 6)
     this._puPosOk = new Uint8Array(MAX_PILLS + 3);
 
-    // results
-    this._cmp = { level: 1, stars: 0, coins: 0, survivors: 0, eBoss: 0, score: 0, kills: 0, gates: 0, piles: 0, boss: 0, bonus: 0 };
+    // results (r7, explain:7: bonusStars / bonusSurv = the level bonus's star and survivor parts, split = the payload had them)
+    this._cmp = { level: 1, stars: 0, coins: 0, survivors: 0, eBoss: 0, score: 0, kills: 0, gates: 0, piles: 0, boss: 0, bonus: 0,
+      bonusStars: 0, bonusSurv: 0, split: false };
     this._cmpFresh = false;
     this._cmpAnimating = false;
     this._cmpT = 0.5; this._cmpT = 0;
     this._cmpStarsShown = 0;
     this._cmpCoinShown = -1;
+    // r7 (flow-coins:6): while the fresh results theatre counts this run's payout, it drives the wallet header from the same
+    // count (_cmpDrive): header = max(what it showed, wallet before the payout + the count) — it never moves down
+    this._cmpDrive = false;
+    this._cmpBase = 0;               // save.data.coins − payout (the wallet before this run)
+    this._cmpWalletFrom = 0;         // the header's value when the results appeared
     this._fail = { level: 1, fraction: 0, coinsKept: 0 };
     this._end = { distance: 0, score: 0, best: 0, coins: 0, chunks: 0, newBest: false };
 
-    // shop
-    this._cards = null;              // id → { card, icon, name, pips[], effect, estimate, buy, price }
+    // shop (r7, flow-coins:5: no shop coin tween any more — the one wallet model below drives the HUD, title and shop pills)
+    this._cards = null;              // id → { card, icon, name, what, pips[], effect, estimate, buy, price, then }
     this._cardIconsDone = false;
-    this._shopCoinShown = -1;
-    this._shopFrom = 0;
-    this._shopTo = 0;
-    this._shopT = 0;
-    this._shopTween = false;
+    this._shopNoteText = '';         // r7 (explain:2): text in #shop-note
 
     // settings / reset
     this._confirmArmed = false;
@@ -622,10 +819,23 @@ export class UI {
     this._onInputDom = (e) => this._input(e, false);
     this._onChangeDom = (e) => this._input(e, true);
     this._onKeyDom = (e) => this._key(e);
+    this._onWheelDom = (e) => this._wheel(e);          // r7 (layout:0): wheel forwarder (SCROLL_LIST_ID)
     this._onFirePointer = (e) => this._firePointer(e);
     this._onGamepad = () => { this._gpSeen = true; };
-    this._onPointerDom = () => { if (!this._pointerMode) this._setPointerMode(true); };
-    this._onFsChange = () => this._syncFullscreenButton();
+    // r7 (flow-coins:2): window capture pointerdown also stamps the press for the stale-click guard (Event.timeStamp shares
+    // performance.now()'s time base; a browser without a usable stamp gives 0 and is never guarded)
+    this._onPointerDom = (e) => {
+      if (this._paintArmed) this._onPaintMark();      // input ahead of the post-frame mark was pressed during the painting frame
+      if (e && e.isTrusted && e.timeStamp > 0) this._downStamp = e.timeStamp;
+      if (!this._pointerMode) this._setPointerMode(true);
+    };
+    this._onFsChange = () => this._fsChanged();
+    this._onFsRefused = () => this._syncFullscreenButton();   // r7 (layout:3): a refused request un-ticks the SETTINGS toggle
+    this._scrollLists = null;        // r7: screen id → its scroll box (SCROLL_LIST_ID), built in _cacheDom
+    this._fadeLists = [];            // r7 fix round 3: the FADE_LIST_IDS elements present (edge fades, _listFade)
+    this._fadeCss = [];              // r7 final fix: their live computed styles (_listFade reads the padding), fetched once each
+    this._bnRoom = -1;               // r7 fix round 3: px the boss name may run past its bar before the HUD coin pill (--bn-room)
+    this._onListScroll = (e) => { if (e && e.currentTarget) this._listFade(e.currentTarget); };
     this._onMqChange = () => this._mediaChanged();
     this._onErrorTimeout = () => this._hideErrorToast();
     this._onResize = (entries) => this._observed(entries);
@@ -645,6 +855,14 @@ export class UI {
     this._dbUntil = 0.5; this._dbUntil = 0;   // theatre-clock deadline
     this._dbAnim = null;
     this._dbAnimPaused = false;
+    // r7 (explain:4): the big "NEW DISTRICT" card variant (requested / shown), its kicker, and the theatre time it showed
+    this._dbNew = false;
+    this._dbKicker = '';
+    this._dbShownKicker = null;
+    this._dbShownNew = false;
+    this._dbShownAt = 0.5; this._dbShownAt = 0;
+    this._dbDur = 0.5; this._dbDur = 0;
+    this._dbAnimMs = -1;                             // currentTime last written (ms, integer)
     this._puOn = false;              // #hud.pu-on (a power-up pill is visible: the banner drops a row)
     this._runDistrict = '';          // level:start district id (round 5)
 
@@ -698,6 +916,9 @@ export class UI {
     this.debugPanel = el.debug || null;
     if (el.debug) el.debug.hidden = !(this.ctx.config && this.ctx.config.debug);
     this._fsAvailable = this._probeFullscreen();
+    // r7 (layout:3): the SETTINGS Fullscreen row exists only where the title icon does (never in the artifact shell, on
+    // iPhone Safari or in a display-mode: fullscreen PWA) — set now, so the boot prewarm lays SETTINGS out as it will show
+    if (el.rowFullscreen && el.rowFullscreen.hidden === this._fsAvailable) el.rowFullscreen.hidden = !this._fsAvailable;
     try {
       const rs = doc.documentElement.style;
       rs.setProperty('--screen-fade', FADE_MS + 'ms');
@@ -738,6 +959,8 @@ export class UI {
       this._mq = null;
     }
     if (this._errorTimer) { try { clearTimeout(this._errorTimer); } catch (_) { /* ignore */ } this._errorTimer = 0; }
+    if (this._pendingTimer) { try { clearTimeout(this._pendingTimer); } catch (_) { /* ignore */ } this._pendingTimer = 0; }
+    if (this._paintRaf) { try { cancelAnimationFrame(this._paintRaf); } catch (_) { /* ignore */ } this._paintRaf = 0; }
     this._cancelAnim(this._skullAnim); this._skullAnim = null;
     this._cancelAnim(this._bossRage); this._bossRage = null;
     this._cancelAnim(this._handAnim); this._handAnim = null;
@@ -803,6 +1026,8 @@ export class UI {
       levelGrid: g('level-grid'), shopCoins: g('shop-coins'), shopCoinsValue: null, shopList: g('shop-list'),
       setSound: g('set-sound'), setMusic: g('set-music'), setHaptics: g('set-haptics'), setQuality: g('set-quality'),
       setReduced: g('set-reduced'), setHc: g('set-hc'), setLarge: g('set-large'), setSens: g('set-sens'), btnResetSave: g('btn-reset-save'),
+      setFullscreen: g('set-fullscreen'), rowFullscreen: g('row-fullscreen'),   // r7 (layout:3): the SETTINGS Fullscreen toggle
+      qualityNote: g('quality-note'), shopNote: g('shop-note'), pauseControls: g('pause-controls'), retryNote: g('retry-note'),   // r7 (D1) captions
       btnResume: g('btn-resume'), btnRestart: g('btn-restart'), btnPauseSettings: g('btn-pause-settings'), btnQuit: g('btn-quit'),
       completeTitle: g('complete-title'), stars: null, completeCoins: g('complete-coins'), completeBreakdown: g('complete-breakdown'),
       completeBest: g('complete-best'), btnNext: g('btn-next'), btnReplay: g('btn-replay'), btnCompleteShop: g('btn-complete-shop'), btnCompleteHome: g('btn-complete-home'),
@@ -811,10 +1036,44 @@ export class UI {
       overlayMsg: g('overlay-msg'), overlayText: g('overlay-text'),
       errorBox: g('error-box'), errorText: g('error-text'), btnReload: g('btn-reload'),
       debug: g('debug'),
-      btnFire: g('btn-fire'), fireRing: null, fireIcon: null, fireBadge: null, fireLabel: null,   // round 6
+      btnFire: g('btn-fire'), fireRing: null, fireIcon: null, fireBadge: null, fireLabel: null, fireKey: null,   // round 6 (r7: + the SPACE key cap)
       districtBanner: g('district-banner'), dbText: null, titleDistrict: null, btnUpdate: g('btn-update'), updText: null,   // round 5
+      dbKicker: null, ncTag: null, lbCount: null, bnName: null, bnPhase: null,                                    // r7 (explain:4 / teaching:3 / explain:6), built below
+      // r7 (teaching:5): the NEW card and the FIELD GUIDE (its "?" buttons on the title and the pause panel); r7 (explain:3)
+      newcard: g('newcard'), ncdIcon: null, ncdKicker: null, ncdName: null, ncdLine: null,
+      guideList: g('guide-list'), btnGuide: g('btn-guide'), btnPauseGuide: g('btn-pause-guide'), levelsLegend: g('levels-legend'),
     };
     try { if (el.districtBanner) el.dbText = el.districtBanner.querySelector('.db-text'); } catch (_) { el.dbText = null; }
+    // r7 (explain:4): the big card's kicker ("NEW DISTRICT 2") above the name — created once (both shells share the markup)
+    if (el.districtBanner && el.dbText) {
+      try {
+        el.dbKicker = el.districtBanner.querySelector('.db-kicker');
+        if (!el.dbKicker) {
+          el.dbKicker = doc.createElement('span'); el.dbKicker.className = 'db-kicker'; el.dbKicker.hidden = true;
+          el.districtBanner.insertBefore(el.dbKicker, el.dbText);
+        }
+      } catch (_) { el.dbKicker = null; }
+    }
+    if (el.newcard) {
+      try {
+        el.ncdIcon = el.newcard.querySelector('.ncd-icon'); el.ncdKicker = el.newcard.querySelector('.ncd-kicker');
+        el.ncdName = el.newcard.querySelector('.ncd-name'); el.ncdLine = el.newcard.querySelector('.ncd-line');
+      } catch (_) { el.ncdIcon = null; }
+      if (el.ncdKicker) el.ncdKicker.textContent = STRINGS.codex.kicker;
+    }
+    // r7 (teaching:3): the boss bar's name in two spans — the archetype, and the phase flash ("PHASE 2" / "ENRAGED"), shown
+    // in place of the name while it flashes (#bossbar.phase-flash hides .bn-name, css; r7 fix: at every size, no separator)
+    if (el.bossName) {
+      el.bossName.textContent = '';
+      el.bnName = doc.createElement('span'); el.bnName.className = 'bn-name';
+      el.bnPhase = doc.createElement('span'); el.bnPhase.className = 'bn-phase'; el.bnPhase.hidden = true;
+      el.bossName.appendChild(el.bnName); el.bossName.appendChild(el.bnPhase);
+    }
+    // r7 (explain:6): the squad count docked in the bottom letterbox bar while the boss-intro dolly hides the world label
+    if (el.letterboxBottom) {
+      el.lbCount = doc.createElement('span'); el.lbCount.className = 'lb-count'; el.lbCount.hidden = true;
+      el.letterboxBottom.appendChild(el.lbCount);
+    }
     try { if (el.btnUpdate) el.updText = el.btnUpdate.querySelector('.upd-text'); } catch (_) { el.updText = null; }
     if (el.btnFire) {
       try {
@@ -822,8 +1081,10 @@ export class UI {
         el.fireIcon = el.btnFire.querySelector('.fire-icon');
         el.fireBadge = el.btnFire.querySelector('.fire-badge');
         el.fireLabel = el.btnFire.querySelector('.fire-label');
-      } catch (_) { el.fireRing = null; el.fireIcon = null; el.fireBadge = null; el.fireLabel = null; }
+        el.fireKey = el.btnFire.querySelector('.fire-key');   // r7 (controls:4 / teaching:8): css shows it with a fine pointer only
+      } catch (_) { el.fireRing = null; el.fireIcon = null; el.fireBadge = null; el.fireLabel = null; el.fireKey = null; }
       if (el.fireLabel) el.fireLabel.textContent = STRINGS.fire.label;
+      if (el.fireKey) el.fireKey.textContent = STRINGS.fire.key;
       el.btnFire.setAttribute('aria-label', STRINGS.fire.label);
     }
     // round 5: the title caption carries a small district line (created once, re-appended by _fillTitle)
@@ -842,7 +1103,9 @@ export class UI {
       el.namecard.textContent = '';
       el.ncLabel = doc.createElement('span'); el.ncLabel.className = 'nc-label'; el.ncLabel.textContent = STRINGS.boss.label;
       el.ncName = doc.createElement('span'); el.ncName.className = 'nc-name';
-      el.namecard.appendChild(el.ncLabel); el.namecard.appendChild(el.ncName);
+      // r7 (teaching:3): the archetype's tagline under its name ("DODGE HIS SLAM · HE CHARGES LATER")
+      el.ncTag = doc.createElement('span'); el.ncTag.className = 'nc-tag';
+      el.namecard.appendChild(el.ncLabel); el.namecard.appendChild(el.ncName); el.namecard.appendChild(el.ncTag);
     }
     // UI-22: the progress fill slides inside a rounded clip (created here so both shells share the markup)
     if (el.progressFill && el.progressFill.parentNode && el.progressFill.parentNode.id !== 'progress-clip') {
@@ -867,6 +1130,12 @@ export class UI {
     const screens = {};
     for (let i = 0; i < SCREEN_IDS.length; i++) screens[SCREEN_IDS[i]] = g(SCREEN_EL_ID[SCREEN_IDS[i]]);
     this._screens = screens;
+    // r7 (layout:0 / :1): the wheel / page-key forwarding targets (a missing element simply gets no forwarding)
+    const lists = {};
+    const listScreens = Object.keys(SCROLL_LIST_ID);
+    for (let i = 0; i < listScreens.length; i++) lists[listScreens[i]] = g(SCROLL_LIST_ID[listScreens[i]]);
+    this._scrollLists = lists;
+    for (let i = 0; i < FADE_LIST_IDS.length; i++) { const f = g(FADE_LIST_IDS[i]); if (f) this._fadeLists.push(f); }
   }
 
   /** Puts <span class="coin-icon"></span><span class="pill-value"></span> into an empty coin pill; returns the value span. */
@@ -922,20 +1191,28 @@ export class UI {
       const icon = doc.createElement('span'); icon.className = 'card-icon'; icon.setAttribute('aria-hidden', 'true');
       const body = doc.createElement('div'); body.className = 'card-body';
       const name = doc.createElement('div'); name.className = 'card-name'; name.textContent = u.name;
-      if (u.desc) card.title = u.desc;
+      // round 7 (r7, from balance:8): what a rank really buys, as a line on the card (it was only the hover title, which a
+      // touch player never sees)
+      const what = doc.createElement('div'); what.className = 'card-what'; what.textContent = u.desc || '';
       const pips = doc.createElement('div'); pips.className = 'pips';
       const pipEls = [];
       for (let k = 0; k < u.ranks; k++) { const p = doc.createElement('i'); pips.appendChild(p); pipEls.push(p); }
       const effect = doc.createElement('div'); effect.className = 'card-effect';
       const estimate = doc.createElement('div'); estimate.className = 'card-estimate';
-      body.appendChild(name); body.appendChild(pips); body.appendChild(effect); body.appendChild(estimate);
+      body.appendChild(name); body.appendChild(what); body.appendChild(pips); body.appendChild(effect);
+      // r7 (from balance:9): BUY and, under it, the price of the rank after this one ("then 1,230") in one column. r7 fix: the
+      // "~2 runs away" / "Fully upgraded" caption joins them there (it is about the price) — as a fifth line of the body it
+      // made the cards too tall for five to fit a 390 × 844 phone (704 px in a 596 px list; 1.2.2: 546)
+      const act = doc.createElement('div'); act.className = 'card-act';
       const buy = doc.createElement('button'); buy.className = 'btn primary buy'; buy.dataset.id = id; buy.type = 'button';
       const bIcon = doc.createElement('span'); bIcon.className = 'coin-icon'; bIcon.setAttribute('aria-hidden', 'true');
       const price = doc.createElement('span'); price.className = 'price';
       buy.appendChild(bIcon); buy.appendChild(price);
-      card.appendChild(icon); card.appendChild(body); card.appendChild(buy);
+      const then = doc.createElement('div'); then.className = 'card-then';
+      act.appendChild(buy); act.appendChild(then); act.appendChild(estimate);
+      card.appendChild(icon); card.appendChild(body); card.appendChild(act);
       if (host) host.appendChild(card);
-      cards[id] = { card, icon, name, pips: pipEls, pipsHost: pips, effect, estimate, buy, bIcon, price, iconDone: false };
+      cards[id] = { card, icon, name, what, pips: pipEls, pipsHost: pips, effect, estimate, buy, bIcon, price, then, iconDone: false, tip: '' };
     }
     this._cards = cards;
   }
@@ -973,6 +1250,9 @@ export class UI {
     set(el.btnEndlessRetry, STRINGS.endless.retry);
     set(el.btnResetSave, STRINGS.settings.resetSave); set(el.btnReload, STRINGS.errors.reload);
     set(el.bootText, STRINGS.boot.text);
+    // round 7 (r7): the Quality caption (perf-render:9 item 4) and the game-over RETRY note (from balance:10; _fillGameover
+    // hides it for the authored L1, which replays its own road)
+    set(el.qualityNote, STRINGS.settings.qualityNote); set(el.retryNote, STRINGS.gameover.retryNote);
     const aria = (node, label) => { if (node && typeof label === 'string') node.setAttribute('aria-label', label); };
     aria(el.btnPause, STRINGS.aria.pause); aria(el.btnSettings, STRINGS.aria.settings); aria(el.btnFullscreen, STRINGS.aria.fullscreen);
     // round 4 (lead): HOME on every results screen is a 48 × 48 house icon top-left (its glyph is markup SVG, so only
@@ -984,7 +1264,13 @@ export class UI {
     const upd = STRINGS.update || null;
     set(el.updText, upd && typeof upd.ready === 'string' ? upd.ready : 'Update ready — tap to reload');   // DATA-MISSING fallback: STRINGS.update.ready
     aria(el.btnUpdate, upd && typeof upd.aria === 'string' ? upd.aria : 'Update ready. Reload to update the game');
-    const titles = { levels: STRINGS.levels.title, shop: STRINGS.shop.title, settings: STRINGS.settings.title, pause: STRINGS.pause.title, gameover: STRINGS.gameover.title, endless: STRINGS.endless.title };
+    // round 7 (r7): the FIELD GUIDE's "?" buttons (title, pause panel) and the LEVELS skull legend (explain:3)
+    aria(el.btnGuide, STRINGS.aria.guide); aria(el.btnPauseGuide, STRINGS.aria.guide);
+    if (el.levelsLegend) {
+      try { const t = el.levelsLegend.querySelector('.legend-text'); if (t) t.textContent = STRINGS.levels.legend; } catch (_) { /* ignore */ }
+    }
+    const titles = { levels: STRINGS.levels.title, shop: STRINGS.shop.title, settings: STRINGS.settings.title, pause: STRINGS.pause.title, gameover: STRINGS.gameover.title, endless: STRINGS.endless.title,
+      guide: STRINGS.codex.title };
     const keys = Object.keys(titles);
     for (let i = 0; i < keys.length; i++) {
       const scr = this._screens ? this._screens[keys[i]] : null;
@@ -997,15 +1283,18 @@ export class UI {
       const backs = doc.querySelectorAll('#ui [data-back]');
       for (let i = 0; i < backs.length; i++) { backs[i].textContent = STRINGS.common.back; backs[i].setAttribute('aria-label', STRINGS.aria.back); }
     } catch (_) { /* ignore */ }
-    // settings row labels: the leading text node of each row
+    // settings row labels: the row's .row-label span (round 7: a real element, so it can shrink to its longest word
+    // before a narrow row moves its control to a second line — css #scr-settings > .row); a markup without the span
+    // (an artifact.html built before round 7) keeps its leading text node
     const rows = [[el.setSound, STRINGS.settings.sound], [el.setMusic, STRINGS.settings.music], [el.setHaptics, STRINGS.settings.haptics],
       [el.setQuality, STRINGS.settings.quality], [el.setReduced, STRINGS.settings.reducedMotion], [el.setHc, STRINGS.settings.hcGates],
-      [el.setLarge, STRINGS.settings.largeText], [el.setSens, STRINGS.settings.sensitivity]];
+      [el.setLarge, STRINGS.settings.largeText], [el.setSens, STRINGS.settings.sensitivity], [el.setFullscreen, STRINGS.settings.fullscreen]];
     for (let i = 0; i < rows.length; i++) {
       const ctl = rows[i][0];
       if (!ctl || !ctl.parentNode) continue;
       const first = ctl.parentNode.firstChild;
-      if (first && first.nodeType === 3) first.nodeValue = rows[i][1];
+      if (first && first.nodeType === 1 && first.classList && first.classList.contains('row-label')) first.textContent = rows[i][1];
+      else if (first && first.nodeType === 3) first.nodeValue = rows[i][1];
       ctl.setAttribute('aria-label', rows[i][1]);
     }
   }
@@ -1028,17 +1317,82 @@ export class UI {
       if (el.hint) ro.observe(el.hint);
       if (el.shield) ro.observe(el.shield);
       if (el.app) ro.observe(el.app);
+      // r7 fix round 3: the HUD coin pill and the boss bar's track — the room between them bounds the boss name (_bossNameRoom)
+      if (el.coins) ro.observe(el.coins);
+      if (el.bossTrack) ro.observe(el.bossTrack);
       this._ro = ro;
     } catch (_) { this._ro = null; }
+    for (let i = 0; i < this._fadeLists.length; i++) this._observeList(this._fadeLists[i]);
+  }
+
+  /** r7 fix round 3: the observer also watches a fading list's box and its rows (a screen shown, a resize, a card whose
+   *  estimate line came or went) — called again by the lazy builders (levels, FIELD GUIDE); re-observing is a no-op. */
+  _observeList(list) {
+    const ro = this._ro;
+    if (!ro || !list) return;
+    try {
+      ro.observe(list);
+      for (let c = list.firstElementChild; c; c = c.nextElementSibling) ro.observe(c);
+    } catch (_) { /* cosmetic */ }
+  }
+
+  /** r7 fix round 3: a fading list's edge classes — .fade-t while scrolled down, .fade-b while more is below (css masks
+   *  only those edges). Reads scroll metrics (from scroll / ResizeObserver callbacks: layout is clean), writes on change.
+   *  r7 final fix (lead decision 3): an edge fades only when CONTENT lies beyond it. scrollHeight counts the list's own
+   *  padding, so a list whose cards fitted while its bottom pad did not (360 × 640; Large text 568 × 320 / 585 × 340)
+   *  dimmed the last card on open, and one scrolled less than its top pad dimmed the first: the content spans
+   *  [paddingTop, scrollHeight − paddingBottom] of the scroll range. */
+  _listFade(list) {
+    const max = list.scrollHeight - list.clientHeight;
+    const top = list.scrollTop;
+    let t = false, b = false;
+    if (max > 1) {
+      const cs = this._fadeStyle(list);
+      const padT = cs ? parseFloat(cs.paddingTop) || 0 : 0;
+      const padB = cs ? parseFloat(cs.paddingBottom) || 0 : 0;
+      t = top > padT + 1;
+      b = top < max - padB - 1;
+    }
+    try {
+      const cl = list.classList;
+      if (cl.contains('fade-t') !== t) cl.toggle('fade-t', t);
+      if (cl.contains('fade-b') !== b) cl.toggle('fade-b', b);
+    } catch (_) { /* cosmetic */ }
+  }
+
+  /** r7 final fix: the live CSSStyleDeclaration of a fading list (one getComputedStyle per list per session; null when
+   *  unavailable — then the padding counts as 0, the round-3 rule). */
+  _fadeStyle(list) {
+    const fl = this._fadeLists;
+    for (let i = 0; i < fl.length; i++) {
+      if (fl[i] !== list) continue;
+      let cs = this._fadeCss[i];
+      if (cs === undefined) {
+        const view = this._doc ? this._doc.defaultView : null;
+        try { cs = view && typeof view.getComputedStyle === 'function' ? view.getComputedStyle(list) : null; } catch (_) { cs = null; }
+        this._fadeCss[i] = cs;
+      }
+      return cs;
+    }
+    return null;
   }
 
   _observed(entries) {
     const el = this._el;
     if (!el) return;
     let hint = false;
+    let bossName = false;                                // r7 fix round 3: the coin pill or the boss track changed size
+    let fade = 0;                                        // r7 fix round 3: bit k = this._fadeLists[k] changed size
+    const fl = this._fadeLists;
     for (let i = 0; i < entries.length; i++) {
       const t = entries[i].target;
-      if (t === el.shield) {
+      let k = -1;
+      for (let j = 0; j < fl.length; j++) if (t === fl[j] || t.parentElement === fl[j]) { k = j; break; }
+      if (k >= 0) {
+        fade |= 1 << k;
+      } else if (t === el.coins || t === el.bossTrack) {
+        bossName = true;
+      } else if (t === el.shield) {
         const w = el.shield.offsetWidth, h = el.shield.offsetHeight;
         if (w > 0 && h > 0) { this._shieldW = w; this._shieldH = h; }
       } else {
@@ -1055,6 +1409,26 @@ export class UI {
         this._hintBoxOk = false;
       }
     }
+    for (let j = 0; j < fl.length; j++) if (fade & (1 << j)) this._listFade(fl[j]);
+    if (bossName) this._bossNameRoom();
+  }
+
+  /** r7 fix round 3 (hud / walker verifiers, 512 × 297 at 200 % zoom with Large text): where the boss name is left-aligned
+   *  over its bar and may run past the bar's end (css, landscape ≤ 500 px tall under 640 px wide) it stops at the HUD coin
+   *  pill — --bn-room = the px between the track's right end and the pill's left edge (+ the name's right pad, − 1 px): a
+   *  fixed 36u ran "COLOSSUS PR…" 7 px into a 12,345-coin pill. Layout offsets in #hud's frame (no transforms: the bar's
+   *  slide-in and the pill's bump do not move them); from the ResizeObserver callback, written on change. */
+  _bossNameRoom() {
+    const el = this._el;
+    const bb = el.bossbar, tr = el.bossTrack, co = el.coins;
+    if (!bb || !tr || !co) return;
+    const tw = tr.offsetWidth, cw = co.offsetWidth;
+    if (!(tw > 0) || !(cw > 0) || tr.offsetParent !== bb || co.offsetParent !== bb.offsetParent) return;   // hidden: keep the last value
+    let room = Math.floor(co.offsetLeft - (bb.offsetLeft + tr.offsetLeft + tw) + BOSS_NAME_PAD_R - 1);
+    if (room < 0) room = 0;
+    if (room === this._bnRoom) return;
+    this._bnRoom = room;
+    try { bb.style.setProperty('--bn-room', room + 'px'); } catch (_) { /* cosmetic */ }
   }
 
   _listen(target, type, fn, options) {
@@ -1082,8 +1456,14 @@ export class UI {
     // round 6: FIRE answers on pointerdown (no wait for the release, and a thumb that slides off still fired); the
     // engine never steers from a pointerdown on a button, and the delegated click that follows is swallowed (_click)
     this._listen(el.btnFire, 'pointerdown', this._onFirePointer, false);
+    // r7 (layout:0): a wheel anywhere in the app scrolls the current screen's list (passive: it never blocks scrolling)
+    this._listen(el.app, 'wheel', this._onWheelDom, { passive: true });
+    // r7 fix round 3: each fading list re-checks its edges when it scrolls (wheel, keys, touch, scrollIntoView)
+    for (let i = 0; i < this._fadeLists.length; i++) this._listen(this._fadeLists[i], 'scroll', this._onListScroll, { passive: true });
     this._listen(doc, 'fullscreenchange', this._onFsChange, false);
     this._listen(doc, 'webkitfullscreenchange', this._onFsChange, false);
+    this._listen(doc, 'fullscreenerror', this._onFsRefused, false);         // r7 (layout:3): the prefixed request returns no promise
+    this._listen(doc, 'webkitfullscreenerror', this._onFsRefused, false);
     // RELOAD lives inside #ui (handled by the delegated click); the BOOTGUARD / main.js fallbacks check
     // this flag before wiring it themselves.
     if (el.btnReload && el.btnReload.dataset) el.btnReload.dataset.wired = '1';
@@ -1101,7 +1481,8 @@ export class UI {
     on('district:change', (p) => this._onDistrictChange(p));   // round 5: banner (DISTRICTS.md §5, §8.6)
     on('level:progress', (p) => { if (p) { this._progFrac = p.fraction; this._progDist = p.distance; this._progLen = p.length; this._progDirty = true; } });
     on('level:runup', () => { this._skullPulse = true; this._skullDirty = true; });
-    on('weapon:start', (p) => { if (p) this._pillAdd(p.id, p.duration); });
+    // r7 fix round 2: weapon:start comes only from the player's FIRE (weapons.requestFire) — "TAP FIRE TO USE IT" is learnt
+    on('weapon:start', (p) => { if (p) { this._pillAdd(p.id, p.duration); this._hintActed('fire'); } });
     on('weapon:end', (p) => { if (p) this._pillRemove(p.id); });
     on('gear:start', (p) => { if (p && Number.isFinite(p.duration)) this._pillAdd(p.id, p.duration); });
     on('gear:end', (p) => { if (p) this._pillRemove(p.id); });
@@ -1109,10 +1490,13 @@ export class UI {
     on('boss:spawn', (p) => this._onBossSpawn(p));
     on('boss:intro', (p) => this._onBossIntro(p));
     on('boss:hp', (p) => { if (p) { this._bossFrac = p.fraction; this._bossDirty = true; } });
-    on('boss:phase', (p) => { if (p) { this._bossPhase = p.phase | 0; this._bossDirty = true; } });
+    on('boss:phase', (p) => this._onBossPhase(p));
     on('boss:shield', (p) => { if (p) { this._bossShieldUp = !!p.up; this._bossDirty = true; } });
     on('boss:dead', () => this._onBossDead());
-    on('hint:show', (p) => { if (p) this.showHint(p.id, p.text); });
+    on('hint:show', (p) => { if (p) this.showHint(p.id, p.text, p); });   // r7: p carries hold / until / priority / event
+    on('hint:release', (p) => { if (p) this._releaseHint(p.key); });      // r7 (teaching:0 B): the held hint's subject is resolved
+    on('codex:new', (p) => this._onCodexNew(p));                          // r7 (teaching:5): the NEW card
+    on('boss:fight', () => { if (!this._bossMini) this._lbOn = false; });  // r7 (perf-render:7): the bars retract when the fight starts
     on('level:complete', (p) => this._copyComplete(p));
     on('level:failed', (p) => this._copyFailed(p));
     on('endless:end', (p) => this._copyEndless(p));
@@ -1365,8 +1749,10 @@ export class UI {
     for (let i = 0; i < FIRE_WEAPON_IDS.length; i++) { const id = FIRE_WEAPON_IDS[i]; steps.push(() => { this._fireIconUrl(id); return null; }, 1); }
     steps.push(() => {
       const c = this._cmp;
-      // one earned + two empty stars: both star images get rastered
-      c.level = 1; c.stars = 1; c.coins = 340; c.survivors = 20; c.kills = 120; c.gates = 60; c.piles = 30; c.boss = 40; c.bonus = 20;
+      // one earned + two empty stars: both star images get rastered. Round 7 (r7): a four-digit "Earned +1,340" (the comma),
+      // the split ★ / Survivors chips and the survivors line with its ★★ / ★★★ thresholds, as the real results lay out
+      c.level = 1; c.stars = 1; c.coins = 1340; c.survivors = 20; c.eBoss = 140; c.kills = 120; c.gates = 60; c.piles = 30; c.boss = 40; c.bonus = 20;
+      c.bonusStars = 15; c.bonusSurv = 5; c.split = true;
       this._cmpFresh = false;
       this._enterComplete();
       this._cmpAnimating = false;
@@ -1376,24 +1762,29 @@ export class UI {
       if (st && st.length > 0) this._prewarmStarAnim = this._animate(st[0], KF_STAR, T_STAR);
       return [S.complete];
     }, W);
-    steps.push(() => { this._fillGameover(); return [S.gameover]; }, W);
+    // r7: a generated level's game over (L2), so its "New road each retry" note rasters too (_prewarmRestore resets it)
+    steps.push(() => { this._fail.level = 2; this._fail.coinsKept = 1234; this._fillGameover(); return [S.gameover]; }, W);
     steps.push(() => { this._fillEndless(); return [S.endless]; }, W);
     steps.push(() => { this._fillLevels(false); return [S.levels]; }, W);
     for (let i = 0; i < UPGRADE_IDS.length; i++) { const id = UPGRADE_IDS[i]; steps.push(() => { this._drawCardIcon(id); return null; }, 1); }
     steps.push(() => { this._fillShop(); return [S.shop]; }, W);
     steps.push(() => { this._syncSettings(); return [S.settings]; }, W);
-    steps.push(() => [S.pause], W);
+    steps.push(() => { this._fillPauseControls(); return [S.pause]; }, W);   // r7: with its controls line
+    // r7 (teaching:5): the FIELD GUIDE — every row built and filled (its first open rasters 50 rows, icons and the fallback
+    // glyphs ★ ← → that the game fonts lack), each row drawn met so every icon / gate chip rasters now; _prewarmRestore
+    // resets the rows, so the first real open fills them from the save
+    steps.push(() => { this._buildGuide(); this._prewarmGuideRows(); return [S.guide]; }, W);
     // round 3: the title (the logo's six drop-shadow filters, the PLAY ring) is the first screen after boot — warm its
     // raster too. Sample caption / coins only: _fillTitle() would spend the one-time volatile-save caption
     steps.push(() => {
-      if (el.titleCaption) el.titleCaption.textContent = STRINGS.title.caption(1, 3);
-      if (el.titleCoinsValue) el.titleCoinsValue.textContent = fmtCoins(0);
+      if (el.titleCaption) el.titleCaption.textContent = STRINGS.title.caption(1, 2, starNeed(eBossOf(1), 3));   // r7: with the ★★★ goal
+      if (el.titleCoinsValue) el.titleCoinsValue.textContent = fmtCoins(12345);   // r7: full numbers with a comma (_prewarmRestore re-syncs the pill)
       return [S.title];
     }, W);
     // the HUD in two surfaces (both keep their #hud parent displayed): the boss chrome, then hint / shield / pill —
     // the whole HUD in one frame was the prewarm's heaviest raster (≈ 0.3 s on a loaded host at 4×)
     steps.push(() => {
-      if (el.bossName) el.bossName.textContent = STRINGS.boss.label;
+      if (el.bnName) el.bnName.textContent = STRINGS.boss.label;
       if (el.ncName) el.ncName.textContent = STRINGS.boss.label;
       // round 5 integration (r5-perf-audio needsOtherGroup 2): the boss chrome's own entry animations run here once too — the
       // bar's slide-down, the two letterbox bars and the name card's pop-in — like the pill and the banner below, so the
@@ -1420,13 +1811,22 @@ export class UI {
         // verification: desktop and artifact shells; a static prewarm does not cover the animated path)
         this._prewarmAnim = this._animate(pu.root, KF_POP_IN, T_NAMECARD);
       }
-      // round 5: the district banner (a composited pill with an accent rule) runs its real animation here too
+      // round 5: the district banner (a composited pill with an accent rule) runs its real animation here too. Round 7 (r7,
+      // explain:4): as the big "NEW DISTRICT" card with the longest name (its kicker line, the larger text), so neither
+      // variant's first show rasters anything new (UI-19)
       const db = el.districtBanner;
       if (db) {
-        if (el.dbText) el.dbText.textContent = DISTRICTS[DISTRICTS.length - 1].label;
+        let longest = DISTRICTS[0];
+        for (let i = 1; i < DISTRICTS.length; i++) if (DISTRICTS[i].name.length > longest.name.length) longest = DISTRICTS[i];
+        if (el.dbText) el.dbText.textContent = longest.name;
+        if (el.dbKicker && STRINGS.district) { el.dbKicker.textContent = STRINGS.district.kicker(longest.index); el.dbKicker.hidden = false; }
+        try { db.classList.add('db-new'); } catch (_) { /* cosmetic */ }
         try { db.style.setProperty('--db-accent', hexCss(DISTRICTS[0].accent)); db.style.setProperty('--db-glow', rgbaCss(DISTRICTS[0].accent, DB_GLOW_ALPHA)); } catch (_) { /* cosmetic */ }
-        if (typeof db.animate === 'function') { try { this._prewarmDbAnim = db.animate(KF_DB, T_DB); } catch (_) { this._prewarmDbAnim = null; } }
+        if (typeof db.animate === 'function') { try { this._prewarmDbAnim = db.animate(KF_DB_NEW, T_DB_NEW); } catch (_) { this._prewarmDbAnim = null; } }
       }
+      // r7 (teaching:5): the NEW card (pill, accent rule, a pictogram) with a long sample; r7 (teaching:0 D): the hint's rim
+      if (el.newcard) { this._prewarmNewCard(); }
+      if (el.hint) { try { el.hint.setAttribute('data-tone', 'warn'); } catch (_) { /* cosmetic */ } }
       // round 6: the FIRE button (ring mask, disc, pictogram, badge and its ready pulse) rasters here, not at the first pickup
       if (el.btnFire) {
         this._applyIcon(el.fireIcon, this._fireIconUrl(WEAPONS.rocket.id));
@@ -1434,16 +1834,49 @@ export class UI {
         if (el.fireBadge) { el.fireBadge.textContent = STRINGS.fire.badge(2); el.fireBadge.hidden = false; }
         try { el.btnFire.classList.add('ready'); } catch (_) { /* cosmetic */ }
       }
-      return [el.hud, el.hint, el.shield, pu ? pu.root : null, db, el.btnFire];
+      return [el.hud, el.hint, el.shield, pu ? pu.root : null, db, el.btnFire, el.newcard];
     }, W);
     return steps;
+  }
+
+  /** r7 (teaching:5): the NEW card's prewarm sample — the longest card line, an item pictogram and its accent. */
+  _prewarmNewCard() {
+    const el = this._el;
+    const E = STRINGS.codex.entries;
+    let id = 'troop.medic', len = 0;
+    for (const k of CODEX.cards) { const c = E[k] ? (E[k].card || '') : ''; if (c.length > len) { len = c.length; id = k; } }
+    if (el.ncdName) el.ncdName.textContent = E[id].name;
+    if (el.ncdLine) el.ncdLine.textContent = E[id].card || E[id].line;
+    this._fillCodexIcon(el.ncdIcon, id);
+    try { el.newcard.style.setProperty('--ncd-accent', this._codexAccent(id)); } catch (_) { /* cosmetic */ }
+  }
+
+  /** r7 (teaching:5): every guide row drawn as met (its icon / chip / face / skull rasters at boot); reset afterwards. */
+  _prewarmGuideRows() {
+    const rows = this._guideRows;
+    if (!rows) return;
+    const E = STRINGS.codex.entries;
+    for (let i = 0; i < GUIDE_IDS.length; i++) {
+      const id = GUIDE_IDS[i];
+      const r = rows[id];
+      if (!r) continue;
+      r.name.textContent = this._codexName(E[id]);
+      r.line.textContent = this._codexLine(E[id]);
+      this._fillCodexIcon(r.icon, id);
+      r.tag.hidden = i % 4 !== 0;                   // a few NEW tags rastered too
+      r.state = '';                                 // the first real fill rewrites every row
+    }
   }
 
   /** Undo the sample content that a later show would not overwrite by itself. */
   _prewarmRestore() {
     const el = this._el;
     this._cmp.stars = 0; this._cmp.coins = 0;
-    if (el.bossName) el.bossName.textContent = this._bossName;
+    // round 7 (r7): the sample results / game-over fields, and the title pill's sample text (the wallet rewrites every pill)
+    this._cmp.eBoss = 0; this._cmp.bonusStars = 0; this._cmp.bonusSurv = 0; this._cmp.split = false;
+    this._fail.level = 1; this._fail.coinsKept = 0;
+    this._coinShown = -1;
+    if (el.bnName) el.bnName.textContent = this._bossName;
     if (el.hintText) el.hintText.textContent = '';
     if (el.shieldValue) el.shieldValue.textContent = '';
     this._platesShown = -1;
@@ -1460,6 +1893,13 @@ export class UI {
     this._prewarmBossAnims.length = 0;
     this._dbShownLabel = '';                        // round 5: the sample banner text / accent are rewritten on the first real show
     this._dbShownAccent = -1;
+    // r7: the sample big-card variant, the NEW card, the hint's rim and the guide rows are rewritten by their first real show
+    this._dbShownKicker = null;
+    this._dbShownNew = true;                        // the banner holds .db-new now: the first real show toggles it as needed
+    if (el.hint) { try { el.hint.removeAttribute('data-tone'); } catch (_) { /* cosmetic */ } }
+    this._hintTone = '';
+    if (el.ncdIcon) el.ncdIcon.dataset.id = '';
+    if (this._guideRows) { for (const id in this._guideRows) { const r = this._guideRows[id]; r.state = ''; r.tag.hidden = true; } }
   }
 
   /**
@@ -1557,8 +1997,15 @@ export class UI {
       else if (target === 'gameover') this._copyFailed(data);
       else if (target === 'endless') this._copyEndless(data);
     }
-    if (target === 'settings' && prev !== 'settings') this._beforeSettings = prev;
-    const base = target === 'settings' ? this._beforeSettings : target;
+    // r7 (teaching:5): settings and the FIELD GUIDE are overlays — over the screen they were opened from (the title: shown
+    // under them, .under), in place of the pause panel; _beforeSettings keeps that screen for either
+    const overlay = target !== null && OVERLAY_IDS[target] === true;
+    if (overlay && OVERLAY_IDS[prev] !== true) this._beforeSettings = prev;
+    if (prev === 'guide' && target !== 'guide') this._closeGuide();       // r7: the rows it showed are read now
+    // round 7 (r7, flow-coins:6): leaving the results during their theatre (SHOP / NEXT / HOME straight away) ends it first —
+    // stars, count and the wallet header it drives are final (silently), so no screen ever shows a half-counted header
+    if (prev === 'complete' && target !== 'complete' && !overlay && this._cmpAnimating) this._finishCompleteAnim(false);
+    const base = overlay ? this._beforeSettings : target;
     const screens = this._screens;
     for (let i = 0; i < SCREEN_IDS.length; i++) {
       const sid = SCREEN_IDS[i];
@@ -1566,7 +2013,7 @@ export class UI {
       if (!node) continue;
       let vis = sid === target;
       let under = false;
-      if (!vis && target === 'settings' && sid === base && sid !== 'pause' && sid !== 'boot') { vis = true; under = true; }
+      if (!vis && overlay && sid === base && sid !== 'pause' && sid !== 'boot') { vis = true; under = true; }
       if (!vis && sid === 'boot' && this._bootHold) vis = true;     // UI-19: the boot screen covers the prewarm
       if (node.hidden === vis) node.hidden = !vis;
       // round-3 polish: the screen under the settings overlay hides its content (css .screen.under)
@@ -1587,28 +2034,50 @@ export class UI {
     if (target === null && this._el.overlayMsg) this._el.overlayMsg.hidden = true;
     if (target !== 'settings' && this._confirmArmed) this._disarmReset();
     this._current = target;
+    // round 7 (r7, flow-coins:2): a new screen is "unpainted" until the frame that renders it has finished — this one when the
+    // switch runs inside update(), else the next (or STALE_CLICK_MAX_MS) — a pointer press before that was aimed at the
+    // screen it replaced (_click ignores it)
+    if (target !== prev) {
+      this._shownStamp = Infinity;
+      this._shownAt = this._perfMs();
+      this._paintArmed = false;
+      this._shownWait = 1;
+      if (this._inUpdate) { this._shownWait = 0; this._armPaintMark(); }
+      else if (!this._paintRaf && typeof requestAnimationFrame === 'function') {
+        try { this._paintRaf = requestAnimationFrame(this._onPaintFrame); } catch (_) { this._paintRaf = 0; }
+      }
+      // r7 fix: the HUD of a new run (from the results, a menu, the title) arms its buttons late; a resume does not
+      if (target === null) this._hudArm = prev !== 'pause';
+    }
 
     switch (target) {
       case 'title': this._fillTitle(); break;
       case 'levels': this._fillLevels(true); break;
       case 'shop': this._fillShop(); break;
       case 'settings': this._syncSettings(); break;
+      case 'guide': this._fillGuide(true); break;           // r7 (teaching:5): the FIELD GUIDE, refreshed on every open
+      case 'pause': this._fillPauseControls(); this._syncGuideBadge(); break;   // r7: the controls line; the "?" badge
       case 'complete': this._enterComplete(); break;
       case 'gameover': this._fillGameover(); break;
       case 'endless': this._fillEndless(); break;
       default: break;
     }
     if (target === 'complete' || target === 'gameover' || target === 'endless') {
-      // the run's coins are final now (game over keeps only ECONOMY.gameOverKeep): settle the HUD pill
+      // the run's coins are final now (game over keeps only ECONOMY.gameOverKeep): settle the wallet (r7, flow-coins:5: the one
+      // wallet model — the header tweens once from what it shows). r7 (flow-coins:6): a fresh results theatre drives the
+      // header from its own count instead (_updateComplete), so the header holds where it is until the count passes it
       const save = this.ctx.save;
-      if (save && save.data) { this._coinTotal = save.data.coins; this._coinHold = false; this._tweenCoins(save.data.coins); }
+      if (save && save.data) {
+        if (this._cmpDrive) { this._coinTotal = save.data.coins; this._coinHold = false; this._coinTween = false; }
+        else this._walletSync(save.data.coins, true);
+      }
     }
 
     // UI-21: no fade restart here (.enter replays by itself on display:none → shown); focus moves at the start of
     // the next update(), when style is clean, instead of flushing style + layout inside this frame
     const shown = target === null ? this._el.hud : screens[target];
     if (target !== prev) this._focusPending = target === null ? this._el.app : (shown || null);
-    if (target !== null && target !== 'pause' && target !== 'settings') this._hintQueueClear(true);   // UI-25: quit / results / menus
+    if (target !== null && target !== 'pause' && !overlay) this._hintQueueClear(true);   // UI-25: quit / results / menus (not the overlays over pause)
 
     this._coinPosDirty = true;
     this._puPosDirty = true;
@@ -1658,6 +2127,10 @@ export class UI {
       if (el.btnReload) el.btnReload.hidden = false;
       try { el.errorBox.classList.add('fatal'); el.errorBox.classList.remove('toast'); } catch (_) { /* ignore */ }
       el.errorBox.hidden = false;
+      // r7 INT (engine's context-loss give-up, STRINGS.errors.gpuGone): the "Reloading graphics…" panel under a fatal box showed
+      // faintly through it, a spinner promising a reload that will not come. The overlay itself stays (engine keeps it as the
+      // input blocker); only its panel goes, for good — a fatal box is final (RELOAD)
+      if (el.overlayText) el.overlayText.hidden = true;
       if (el.btnReload) { try { el.btnReload.focus({ preventScroll: true }); } catch (_) { /* ignore */ } }
       return;
     }
@@ -1680,8 +2153,11 @@ export class UI {
     this._flashOn = true;
   }
 
-  /** Edge vignette in a colour (damage / negative gate / chew), fading out over `seconds`. */
-  vignette(colorHex, seconds) {
+  /** Edge vignette in a colour (damage / negative gate / chew), fading out over `seconds`. Round 7 (r7, teaching:1, the C → D
+   *  contract): optional `alpha` (0..1) multiplies its strength (VIGNETTE_ALPHA at the edge) — the bite cue starts at 0.35
+   *  and grows with the bite burst; absent = full strength, as before. The gradient string is unchanged (built once per
+   *  colour); the alpha scales the element's opacity ramp. */
+  vignette(colorHex, seconds, alpha) {
     const hex = Number.isFinite(colorHex) ? colorHex >>> 0 : PALETTE.flash.red;
     if (hex !== this._vigHex) {
       this._vigHex = hex;
@@ -1689,33 +2165,121 @@ export class UI {
       this._vigCssDirty = true;
     }
     this._vigDur = Number.isFinite(seconds) && seconds > 0 ? seconds : JUICE.flashes.negVignette;
+    this._vigA0 = Number.isFinite(alpha) ? clamp(alpha, 0, 1) : 1;
     this._vigT = 0;
     this._vigOn = true;
   }
 
   /**
-   * Tutorial hint (hint:show). UI-25: queued — at most JUICE.ui.hintQueueMax waiting (the oldest is dropped when
-   * full), de-duplicated by id (on screen or waiting), dropped when older than HINT_QUEUE_AGE_S theatre seconds or
-   * when the run ends; each is shown for 2.5 s (real time, paused time excluded) in turn and marked done in the
-   * save only when it is actually displayed. 'steer' also hides as soon as the player has steered.
+   * Tutorial hint (hint:show). UI-25: queued — at most JUICE.ui.hintQueueMax waiting, de-duplicated by id (on screen or
+   * waiting), dropped when older than HINT_QUEUE_AGE_S theatre seconds or when the run ends; 'steer' also hides as soon as
+   * the player has steered. Round 7 (r7, teaching:0 / :3) — `opts` (the hint:show payload, all optional):
+   *   hold      theatre s the hint may not be cut by a waiting one (a subject-bound lesson: its gate's time on the road)
+   *   until     release key: the hint stays (≤ HINT_HOLD_MAX_S) until hint:release with that key — and leaves at once then
+   *   priority  a boss attack's lesson: queued ahead of the others and cuts a normal hint on screen to HINT_CUT_S; the cut
+   *             one comes back first unless it had been up HINT_MARK_S (then it counts as read)
+   *   event     the gate event whose gates pulse while the hint is up (C's gates.pulseEvent, guarded), −1 none
+   * Each hint is on screen for max(HINT_S, base + per-word × words) s (≤ HINT_MAX_S), a held one for max(that, hold), and is
+   * marked done in the save only after HINT_MARK_S on screen (a lesson cut or never seen comes back in a later run).
    */
-  showHint(id, text) {
+  showHint(id, text, opts) {
     const hid = typeof id === 'string' ? id : '';
     let t = typeof text === 'string' ? text : (HINTS[hid] || '');
-    // UI-16: with a mouse / keyboard the steer hint names the keys too (A/D/←/→ steer, ARCH §6.2)
+    if (typeof t === 'function') t = t();
+    // UI-16: with a mouse / keyboard the steer hint names the keys too (A/D/←/→ steer, ARCH §6.2); round 7 (r7, controls:4 /
+    // teaching:8): so does the first stored weapon's FIRE hint (click it or press Space — "TAP" told a desktop player nothing)
     if (hid === 'steer' && HINTS.steerDesktop && prefersDesktopSteerHint()) t = HINTS.steerDesktop;
+    else if (hid === 'fire' && HINTS.fireDesktop && prefersDesktopSteerHint()) t = HINTS.fireDesktop;
     if (!t) return;
+    const pri = !!(opts && opts.priority);
     if (hid) {
       if (this._hintShown && this._hintId === hid) return;
-      for (let i = 0; i < this._hqLen; i++) if (this._hqId[i] === hid) return;
+      for (let i = 0; i < this._hqLen; i++) {
+        if (this._hqId[i] !== hid) continue;
+        if (!pri || i === 0) return;
+        this._hintQueueRemove(i);                   // a priority hint already waiting moves to the front (below)
+        break;
+      }
+      // round 7 (r7, teaching:3): a boss phase's lesson ('boss.hulk.3') replaces the same archetype's earlier phase lesson
+      // still waiting ('boss.hulk.2'): a fast fight reached phase 3 before "PHASE 2: HE CHARGES" was shown, which then read
+      // during the enrage. The dropped one was never on screen, so it stays unmarked and teaches at the next fight's phase 2
+      const dot = hid.lastIndexOf('.');
+      const c = dot > 0 ? hid.charCodeAt(dot + 1) : 0;
+      if (dot > 0 && c >= 48 && c <= 57 && hid.indexOf('boss.') === 0) {
+        const pre = hid.slice(0, dot + 1);
+        for (let i = this._hqLen - 1; i >= 0; i--) {
+          const q = this._hqId[i];
+          if (q !== hid && q.length > pre.length && q.indexOf(pre) === 0) this._hintQueueRemove(i);
+        }
+      }
     }
     const max = this._hqId.length;
     if (max <= 0) return;
-    if (this._hqLen >= max) this._hintQueueShift();
-    const k = this._hqLen++;
+    // the front holds the priority hints in arrival order; a normal hint joins the back
+    let lead = 0;
+    while (lead < this._hqLen && this._hqPri[lead] === 1) lead++;
+    if (this._hqLen >= max) {
+      // full: drop the oldest normal hint (the oldest priority one only when every waiting hint is a priority one)
+      this._hintQueueRemove(lead < this._hqLen ? lead : 0);
+      if (lead > this._hqLen) lead = this._hqLen;
+    }
+    const k = pri ? Math.min(lead, this._hqLen) : this._hqLen;
+    this._hintQueueInsert(k, hid, t, opts, pri, false);
+    // a priority lesson cuts a normal hint on screen short (it returns afterwards, _hideHintDom)
+    if (pri && this._hintShown && !this._hintPri) {
+      const cut = this._tclock + HINT_CUT_S;
+      if (this._hintUntil > cut) this._hintUntil = cut;
+      this._hintCut = true;
+    }
+  }
+
+  /** Inserts one waiting hint at index k (k ≤ _hqLen < capacity). */
+  _hintQueueInsert(k, hid, text, opts, pri, back) {
+    const n = this._hqLen;
+    for (let i = n; i > k; i--) {
+      this._hqId[i] = this._hqId[i - 1]; this._hqText[i] = this._hqText[i - 1]; this._hqAt[i] = this._hqAt[i - 1];
+      this._hqHold[i] = this._hqHold[i - 1]; this._hqKey[i] = this._hqKey[i - 1]; this._hqPri[i] = this._hqPri[i - 1];
+      this._hqEv[i] = this._hqEv[i - 1]; this._hqBack[i] = this._hqBack[i - 1];
+    }
     this._hqId[k] = hid;
-    this._hqText[k] = t;
+    this._hqText[k] = text;
     this._hqAt[k] = this._tclock;
+    this._hqHold[k] = opts && opts.hold > 0 ? opts.hold : 0;
+    this._hqKey[k] = opts && opts.until !== undefined ? opts.until : null;
+    this._hqPri[k] = pri ? 1 : 0;
+    this._hqEv[k] = opts && opts.event >= 0 ? opts.event : -1;
+    this._hqBack[k] = back ? 1 : 0;
+    this._hqLen = n + 1;
+  }
+
+  /** Removes the waiting hint at index i. */
+  _hintQueueRemove(i) {
+    const n = this._hqLen;
+    if (i < 0 || i >= n) return;
+    for (let j = i + 1; j < n; j++) {
+      this._hqId[j - 1] = this._hqId[j]; this._hqText[j - 1] = this._hqText[j]; this._hqAt[j - 1] = this._hqAt[j];
+      this._hqHold[j - 1] = this._hqHold[j]; this._hqKey[j - 1] = this._hqKey[j]; this._hqPri[j - 1] = this._hqPri[j];
+      this._hqEv[j - 1] = this._hqEv[j]; this._hqBack[j - 1] = this._hqBack[j];
+    }
+    this._hqLen = n - 1;
+    this._hqId[n - 1] = ''; this._hqText[n - 1] = ''; this._hqKey[n - 1] = null; this._hqPri[n - 1] = 0; this._hqEv[n - 1] = -1; this._hqBack[n - 1] = 0;
+  }
+
+  /** Round 7 (r7, teaching:0 B): hint:release — the hint bound to `key` leaves the screen now, or the queue unshown. */
+  _releaseHint(key) {
+    if (key === null || key === undefined) return;
+    for (let i = this._hqLen - 1; i >= 0; i--) if (this._hqKey[i] === key) this._hintQueueRemove(i);
+    if (this._hintShown && this._hintKey === key) { this._hintKey = null; this._hintCut = false; this._hintHideReq = true; }
+  }
+
+  /** r7 fix round 2: the player already did what lesson `id` asks (FIRE pressed, weapon:start) — it leaves the queue unshown
+   *  or the screen at once, marked done, as 'steer' does once the player has steered. The 'fire' lesson waited behind a
+   *  2.5 s hint and then asked for a FIRE press that had already started the shotgun (L1, Space at the pickup). */
+  _hintActed(id) {
+    let done = false;
+    for (let i = this._hqLen - 1; i >= 0; i--) if (this._hqId[i] === id) { this._hintQueueRemove(i); done = true; }
+    if (this._hintShown && this._hintId === id) { this._hintMarked = true; this._hintCut = false; this._hintHideReq = true; done = true; }
+    if (done) this._markHint(id);
   }
 
   /** Hides the hint on screen and drops the waiting ones (they stay un-marked, so a later run shows them). */
@@ -1859,6 +2423,8 @@ export class UI {
       this._hintQueueClear(false);                  // UI-25: queued hints never outlive the run
       this._dbReq = false;                          // round 5: nor does the district banner (DISTRICTS.md §5)
       this._dbHideReq = true;
+      this._ncdQ.length = 0;                        // r7 (teaching:5): nor the NEW cards (the FIELD GUIDE keeps them)
+      this._ncdHideReq = true;
     }
     if (to === 'complete' && data) {
       if (data.endless) this._copyEndless(data);
@@ -1868,6 +2434,28 @@ export class UI {
     }
     this._pendingId = this._mapState(to, data);
     this._pendingSet = true;
+    // round 7 (r7, flow-coins:2): shown by the click / key task that caused it (_click, _key), else by the next update(), else
+    // by this timer — a starved animation frame can no longer hold a screen switch
+    if (!this._pendingTimer) {
+      try { this._pendingTimer = setTimeout(this._onPendingTimer, PENDING_FALLBACK_MS); } catch (_) { this._pendingTimer = 0; }
+    }
+  }
+
+  /** Round 7 (r7, flow-coins:2): applies the pending state screen now (update(), the end of a click / key task, the
+   *  fallback timer). Takes .starting / aria-busy off the menu button that waited for its script. */
+  _flushPendingScreen() {
+    this._pendingSet = false;
+    if (this._pendingTimer) { try { clearTimeout(this._pendingTimer); } catch (_) { /* ignore */ } this._pendingTimer = 0; }
+    this._clearStarting();
+    this.showScreen(this._pendingId);
+  }
+
+  /** The menu button waiting for its generated script (.starting, aria-busy) goes back to normal. */
+  _clearStarting() {
+    const b = this._startingBtn;
+    if (!b) return;
+    this._startingBtn = null;
+    try { b.classList.remove('starting'); b.removeAttribute('aria-busy'); } catch (_) { /* cosmetic */ }
   }
 
   _copyComplete(p) {
@@ -1880,7 +2468,13 @@ export class UI {
     if (Number.isFinite(p.eBoss)) c.eBoss = p.eBoss;
     if (Number.isFinite(p.score)) c.score = p.score;
     const b = p.breakdown;
-    if (b) { c.kills = b.kills | 0; c.gates = b.gates | 0; c.piles = b.piles | 0; c.boss = b.boss | 0; c.bonus = b.bonus | 0; }
+    if (b) {
+      c.kills = b.kills | 0; c.gates = b.gates | 0; c.piles = b.piles | 0; c.boss = b.boss | 0; c.bonus = b.bonus | 0;
+      // round 7 (r7, explain:7): the level bonus's star and survivor parts (absent from an older level.js: one Bonus chip)
+      c.split = Number.isFinite(b.bonusStars) && Number.isFinite(b.bonusSurvivors);
+      c.bonusStars = c.split ? b.bonusStars | 0 : 0;
+      c.bonusSurv = c.split ? b.bonusSurvivors | 0 : 0;
+    }
     this._lastCompleteEndless = false;
   }
 
@@ -1909,6 +2503,41 @@ export class UI {
     this._coinTo = total;
     this._coinT = 0;
     this._coinTween = true;
+  }
+
+  /**
+   * Round 7 (r7, flow-coins:5): the ONE wallet display. The HUD model (_coinValue / _coinTo / the tween) is the only source
+   * of every coin pill — HUD (#coins-value, the results header too), title and shop — so all of them show the same number at
+   * the same moment and a purchase animates once (737 → 327 played twice before: on the shop pill, then again on the
+   * results header after BACK, from a stale 737). Outside play the wallet moves only when the save changes. `animate`:
+   * tween from the value on screen (an unchanged target keeps a running tween), else set at once and written now. While the
+   * fresh results theatre drives the header from its count (_cmpDrive) this does nothing; the theatre syncs at its end.
+   */
+  _walletSync(coins, animate) {
+    if (!Number.isFinite(coins) || this._cmpDrive) return;
+    this._coinTotal = coins;
+    this._coinHold = false;
+    if (animate) {
+      if (this._coinTween && coins === this._coinTo) return;                                                    // already heading there
+      if (!this._coinTween && this._coinValue === coins && Math.round(coins) === this._coinShown) return;       // already there
+      this._tweenCoins(coins);
+      return;
+    }
+    this._coinFrom = this._coinTo = this._coinValue = coins;
+    this._coinT = 0;
+    this._coinTween = false;
+    this._writeWallet(Math.round(coins));
+  }
+
+  /** Writes the integer `v` into every coin pill (HUD, title, shop), only when it changed; the string is built then. */
+  _writeWallet(v) {
+    if (v === this._coinShown) return;
+    this._coinShown = v;
+    const el = this._el;
+    const s = fmtCoins(v);
+    if (el.coinsValue) el.coinsValue.textContent = s;
+    if (el.titleCoinsValue) el.titleCoinsValue.textContent = s;
+    if (el.shopCoinsValue) el.shopCoinsValue.textContent = s;
   }
 
   _onLevelStart(p) {
@@ -1954,11 +2583,20 @@ export class UI {
     this._ncPending = false;
     this._ncUntil = 0;
     this._hintQueueClear(true);                     // UI-25: level start clears the queue and hides the pill
+    // r7: per run — lessons slowed, NEW cards waiting / shown, the boss archetype, the phase flash, the letterbox dock
+    this._slowedRun.length = 0;
+    this._ncdQ.length = 0;
+    this._ncdHideReq = true;
+    this._bossArch = '';
+    this._bossPhaseReq = false;
+    this._bossPhaseUntil = 0;
+    this._bossPhaseLabel = '';
     this._flashOn = false;
     this._vigOn = false;
     this._hudResetPending = true;
     const save = this.ctx.save;
     const coins = save && save.data ? save.data.coins : 0;
+    this._cmpDrive = false;                         // r7 (flow-coins:6): the run's coins:change drive the header again
     this._coinFrom = coins; this._coinTo = coins; this._coinValue = coins; this._coinT = 0; this._coinTween = true;
     this._coinTotal = coins; this._coinHold = false;
   }
@@ -2012,6 +2650,7 @@ export class UI {
   _onBossSpawn(p) {
     if (!p) return;
     this._bossName = typeof p.name === 'string' ? p.name : '';
+    this._bossArch = typeof p.archetype === 'string' ? p.archetype : '';   // r7 (teaching:3): the name card's tagline
     this._bossMini = !!p.mini;
     this._bossTwins = !!p.twins;
     this._bossFrac = 1;
@@ -2029,11 +2668,29 @@ export class UI {
     this._ncPending = true;
   }
 
+  /** boss:dead. Round 7 (r7, perf-render:7, lead decision): the bars retract at boss:fight and come back for the death
+   *  cinematic (slow-mo, collapse) of a campaign boss; the results screen hides them, level:start clears them. */
   _onBossDead() {
     this._bossHideAt = this._tclock + BOSS_OUT_S;
-    this._lbOn = false;
+    this._lbOn = !this._bossMini && !this._runEndless;
     this._ncUntil = 0;
     this._ncPending = false;
+    // r7 (teaching:3): the fight's lessons are moot once the boss is dead — a queued "ENRAGED! …" showed over the collapse.
+    // They stay un-marked (unless already read), so the next boss teaches them
+    for (let i = this._hqLen - 1; i >= 0; i--) if (isBossHint(this._hqId[i])) this._hintQueueRemove(i);
+    if (this._hintShown && isBossHint(this._hintId)) { this._hintCut = false; this._hintHideReq = true; }
+  }
+
+  /** boss:phase → the bar's colour (10 Hz block) and (r7, teaching:3) a 1.5 s "PHASE 2" / "ENRAGED" in place of its name. */
+  _onBossPhase(p) {
+    if (!p) return;
+    const n = p.phase | 0;
+    this._bossPhase = n;
+    this._bossDirty = true;
+    if (n < 2) return;
+    const B = STRINGS.boss;
+    this._bossPhaseLabel = (n >= 3 && B.enraged ? B.enraged : B.phase(n));   // event time
+    this._bossPhaseReq = true;
   }
 
   /**
@@ -2056,22 +2713,137 @@ export class UI {
       }
     }
     if (!label) return;
-    this._dbLabel = label;
+    // round 7 (r7, explain:4): a district's first level (and an endless start / rotation) → the big card ("NEW DISTRICT 2"
+    // over the name; "ENDLESS RUN" at an endless start); any other start, retries included → a small tag "NAME · 3/5", or
+    // "NAME · FINALE" on the skull level. An older level.js (no `first` / `step`) keeps the round-5 label
+    const D = STRINGS.district;
+    let name = typeof p.name === 'string' && p.name ? p.name : '';
+    let index = p.index | 0;
+    if (!name) {
+      for (let i = 0; i < DISTRICTS.length; i++) { const d = DISTRICTS[i]; if (d && d.label === label) { name = d.name; index = d.index; break; } }
+    }
+    this._dbNew = p.first === true && !!name;
+    if (this._dbNew && D) {
+      this._dbKicker = p.reason === 'start' && this._runEndless ? D.endless : D.kicker(index);
+      this._dbLabel = name;
+    } else {
+      this._dbKicker = '';
+      const step = p.step | 0, steps = p.steps | 0;
+      // r7 fix: an endless start that is not new (a RETRY: no step) shows the district's name — the round-5 label
+      // "DISTRICT 1 · SUNSET BOULEVARD" is the old format the tester saw; only an older level.js (no name) still gets it
+      if (D && name) this._dbLabel = step > 0 && steps > 0 ? (step >= steps ? D.finale(name) : D.tag(name, step, steps)) : name;
+      else this._dbLabel = label;
+    }
     this._dbAccent = accent >= 0 ? accent : PALETTE.ui.primary;
     this._dbReq = true;
   }
 
-  /** Round 5: the district banner per frame (theatre clock; DOM writes only on a show / hide / pause change). */
+  /** Round 7: the name card's three lines — "BOSS" or (explain:3) "DISTRICT FINALE" on a campaign milestone level, the
+   *  archetype's name, and (teaching:3) its tagline from data (STRINGS.boss.tagline; '' hides the line). */
+  _fillNameCard() {
+    const el = this._el;
+    const fin = !this._runEndless && BOSSES.milestones.indexOf(Math.min(this._runLevel, LEVELS.curve.loopAfter)) !== -1;
+    const label = fin && STRINGS.boss.finale ? STRINGS.boss.finale : STRINGS.boss.label;
+    if (el.ncLabel && el.ncLabel.textContent !== label) el.ncLabel.textContent = label;
+    if (el.ncName) el.ncName.textContent = this._bossName;
+    const tags = STRINGS.boss.tagline;
+    const tag = tags && typeof tags[this._bossArch] === 'string' ? tags[this._bossArch] : '';
+    if (el.ncTag) {
+      if (tag !== this._ncTagText) { this._ncTagText = tag; this._buildTagline(el.ncTag, tag); }
+      else this._unbreakTagline();
+      if (el.ncTag.hidden === !!tag) el.ncTag.hidden = !tag;
+      this._ncTagCheck = this._ncTagGaps.length > 0;
+    }
+  }
+
+  /** r7 fix (teaching:3): the tagline as phrase boxes ("ACID FROM ABOVE ·" "STEER OUT OF THE CIRCLES"): each phrase is an
+   *  inline-block that keeps its words together (and still wraps inside when it alone is wider than the line), its
+   *  separator mark (" ·", or " —" for data's DASH) inside it after a no-break space, and a gap span between phrases — the
+   *  only place a line can break. _breakTagline turns a gap that broke into the line break and hides the mark before it.
+   *  A boss intro's event time (a few spans). */
+  _buildTagline(node, tag) {
+    const doc = this._doc;
+    this._ncTagGaps.length = 0;
+    node.textContent = '';
+    if (!tag || !doc) { node.textContent = tag || ''; return; }
+    const parts = tag.split(TAG_SPLIT);             // phrase, separator, phrase, …
+    for (let i = 0; i < parts.length; i += 2) {
+      const ph = doc.createElement('span');
+      ph.className = 'nc-ph';
+      ph.textContent = parts[i];
+      if (i + 2 < parts.length) {
+        const dot = doc.createElement('span');
+        dot.className = 'nc-dot';
+        dot.textContent = parts[i + 1] === TAG_SPLIT_DOT ? TAG_MARK_DOT : TAG_MARK_DASH;
+        ph.appendChild(dot);
+      }
+      node.appendChild(ph);
+      if (i + 2 < parts.length) {
+        const gap = doc.createElement('span');
+        gap.className = 'nc-gap';
+        gap.textContent = ' ';
+        node.appendChild(gap);
+        this._ncTagGaps.push(gap);
+      }
+    }
+  }
+
+  /** r7 fix: a gap whose next phrase starts on a lower line than the phrase before it broke the line: it becomes the line
+   *  break and that phrase's dot goes, so no line ends in a hanging " ·" ("ACID FROM ABOVE ·" / "STEER OUT OF THE CIRCLES"
+   *  at 1024 × 594). Read-first phase of the update after the card was shown (layout clean; the card is still at the start
+   *  of its pop-in, so the change is not seen). Reads first, then writes. */
+  _breakTagline() {
+    const gaps = this._ncTagGaps;
+    let mask = 0;
+    for (let i = 0; i < gaps.length && i < 30; i++) {
+      const a = gaps[i].previousSibling, b = gaps[i].nextSibling;
+      if (a && b && b.offsetTop > a.offsetTop + 1) mask |= 1 << i;
+    }
+    for (let i = 0; i < gaps.length && i < 30; i++) {
+      if ((mask & (1 << i)) === 0) continue;
+      gaps[i].classList.add('nc-br');
+      const a = gaps[i].previousSibling;
+      if (a && a.lastChild && a.lastChild.classList) a.lastChild.classList.add('nc-br');
+    }
+  }
+
+  /** The line breaks of a tagline shown before are undone (a new show measures its own layout). */
+  _unbreakTagline() {
+    const gaps = this._ncTagGaps;
+    for (let i = 0; i < gaps.length; i++) {
+      const g = gaps[i];
+      if (!g.classList.contains('nc-br')) continue;
+      g.classList.remove('nc-br');
+      const a = g.previousSibling;
+      if (a && a.lastChild && a.lastChild.classList) a.lastChild.classList.remove('nc-br');
+    }
+  }
+
+  /** Round 7 (r7, teaching:3): the first time ever per archetype the name card holds through the intro
+   *  (BOSSES.intro.fightAfter, 2.4 s) so its tagline is read; afterwards BOSSES.intro.nameCard (1.5 s). */
+  _nameCardSeconds() {
+    const save = this.ctx.save;
+    const key = this._bossArch ? 'bosscard.' + this._bossArch : '';   // once per boss intro (event time)
+    if (!key || !save || typeof save.hintDone !== 'function' || save.hintDone(key)) return NAMECARD_S;
+    if (this._attended()) this._markHint(key);   // r7 final fix: an idle screen's intro keeps the first-time hold for next time
+    const hold = BOSSES.intro.fightAfter;
+    return hold > NAMECARD_S ? hold : NAMECARD_S;
+  }
+
+  /** Round 5: the district banner per frame (theatre clock; DOM writes only on a show / hide change). Round 7 (r7,
+   *  explain:4): the fade follows the theatre clock — the animation is paused at creation and its currentTime is set from
+   *  _tclock here (whole ms, written on change), so a slow machine shows the whole fade (the real-time 1.6 s animation got
+   *  a few painted frames at the heavy level start) and a pause holds it. */
   _updateBanner(tnow, paused) {
     if (this._dbHideReq) { this._dbHideReq = false; if (this._dbShown) this._hideBanner(); }
     // hidden under the boss bar (#hud.boss-on): a request while it is up is dropped, a showing banner goes
     if (this._dbReq && !paused) { this._dbReq = false; if (!this._bossOn) this._showBanner(tnow); }
     if (!this._dbShown) return;
     if (this._bossOn || tnow >= this._dbUntil) { this._hideBanner(); return; }
-    if (paused !== this._dbAnimPaused) {
-      this._dbAnimPaused = paused;                  // theatre time: the animation holds while the game is paused
-      const a = this._dbAnim;
-      if (a) { try { if (paused) a.pause(); else a.play(); } catch (_) { /* cosmetic */ } }
+    const a = this._dbAnim;
+    if (a) {
+      const ms = Math.round(Math.min(this._dbDur, Math.max(0, tnow - this._dbShownAt)) * 1000);
+      if (ms !== this._dbAnimMs) { this._dbAnimMs = ms; try { a.currentTime = ms; } catch (_) { /* cosmetic */ } }
     }
   }
 
@@ -2083,6 +2855,15 @@ export class UI {
       this._dbShownLabel = this._dbLabel;
       if (el.dbText) el.dbText.textContent = this._dbLabel; else node.textContent = this._dbLabel;
     }
+    if (this._dbShownKicker !== this._dbKicker && el.dbKicker) {
+      this._dbShownKicker = this._dbKicker;
+      el.dbKicker.textContent = this._dbKicker;
+      el.dbKicker.hidden = !this._dbKicker;
+    }
+    if (this._dbShownNew !== this._dbNew) {
+      this._dbShownNew = this._dbNew;
+      try { node.classList.toggle('db-new', this._dbNew); } catch (_) { /* cosmetic */ }
+    }
     if (this._dbShownAccent !== this._dbAccent) {
       this._dbShownAccent = this._dbAccent;
       try {
@@ -2093,13 +2874,22 @@ export class UI {
     this._cancelAnim(this._dbAnim);
     this._dbAnim = null;
     node.hidden = false;
+    const big = this._dbNew;
+    const S = big ? DB_NEW_S : DB_S;
     // reduced motion: opacity only (no translate); _animate skips reduced motion, the banner's fade is not motion
     if (typeof node.animate === 'function') {
-      try { this._dbAnim = node.animate(this._reduced ? KF_DB_RM : KF_DB, T_DB); } catch (_) { this._dbAnim = null; }
+      try {
+        this._dbAnim = node.animate(this._reduced ? (big ? KF_DB_NEW_RM : KF_DB_RM) : (big ? KF_DB_NEW : KF_DB), big ? T_DB_NEW : T_DB);
+        this._dbAnim.pause();                       // r7: driven by the theatre clock (_updateBanner)
+        this._dbAnim.currentTime = 0;
+      } catch (_) { this._dbAnim = null; }
     }
-    this._dbAnimPaused = false;
+    this._dbAnimMs = 0;
+    this._dbAnimPaused = true;
     this._dbShown = true;
-    this._dbUntil = tnow + DB_S;
+    this._dbShownAt = tnow;
+    this._dbDur = S;
+    this._dbUntil = tnow + S;
   }
 
   _hideBanner() {
@@ -2108,6 +2898,262 @@ export class UI {
     this._dbAnim = null;
     this._dbAnimPaused = false;
     if (this._el.districtBanner) this._el.districtBanner.hidden = true;
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Round 7 (r7, teaching:5) — the NEW card and the FIELD GUIDE. Entries and copy: data.js CODEX / STRINGS.codex (every
+  // number templated from the tables). level marks an entry seen in the save at its first encounter ('seen:<id>') and
+  // announces a CODEX.cards entry with codex:new; closing the guide marks the rows it showed read ('read:<id>'). A one-time
+  // migration ('codex:v1') marks what an older profile already met as seen and read, so it is not flooded with NEW tags.
+  // -------------------------------------------------------------------------------------------
+
+  /** codex:new { id } → the NEW card queue (≤ NEWCARD_QMAX waiting; the oldest goes when full). */
+  _onCodexNew(p) {
+    if (!p || typeof p.id !== 'string') return;
+    const E = STRINGS.codex && STRINGS.codex.entries ? STRINGS.codex.entries[p.id] : null;
+    if (!E || this._ncdQ.indexOf(p.id) !== -1) return;
+    if (this._ncdQ.length >= NEWCARD_QMAX) this._ncdQ.shift();
+    this._ncdQ.push(p.id);                          // event time (a handful per run)
+  }
+
+  /** The NEW card per frame (theatre clock): one at a time for NEWCARD_S, in play only, never under the boss bar and never
+   *  over the district banner (it waits for both). DOM writes only on show / hide. */
+  _updateNewCard(tnow, paused) {
+    if (this._ncdHideReq) { this._ncdHideReq = false; if (this._ncdShown) this._hideNewCard(); }
+    if (this._ncdShown) {
+      if (this._bossOn || tnow >= this._ncdUntil) this._hideNewCard();
+      return;
+    }
+    if (paused || this._current !== null || this._ncdQ.length === 0) return;
+    if (this._bossOn || this._dbShown || this._dbReq) return;
+    this._showNewCard(this._ncdQ.shift(), tnow);
+  }
+
+  _showNewCard(id, tnow) {
+    const el = this._el;
+    const node = el.newcard;
+    const E = STRINGS.codex.entries[id];
+    if (!node || !E) return;
+    if (el.ncdName) el.ncdName.textContent = E.name;
+    if (el.ncdLine) el.ncdLine.textContent = E.card || E.line;
+    this._fillCodexIcon(el.ncdIcon, id);
+    try { node.style.setProperty('--ncd-accent', this._codexAccent(id)); } catch (_) { /* cosmetic */ }
+    node.hidden = false;
+    this._animate(node, KF_POP_IN, T_NAMECARD);
+    this._ncdShown = true;
+    this._setNcOn(true);
+    this._ncdUntil = tnow + NEWCARD_S;
+  }
+
+  _hideNewCard() {
+    this._ncdShown = false;
+    if (this._el.newcard) this._el.newcard.hidden = true;
+    this._setNcOn(false);
+  }
+
+  /** r7 INT (merged-HUD audit): #hud.nc-on while the NEW card is up — on a landscape box under 800 px wide the power-up row
+   *  steps to the right edge meanwhile (css), out of the card's top-left slot; the pill positions the icon flights aim at
+   *  are re-read. Written on change only. */
+  _setNcOn(on) {
+    if (on === this._ncOn) return;
+    this._ncOn = on;
+    const hud = this._el ? this._el.hud : null;
+    if (hud) { try { hud.classList.toggle('nc-on', on); } catch (_) { /* ignore */ } }
+    this._puPosDirty = true;
+  }
+
+  /** The accent rule of a NEW card: the gate's colour for gate rules, the item's (WEAPONS / GEAR) colour, else the purple of
+   *  the item gate (the specials arrive on it). */
+  _codexAccent(id) {
+    const C = GATE_RULES.colors;
+    if (id === 'gate.max') return hexCss(C.max);
+    if (id === 'gate.zero') return hexCss(C.zero.tint);
+    const it = itemEntry(id);
+    return hexCss(it && Number.isFinite(it.color) ? it.color : C.item.tint);
+  }
+
+  /** r7 fix: a guide entry's name / line — the nameFs / lineFs variant where fullscreen exists (STRINGS.codex 'ctl.mute':
+   *  "F toggles fullscreen" only where F does something, like the pause legend's STRINGS.pause.controlsKeys(fs)). */
+  _codexName(E) { return this._fsAvailable && typeof E.nameFs === 'string' ? E.nameFs : E.name; }
+  _codexLine(E) { return this._fsAvailable && typeof E.lineFs === 'string' ? E.lineFs : E.line; }
+
+  /**
+   * Paints a codex icon box (the NEW card's, or a guide row's) for entry `id`: an item pictogram from the texture factory
+   * on a light disc; a gate chip in the gate's own colours with its glyph; a key cap; a zombie's face in its palette; the
+   * boss skull; or a small drawing of a HUD part. Class + inline custom properties + text, written when the id changes.
+   */
+  _fillCodexIcon(node, id) {
+    if (!node || node.dataset.id === id) return;
+    node.dataset.id = id;
+    const ic = CODEX_ICON[id] || CODEX_ICON_DEFAULT;
+    const st = node.style;
+    st.backgroundImage = '';
+    node.textContent = '';
+    let cls = 'ci ci-' + ic.k;
+    if (ic.k === 'item') {
+      const url = this._iconUrl(ic.id || id);
+      if (url) this._applyIcon(node, url);
+    } else if (ic.k === 'gate') {
+      const C = GATE_RULES.colors;
+      const g = ic.g === 'max' ? { tint: C.max, frame: C.max } : (C[ic.g] || C.plus);
+      try { st.setProperty('--ci-tint', rgbaCss(g.tint, 0.62)); st.setProperty('--ci-frame', hexCss(g.frame)); } catch (_) { /* cosmetic */ }
+      node.textContent = ic.t || '';
+      if (ic.wide) cls += ' ci-wide';
+      if (ic.t && ic.t.length > 2) cls += ' ci-long';
+    } else if (ic.k === 'zombie') {
+      const z = PALETTE.zombie[ic.z] || PALETTE.zombie.walker;
+      try { st.setProperty('--ci-skin', hexCss(z.skin)); st.setProperty('--ci-eyes', hexCss(z.eyes)); } catch (_) { /* cosmetic */ }
+      if (ic.t) node.textContent = ic.t;
+    } else if (ic.t) {
+      node.textContent = ic.t;
+      if (ic.k === 'key' && ic.t.length > 3) cls += ' ci-long';
+    }
+    if (node.className !== cls) node.className = cls;
+  }
+
+  /** One-time migration (save hint 'codex:v1'): an entry an older profile already met — its old once-ever hint is done,
+   *  or the profile is past its unlock level, or (for the always-open rows) the profile is past L1 — is marked seen and
+   *  read, so the guide opens without a wall of NEW tags. A fresh profile marks nothing. */
+  _codexMigrate() {
+    if (this._codexMigrated) return;
+    this._codexMigrated = true;
+    const save = this.ctx.save;
+    if (!save || typeof save.hintDone !== 'function' || save.hintDone(CODEX_MIGRATED)) return;
+    const hl = this._highestUnlocked();
+    for (let i = 0; i < GUIDE_IDS.length; i++) {
+      const id = GUIDE_IDS[i];
+      const unlock = CODEX.unlock[id];
+      let met = unlock > 0 ? hl > unlock : hl > 1;
+      const old = CODEX.legacy[id];
+      if (!met && old) for (let k = 0; k < old.length; k++) if (save.hintDone(old[k])) { met = true; break; }
+      if (!met) continue;
+      this._markHint(SEEN_K[id]);
+      this._markHint(READ_K[id]);
+    }
+    this._markHint(CODEX_MIGRATED);
+  }
+
+  /** The "?" buttons wear a badge while any entry was met and not read yet (title and pause; written on change). */
+  _syncGuideBadge() {
+    this._codexMigrate();
+    const save = this.ctx.save;
+    let any = false;
+    if (save && typeof save.hintDone === 'function') {
+      for (let i = 0; i < GUIDE_IDS.length && !any; i++) { const id = GUIDE_IDS[i]; if (save.hintDone(SEEN_K[id]) && !save.hintDone(READ_K[id])) any = true; }
+    }
+    const v = any ? 1 : 0;
+    if (v === this._guideNew) return;
+    this._guideNew = v;
+    const el = this._el;
+    const label = any ? STRINGS.aria.guideNew : STRINGS.aria.guide;
+    const set = (b) => { if (!b) return; try { b.classList.toggle('has-new', any); b.setAttribute('aria-label', label); } catch (_) { /* ignore */ } };
+    set(el.btnGuide); set(el.btnPauseGuide);
+  }
+
+  /** Builds the guide's rows once (sections in CODEX order, an icon, the name with a NEW tag, the line). */
+  _buildGuide() {
+    if (this._guideBuilt || !this._doc || !this._el.guideList) return;
+    this._guideBuilt = true;
+    const doc = this._doc;
+    const host = this._el.guideList;
+    host.textContent = '';
+    const rows = {};
+    const C = STRINGS.codex;
+    for (let s = 0; s < CODEX.sections.length; s++) {
+      const sec = CODEX.sections[s];
+      const head = doc.createElement('div'); head.className = 'gd-head'; head.setAttribute('role', 'heading'); head.setAttribute('aria-level', '2');
+      head.textContent = C.sections[sec.id] || sec.id.toUpperCase();
+      host.appendChild(head);
+      if (C.notes && C.notes[sec.id]) { const n = doc.createElement('p'); n.className = 'gd-note'; n.textContent = C.notes[sec.id]; host.appendChild(n); }
+      for (let i = 0; i < sec.ids.length; i++) {
+        const id = sec.ids[i];
+        const E = C.entries[id];
+        if (!E) continue;
+        const row = doc.createElement('div'); row.className = 'gd-row'; row.setAttribute('role', 'listitem');
+        const icon = doc.createElement('span'); icon.setAttribute('aria-hidden', 'true');
+        const body = doc.createElement('div'); body.className = 'gd-body';
+        const nameRow = doc.createElement('div'); nameRow.className = 'gd-name';
+        const name = doc.createElement('span'); name.className = 'gd-title';
+        const tag = doc.createElement('span'); tag.className = 'gd-new'; tag.textContent = C.kicker; tag.hidden = true;
+        const line = doc.createElement('div'); line.className = 'gd-line';
+        nameRow.appendChild(name); nameRow.appendChild(tag);
+        body.appendChild(nameRow); body.appendChild(line);
+        row.appendChild(icon); row.appendChild(body);
+        host.appendChild(row);
+        rows[id] = { row, icon, name, tag, line, state: '' };
+      }
+    }
+    this._guideRows = rows;
+    this._observeList(host);                             // r7 fix round 3: edge fades (built lazily, after _observe)
+  }
+
+  /** Fills the guide (built once): each row's state — met (its icon, name and line), NEW (met, not read), or locked
+   *  ("???" — "MEET IT ON LEVEL n" until it is met or its level is reached; rows without an unlock level are open). Writes
+   *  a row only when its state changed. `show`: a real open (not the boot prewarm) — remembers the met ids (read on close)
+   *  and scrolls the first NEW row into view at the start of the next update. */
+  _fillGuide(show) {
+    this._buildGuide();
+    const rows = this._guideRows;
+    if (!rows) return;
+    this._codexMigrate();
+    const save = this.ctx.save;
+    const done = (k) => !!(save && typeof save.hintDone === 'function' && save.hintDone(k));
+    const hl = this._highestUnlocked();
+    const C = STRINGS.codex;
+    if (show) this._guideSeen.length = 0;
+    let firstNew = null;
+    for (let i = 0; i < GUIDE_IDS.length; i++) {
+      const id = GUIDE_IDS[i];
+      const r = rows[id];
+      if (!r) continue;
+      const seen = done(SEEN_K[id]);
+      const unlock = CODEX.unlock[id];
+      const locked = !seen && unlock > 0 && hl < unlock;
+      const isNew = seen && !done(READ_K[id]);
+      const state = locked ? 'L' : (isNew ? 'N' : 'O');
+      if (show && seen) this._guideSeen.push(id);
+      if (isNew && !firstNew) firstNew = r.row;
+      if (state === r.state) continue;
+      const E = C.entries[id];
+      r.state = state;
+      if (locked) {
+        r.name.textContent = C.lockedName;
+        r.line.textContent = C.locked(unlock);
+        r.icon.dataset.id = '';
+        r.icon.className = 'ci ci-locked';
+        r.icon.textContent = '';
+        r.icon.style.backgroundImage = '';
+      } else {
+        r.name.textContent = this._codexName(E);
+        r.line.textContent = this._codexLine(E);
+        this._fillCodexIcon(r.icon, id);
+      }
+      r.tag.hidden = !isNew;
+      try { r.row.classList.toggle('locked', locked); r.row.classList.toggle('new', isNew); } catch (_) { /* ignore */ }
+    }
+    if (show) this._guideScrollTo = firstNew;
+  }
+
+  /** Leaving the guide: every met row it showed is read (the "?" badge goes once nothing new is left). */
+  _closeGuide() {
+    const ids = this._guideSeen;
+    const save = this.ctx.save;
+    for (let i = 0; i < ids.length; i++) { const k = READ_K[ids[i]]; if (k && save && typeof save.hintDone === 'function' && !save.hintDone(k)) this._markHint(k); }
+    ids.length = 0;
+    this._guideScrollTo = null;
+    this._syncGuideBadge();
+  }
+
+  /** Read-first phase (start of update, after the guide opened): the first NEW row is brought into view inside the list. */
+  _scrollGuide() {
+    const list = this._el.guideList;
+    const row = this._guideScrollTo;
+    this._guideScrollTo = null;
+    if (!list || !row || this._current !== 'guide') return;
+    try {
+      const top = row.offsetTop;                    // the list is the rows' offsetParent (css: position relative)
+      if (top + row.offsetHeight > list.scrollTop + list.clientHeight || top < list.scrollTop) list.scrollTop = Math.max(0, top - list.clientHeight * 0.25);
+    } catch (_) { /* cosmetic */ }
   }
 
   // -------------------------------------------------------------------------------------------
@@ -2299,20 +3345,29 @@ export class UI {
     const dt = unscaledDt > 0 && unscaledDt < 1 ? unscaledDt : 0;
     this._clock += dt;
     const now = this._clock;
+    // round 7 (r7, flow-coins:6): real time for the coin tweens and the results theatre (one step clamped to REAL_DT_MAX);
+    // the 50 ms-clamped dt stretched the 1.5 s J17 count-up to 5–30 s on a 1–4 fps box. Hints and the other theatre
+    // deadlines keep dt (and _tclock)
+    const rnow = this._realNow();
+    const rdt = this._lastReal > 0 ? clamp(rnow - this._lastReal, 0, REAL_DT_MAX) : dt;
+    this._lastReal = rnow;
+    // r7 (flow-coins:2): this frame renders a screen switched between frames — its paint is marked once the frame is done
+    this._inUpdate = true;
+    if (this._shownWait > 0 && --this._shownWait === 0) this._armPaintMark();
     // UI-28: theatre deadlines (name card, hint, boss bar out) do not run while paused (ARCH §2.2)
-    let paused = false;
-    try { const st = this.ctx.state; paused = !!st && st.current === 'paused'; } catch (_) { paused = false; }
+    let paused = false, playing = false;
+    try { const st = this.ctx.state; const cur = st ? st.current : ''; paused = cur === 'paused'; playing = cur === 'playing'; } catch (_) { paused = false; playing = false; }
     if (!paused) this._tclock += dt;
     const tnow = this._tclock;
 
     // read-first phase (UI-21): layout is still clean from the last rendered frame — measure / focus before any write
     if (this._lvScrollPending) { this._lvScrollPending = false; this._scrollLevels(); }
+    if (this._guideScrollTo) this._scrollGuide();      // r7 (teaching:5)
+    if (this._ncTagCheck) { this._ncTagCheck = false; this._breakTagline(); }   // r7 fix (teaching:3): no hanging " ·"
     if (this._focusPending) { const f = this._focusPending; this._focusPending = null; this._focusFirst(f === this._el.app ? null : f); }
 
     if (this._pendingSet) {
-      this._pendingSet = false;
-      if (this._startingBtn) { try { this._startingBtn.classList.remove('starting'); } catch (_) { /* ignore */ } this._startingBtn = null; }
-      this.showScreen(this._pendingId);
+      this._flushPendingScreen();
     } else if (this._bootHiding) {
       this._bootHiding = false;
       if (this._screens.boot && !this._bootHold) this._screens.boot.hidden = true;
@@ -2322,15 +3377,18 @@ export class UI {
     if (this._saveDirty) { this._saveDirty = false; this._refreshSaveViews(); }
     if (this._hudResetPending) { this._hudResetPending = false; this._applyHudReset(); }
 
-    this._updateCoins(dt);
+    this._updateCoins(rdt);
     this._updateFlash(dt);
     this._updateVignette(dt);
     this._updateTheatre(tnow);
     if (this._dbShown || this._dbReq || this._dbHideReq) this._updateBanner(tnow, paused);
+    if (this._ncdShown || this._ncdHideReq || this._ncdQ.length > 0) this._updateNewCard(tnow, paused);   // r7 (teaching:5)
     if (this._swDirty) this._syncUpdatePill();
     this._updateBlink(now);
     this._updateFire();
-    if (this._fireShown && this._gpSeen) this._pollGamepadFire();
+    // round 6: gamepad A fires while the FIRE button shows; r7 (controls:3): also while playing with nothing stored, so A can
+    // show the empty slot like Space (polled only after a gamepadconnected event)
+    if (this._gpSeen && (this._fireShown || playing)) this._pollGamepadFire();
     if (this._plates > 0 || this._platesShown > 0) { this._placeShield(); this._syncShield(); }
 
     this._hudAcc += dt;
@@ -2340,9 +3398,17 @@ export class UI {
       this._updateHudBlock(now);
     }
 
-    if (this._cmpAnimating && this._current === 'complete') this._updateComplete(dt);
-    if (this._shopTween) this._updateShopCoins(dt);
+    if (this._cmpAnimating && this._current === 'complete') this._updateComplete(rdt);
     if (this._confirmArmed && now >= this._confirmUntil) this._disarmReset();
+    this._inUpdate = false;
+  }
+
+  /** r7 (flow-coins:2): the frame running now renders the switched screen — a 0 ms timer marks its paint once the frame's
+   *  rendering is done. A press handled before that timer (Chrome runs queued input first) was queued during this frame,
+   *  i.e. before the paint: _onPointerDom then closes the mark at that instant, so the press counts as stale. */
+  _armPaintMark() {
+    this._paintArmed = true;
+    try { setTimeout(this._onPaintMark, 0); } catch (_) { this._onPaintMark(); }
   }
 
   _applyHudReset() {
@@ -2360,6 +3426,9 @@ export class UI {
     if (el.letterboxBottom) el.letterboxBottom.hidden = true;
     this._lbShown = false;
     this._lbOn = false;
+    if (el.lbCount && !el.lbCount.hidden) el.lbCount.hidden = true;   // r7 (explain:6)
+    this._lbDock = false;
+    this._lbDockN = -1;
     if (el.namecard) el.namecard.hidden = true;
     this._ncShown = false;
     this._hideHintDom();
@@ -2390,11 +3459,7 @@ export class UI {
     const k = COIN_TWEEN_S > 0 ? Math.min(1, this._coinT / COIN_TWEEN_S) : 1;
     this._coinValue = this._coinFrom + (this._coinTo - this._coinFrom) * ease.outCubic(k);
     if (k >= 1) { this._coinValue = this._coinTo; this._coinTween = false; }
-    const v = Math.round(this._coinValue);
-    if (v !== this._coinShown) {
-      this._coinShown = v;
-      if (this._el.coinsValue) this._el.coinsValue.textContent = fmtCoins(v);
-    }
+    this._writeWallet(Math.round(this._coinValue));   // r7 (flow-coins:5): every coin pill (HUD, title, shop) from this one model
   }
 
   _updateFlash(dt) {
@@ -2415,7 +3480,7 @@ export class UI {
     this._vigT += dt;
     const k = Math.min(1, this._vigT / this._vigDur);
     const u = 1 - k;
-    const idx = Math.round(u * u * OPA_STEPS);    // ease-out fade from full strength
+    const idx = Math.round(this._vigA0 * u * u * OPA_STEPS);   // ease-out fade from its strength (r7: × the optional alpha)
     if (idx !== this._vigOpa && node) { this._vigOpa = idx; node.style.opacity = this._opa[idx]; }
     if (k >= 1) this._vigOn = false;
   }
@@ -2425,10 +3490,12 @@ export class UI {
     const el = this._el;
     if (this._bossShowPending) {
       this._bossShowPending = false;
-      if (el.bossName) el.bossName.textContent = this._bossName;
+      if (el.bnName) el.bnName.textContent = this._bossName;
+      this._bossPhaseUntil = 0;
+      if (el.bnPhase && !el.bnPhase.hidden) el.bnPhase.hidden = true;
       if (el.bossbar) {
         el.bossbar.hidden = false;
-        try { el.bossbar.classList.remove('shielded', 'phase2', 'phase3'); } catch (_) { /* ignore */ }
+        try { el.bossbar.classList.remove('shielded', 'phase2', 'phase3', 'phase-flash'); } catch (_) { /* ignore */ }
         this._animate(el.bossbar, KF_SLIDE_DOWN, T_BOSS_IN);
       }
       // the power-up row drops below the boss bar while it is up (css #hud.boss-on; the hint pill is bottom-anchored)
@@ -2441,6 +3508,18 @@ export class UI {
       this._hudAcc = HUD_PERIOD;
     }
     if (this._bossOn && this._bossHideAt > 0 && now >= this._bossHideAt) this._hideBossBar();
+    // r7 (teaching:3): the phase flash in place of the bar's name ("PHASE 2"; css hides .bn-name), then the name again
+    if (this._bossPhaseReq && this._bossOn) {
+      this._bossPhaseReq = false;
+      if (el.bnPhase) { el.bnPhase.textContent = this._bossPhaseLabel; el.bnPhase.hidden = false; }
+      if (el.bossbar) { try { el.bossbar.classList.add('phase-flash'); } catch (_) { /* cosmetic */ } }
+      this._bossPhaseUntil = now + PHASE_LABEL_S;
+    }
+    if (this._bossPhaseUntil > 0 && now >= this._bossPhaseUntil) {
+      this._bossPhaseUntil = 0;
+      if (el.bnPhase) el.bnPhase.hidden = true;
+      if (el.bossbar) { try { el.bossbar.classList.remove('phase-flash'); } catch (_) { /* cosmetic */ } }
+    }
 
     if (this._lbOn !== this._lbShown) {
       this._lbShown = this._lbOn;
@@ -2451,13 +3530,28 @@ export class UI {
         this._animate(el.letterboxBottom, KF_LB_BOTTOM, T_LETTERBOX);
       }
     }
+    // r7 (explain:6): while the boss-intro dolly has the world count label faded (fx) and the squad under the bars, the
+    // count sits in the bottom bar ("144 SOLDIERS") — on a slow machine the intro lasted 13–24 s with no count on screen.
+    // Reduced motion has no dolly. DOM writes only on a dock change or a new count
+    const rnd = this.ctx.render;
+    const dock = this._lbShown && !!rnd && rnd.dollying === true;
+    if (dock !== this._lbDock) {
+      this._lbDock = dock;
+      if (el.lbCount) el.lbCount.hidden = !dock;
+      this._lbDockN = -1;
+    }
+    if (dock && el.lbCount) {
+      const sq = this.ctx.squad;
+      const n = sq ? sq.count | 0 : 0;
+      if (n !== this._lbDockN) { this._lbDockN = n; el.lbCount.textContent = STRINGS.boss.squad(n); }
+    }
 
     if (this._ncPending) {
       this._ncPending = false;
-      if (el.ncName) el.ncName.textContent = this._bossName;
+      this._fillNameCard();
       if (el.namecard) { el.namecard.hidden = false; this._animate(el.namecard, KF_POP_IN, T_NAMECARD); }
       this._ncShown = true;
-      this._ncUntil = now + NAMECARD_S;
+      this._ncUntil = now + this._nameCardSeconds();
     }
     if (this._ncShown && now >= this._ncUntil) {
       this._ncShown = false;
@@ -2465,48 +3559,61 @@ export class UI {
     }
 
     if (this._hintHideReq) { this._hintHideReq = false; if (this._hintShown) this._hideHintDom(); }
+    // r7: a waiting hint past HINT_QUEUE_AGE_S leaves the queue now (a stale head used to block the yield rule below)
+    while (this._hqLen > 0 && now - this._hqAt[0] > HINT_QUEUE_AGE_S) this._hintQueueRemove(0);
     if (this._hintShown) {
       const input = this.ctx.input;
+      const on = now - this._hintAt;
+      // r7 (teaching:0 F): marked done once it has really been on screen HINT_MARK_S (not when it appeared)
+      // r7 final fix (lead decision 5): ...and only while someone is playing (trusted input within HINT_IDLE_S real s); an
+      // unattended showing leaves it unread, so it teaches again next time (the tester's L1 ended in another window)
+      if (!this._hintMarked && on >= HINT_MARK_S) { this._hintMarked = true; if (this._attended()) this._markHint(this._hintId); }
+      // a waiting hint takes over after HINT_MIN_S on screen — a held hint after its hold, a priority one never (it runs
+      // its course; another priority lesson queues behind it)
+      const yieldAt = this._hintHold > HINT_MIN_S ? this._hintHold : HINT_MIN_S;
       if (now >= this._hintUntil || (this._hintId === 'steer' && input && input.hasSteered)
-        || (this._hqLen > 0 && now >= this._hintUntil - HINT_S + HINT_MIN_S && now - this._hqAt[0] <= HINT_QUEUE_AGE_S)) this._hideHintDom();
+        || (this._hqLen > 0 && !this._hintPri && on >= yieldAt && now - this._hqAt[0] <= HINT_QUEUE_AGE_S)) this._hideHintDom();
     }
     if (!this._hintShown && this._hqLen > 0 && this._current === null) this._nextHint(now);
   }
 
   /** UI-25: the oldest still-fresh queued hint goes on screen (a steer hint the player already acted on is
-   *  marked done and skipped). */
+   *  marked done and skipped). Round 7: the front holds the priority hints and the cut hints coming back. */
   _nextHint(now) {
     const input = this.ctx.input;
     while (this._hqLen > 0) {
       const id = this._hqId[0], text = this._hqText[0], at = this._hqAt[0];
-      this._hintQueueShift();
+      const hold = this._hqHold[0], key = this._hqKey[0], pri = this._hqPri[0] === 1, ev = this._hqEv[0], back = this._hqBack[0] === 1;
+      this._hintQueueRemove(0);
       if (now - at > HINT_QUEUE_AGE_S) continue;
       if (id === 'steer' && input && input.hasSteered) { this._markHint(id); continue; }
-      this._showHintDom(id, text, now);
+      // r7 fix: a held lesson whose subject passes in less than HINT_MIN_S never goes up — it would flash and be released
+      // (L3's first [÷2 | −13]: 'lesser' waited behind 'div' and showed for 0.64 s after the red lane had flipped). It stays
+      // unmarked and teaches at its next subject. (A cut hint coming back keeps its full hold: it is not judged here)
+      if (key !== null && hold > 0 && !back && hold - (now - at) < HINT_MIN_S) continue;
+      this._showHintDom(id, text, now, hold, key, pri, ev, back);
       return;
     }
   }
 
-  _hintQueueShift() {
-    const n = this._hqLen;
-    if (n <= 0) return;
-    for (let i = 1; i < n; i++) { this._hqId[i - 1] = this._hqId[i]; this._hqText[i - 1] = this._hqText[i]; this._hqAt[i - 1] = this._hqAt[i]; }
-    this._hqLen = n - 1;
-    this._hqId[n - 1] = '';
-    this._hqText[n - 1] = '';
-  }
-
-  /** Drops every waiting hint; `hide` also takes the one on screen down (next update). */
+  /** Drops every waiting hint; `hide` also takes the one on screen down (next update; it does not come back). */
   _hintQueueClear(hide) {
-    for (let i = 0; i < this._hqLen; i++) { this._hqId[i] = ''; this._hqText[i] = ''; }
+    for (let i = 0; i < this._hqLen; i++) { this._hqId[i] = ''; this._hqText[i] = ''; this._hqKey[i] = null; this._hqPri[i] = 0; this._hqEv[i] = -1; this._hqBack[i] = 0; }
     this._hqLen = 0;
-    if (hide) this._hintHideReq = true;
+    if (hide) { this._hintHideReq = true; this._hintCut = false; }
   }
 
   _markHint(id) {
     const save = this.ctx.save;
     if (!id || !save || typeof save.markHint !== 'function') return;
     try { save.markHint(id); } catch (_) { /* the save reports its own errors */ }
+  }
+
+  /** r7 final fix (lead decision 5): someone is playing — trusted input within JUICE.ui.hintIdleS real seconds
+   *  (engine.inputIdleS). A harness without the engine counts as attended (the old behaviour). */
+  _attended() {
+    const e = this.ctx.engine;
+    return !e || typeof e.inputIdleS !== 'function' || e.inputIdleS() <= HINT_IDLE_S;
   }
 
   /** performance.now() in seconds (guarded; falls back to the update clock). */
@@ -2634,9 +3741,11 @@ export class UI {
     if (yi !== this._shieldY) { this._shieldY = yi; sh.style.top = this._px[yi]; this._puPosOk[MAX_PILLS] = 0; }
   }
 
-  /** Puts one hint on screen (UI-18 pill; hand inside it for steer / shoot) and marks it done (UI-25). No layout
-   *  read: the ResizeObserver reports the pill box after this frame's layout; the label check starts then. */
-  _showHintDom(id, text, now) {
+  /** Puts one hint on screen (UI-18 pill; hand inside it for steer / shoot). No layout read: the ResizeObserver reports
+   *  the pill box after this frame's layout; the label check starts then. Round 7 (r7, teaching:0): its duration from its
+   *  words (and hold), its tone rim, a ui_tap on its first showing, its gate pulse, the first-time lesson slow-mo; it is
+   *  marked done later, after HINT_MARK_S on screen (_updateTheatre). */
+  _showHintDom(id, text, now, hold, key, pri, ev, back) {
     const el = this._el;
     this._hintId = id;
     this._hintText = text;
@@ -2644,29 +3753,96 @@ export class UI {
     if (el.hintText) el.hintText.textContent = text;
     if (el.hintHand) el.hintHand.hidden = !hand;
     this._hintShown = true;
-    this._hintUntil = now + HINT_S;
+    this._hintAt = now;
+    this._hintHold = hold > 0 ? hold : 0;
+    this._hintKey = key === undefined ? null : key;
+    this._hintPri = !!pri;
+    this._hintEv = ev >= 0 ? ev : -1;
+    this._hintMarked = false;
+    this._hintCut = false;
+    // max(HINT_S, base + per word) ≤ HINT_MAX_S; a held hint stays its hold (≤ HINT_HOLD_MAX_S) unless released earlier
+    const words = typeof text === 'string' ? text.split(HINT_WORD_RE).length : 0;     // one split per hint shown (event time)
+    let dur = Math.min(HINT_MAX_S, Math.max(HINT_S, HINT_BASE_S + HINT_WORD_S * words));
+    if (this._hintHold > dur) dur = Math.min(HINT_HOLD_MAX_S, this._hintHold);
+    this._hintUntil = now + dur;
     this._hintBoxOk = false;
     if (el.hint) {
       if (this._hintShift !== 0) { this._hintShift = 0; el.hint.style.translate = ''; }
+      // r7 (teaching:0 D): a 2 px rim by tone — warn (red: it costs soldiers, dodge it), gain (green), info (none)
+      const tone = HINT_TONE[id] || (id.indexOf('dodge.') === 0 || (id.indexOf('boss.') === 0 && id !== 'boss') ? 'warn' : 'info');
+      if (tone !== this._hintTone) { this._hintTone = tone; el.hint.setAttribute('data-tone', tone); }
       el.hint.hidden = false;
       this._animate(el.hint, KF_POP_IN, T_NAMECARD);
     }
     this._cancelAnim(this._handAnim);
     this._handAnim = !hand ? null : this._animate(el.hintHand, KF_HAND, T_HAND);
-    this._markHint(id);
+    // r7 (teaching:0 D): a short sound draws the eye on its first showing (a cut hint coming back is silent)
+    const audio = this.ctx.audio;
+    if (!back && audio && typeof audio.play === 'function') { try { audio.play('ui_tap'); } catch (_) { /* audio reports its own errors */ } }
+    // r7 (teaching:0 E, C's contract): the gates this lesson is about pulse while it is up (guarded: absent before the merge)
+    this._pulseGates(this._hintEv, dur);
+    // r7 (teaching:0, lead decision): the first time ever a core gate lesson is on screen, a brief slow-mo while it is read
+    this._lessonSlowmo(id);
   }
 
   _hideHintDom() {
+    const id = this._hintId;
+    // r7 (teaching:0 F / critic): a hint a priority lesson cut before it was read (HINT_MARK_S) comes back first, after the
+    // priority hints; a steer hint hidden because the player steered counts as learnt
+    if (this._hintCut && !this._hintMarked && id) {
+      let lead = 0;
+      while (lead < this._hqLen && this._hqPri[lead] === 1) lead++;
+      if (this._hqLen >= this._hqId.length) this._hintQueueRemove(this._hqLen - 1);
+      HINT_BACK_OPTS.hold = this._hintHold; HINT_BACK_OPTS.until = this._hintKey; HINT_BACK_OPTS.event = this._hintEv;
+      this._hintQueueInsert(Math.min(lead, this._hqLen), id, this._hintText, HINT_BACK_OPTS, false, true);
+    } else if (!this._hintMarked && id === 'steer') {
+      const input = this.ctx.input;
+      if (input && input.hasSteered) { this._hintMarked = true; this._markHint(id); }
+    }
+    if (this._hintEv >= 0) this._pulseGates(this._hintEv, 0);
+    // r7: the time a priority lesson held the screen does not age the hints waiting behind it ("FIRE YOUR STORED WEAPON AT
+    // THE BOSS!" aged out behind two slowed attack lessons)
+    if (this._hintPri) {
+      const held = this._tclock - this._hintAt;
+      if (held > 0) for (let i = 0; i < this._hqLen; i++) if (this._hqPri[i] !== 1) this._hqAt[i] += held;
+    }
     this._hintShown = false;
+    this._hintCut = false;
+    this._hintKey = null;
+    this._hintEv = -1;
     this._hintBoxOk = false;
     this._cancelAnim(this._handAnim);
     this._handAnim = null;
     if (this._el.hint) this._el.hint.hidden = true;
   }
 
+  /** r7 (teaching:0 E): C's gates.pulseEvent(eventId, seconds) — pulse (or, with 0, stop) the frames of that gate event
+   *  (DECISIONS §6 contract C → D; both sides are in the build since the round-7 integration, so the typeof guard is gone). */
+  _pulseGates(eventId, seconds) {
+    if (!(eventId >= 0)) return;
+    const gates = this.ctx.gates;
+    if (gates) { try { gates.pulseEvent(eventId, seconds); } catch (_) { /* cosmetic */ } }
+  }
+
+  /** r7 (teaching:0, lead decision): the first time ever 'red', 'single' or 'div' is on screen (not yet marked in the save,
+   *  not slowed this run), time dips to JUICE.slowmo.lesson[0] for [1] s of real time while it is read (fx.slowmo). */
+  _lessonSlowmo(id) {
+    if (LESSON_SLOWMO[id] !== true || this._slowedRun.indexOf(id) !== -1) return;
+    const S = JUICE.slowmo ? JUICE.slowmo.lesson : null;
+    const save = this.ctx.save, fx = this.ctx.fx, st = this.ctx.state;
+    if (!S || !fx || typeof fx.slowmo !== 'function' || (save && typeof save.hintDone === 'function' && save.hintDone(id))) return;
+    if (!st || typeof st.is !== 'function' || !st.is('playing')) return;
+    this._slowedRun.push(id);
+    try { fx.slowmo(S[0], S[1]); } catch (_) { /* fx reports its own errors */ }
+  }
+
   _hideBossBar() {
     this._bossOn = false;
     this._bossHideAt = 0;
+    this._bossPhaseReq = false;                     // r7: no phase flash left behind
+    this._bossPhaseUntil = 0;
+    if (this._el.bnPhase && !this._el.bnPhase.hidden) this._el.bnPhase.hidden = true;
+    if (this._el.bossbar) { try { this._el.bossbar.classList.remove('phase-flash'); } catch (_) { /* cosmetic */ } }
     this._cancelAnim(this._bossRage);
     this._bossRage = null;
     if (this._el.bossbar) this._el.bossbar.hidden = true;
@@ -2855,12 +4031,13 @@ export class UI {
     const el = this._el;
     const d = this._saveData();
     const coins = d ? d.coins : 0;
-    if (el.titleCoinsValue) el.titleCoinsValue.textContent = fmtCoins(coins);
+    this._walletSync(coins, false);                 // r7 (flow-coins:5): the title pill is a view of the one wallet model
     const hl = this._highestUnlocked();
     const rec = d && d.levels ? d.levels[hl] : null;
     const stars = rec ? rec.stars | 0 : 0;
     if (el.titleCaption) {
-      el.titleCaption.textContent = STRINGS.title.caption(hl, stars);
+      // r7 (explain:0): the caption names the survivors the 3★ need on the level PLAY starts ("★★★ at 176")
+      el.titleCaption.textContent = STRINGS.title.caption(hl, stars, starNeed(eBossOf(hl), 3));
       // round 5: the district the title scene shows (DISTRICTS.md §3.5: districtForLevel(highestUnlocked)) as a small
       // second line with its accent dot
       const td = el.titleDistrict;
@@ -2884,7 +4061,11 @@ export class UI {
     }
     if (el.btnEndless) el.btnEndless.hidden = !(hl > LEVELS.endlessUnlock);
     this._syncShopBadges();
+    this._syncGuideBadge();                         // r7 (teaching:5): "?" wears a badge while a met entry is unread
     if (el.btnFullscreen) el.btnFullscreen.hidden = !this._fsAvailable;
+    // r7: the title's icon cluster lays out by count (css: the fullscreen icon takes the third slot after "?")
+    const tscr = this._screens ? this._screens.title : null;
+    if (tscr) { try { tscr.classList.toggle('has-fs', this._fsAvailable); } catch (_) { /* ignore */ } }
     this._syncFullscreenButton();
     if (el.version) el.version.textContent = STRINGS.title.version(this.ctx.version || '');
     this._swMaybeCheck();                           // round 5: a long session learns of a release on its next title
@@ -2923,7 +4104,7 @@ export class UI {
       e.btn.disabled = !endlessOn;
       e.btn.setAttribute('aria-label', STRINGS.levels.endless + (endlessOn ? '' : STRINGS.common.separator + STRINGS.levels.locked));
       const best = d && d.endless ? d.endless.bestScore | 0 : 0;
-      const txt = endlessOn && best > 0 ? STRINGS.endless.best(fmtCoins(best)) : '';
+      const txt = endlessOn && best > 0 ? STRINGS.endless.best(fmtCompact(best)) : '';   // r7 (flow-coins:7): the one compact label
       if (e.stars.textContent !== txt) e.stars.textContent = txt;
     }
     if (show) this._lvScrollPending = true;
@@ -2962,6 +4143,7 @@ export class UI {
     }
     for (let i = 0; i < LEVEL_WINDOW; i++) { const t = mk(); t.btn.hidden = true; tiles.push(t); }
     this._lvTiles = tiles;
+    this._observeList(grid);                             // r7 fix round 3: its edge fades follow the tiles shown
   }
 
   /** One tile in place (writes only what changed since its last fill). */
@@ -3000,8 +4182,9 @@ export class UI {
     if (current) t.btn.setAttribute('aria-current', 'true'); else t.btn.removeAttribute('aria-current');
     const sep = STRINGS.common.separator;
     const dsuffix = t.dname ? sep + t.dname : '';     // round 5: the district is part of the tile's name
+    // r7 (explain:3): a skull tile is a district finale (every level has a boss) — "Level 5 · District finale · SUNSET …"
     t.btn.setAttribute('aria-label', (locked ? STRINGS.aria.level(n) + sep + STRINGS.levels.locked
-      : (milestone ? STRINGS.aria.level(n) + sep + STRINGS.levels.boss : STRINGS.aria.level(n))) + dsuffix);
+      : (milestone ? STRINGS.aria.level(n) + sep + STRINGS.levels.finale : STRINGS.aria.level(n))) + dsuffix);
     const star = STRINGS.common.star;
     t.on.textContent = blank ? '' : star.repeat(stars);
     t.off.textContent = blank ? '' : star.repeat(3 - stars);
@@ -3019,10 +4202,9 @@ export class UI {
   }
 
   _fillShop() {
-    const el = this._el;
     const d = this._saveData();
     const coins = d ? d.coins : 0;
-    if (!this._shopTween) { this._shopCoinShown = Math.round(coins); if (el.shopCoinsValue) el.shopCoinsValue.textContent = fmtCoins(this._shopCoinShown); }
+    this._walletSync(coins, false);                 // r7 (flow-coins:5): the shop pill is a view of the one wallet model
     if (!this._cardIconsDone) {
       this._cardIconsDone = true;
       for (let i = 0; i < UPGRADE_IDS.length; i++) this._drawCardIcon(UPGRADE_IDS[i]);
@@ -3044,7 +4226,15 @@ export class UI {
   _refreshCards(coins) {
     const d = this._saveData();
     const income = d ? d.lastRunIncome | 0 : 0;
-    for (let i = 0; i < UPGRADE_IDS.length; i++) this._refreshCard(UPGRADE_IDS[i], d, coins, income);
+    let estimates = false;
+    // round 7 (r7, explain:2): the legend under the coin pill says what "~N runs away" counts, while a card shows one
+    const legend = income > 0 ? STRINGS.shop.note(fmtCoins(income)) : '';
+    for (let i = 0; i < UPGRADE_IDS.length; i++) if (this._refreshCard(UPGRADE_IDS[i], d, coins, income, legend)) estimates = true;
+    const note = estimates ? legend : '';
+    if (note !== this._shopNoteText) {
+      this._shopNoteText = note;
+      if (this._el.shopNote) this._el.shopNote.textContent = note;
+    }
   }
 
   /**
@@ -3078,9 +4268,11 @@ export class UI {
     else btn.removeAttribute('aria-label');
   }
 
-  _refreshCard(id, d, coins, income) {
+  /** One card in place; returns true when it shows a "~N runs away" estimate (round 7: the shop legend's condition).
+   *  `legend` = the #shop-note text that explains it (r7 final fix: also the estimate's title / description, _estimateTip). */
+  _refreshCard(id, d, coins, income, legend) {
     const c = this._cards ? this._cards[id] : null;
-    if (!c) return;
+    if (!c) return false;
     const u = UPGRADES[id];
     const rank = clamp(d && d.upgrades ? d.upgrades[id] | 0 : 0, 0, u.ranks);
     for (let k = 0; k < c.pips.length; k++) {
@@ -3098,28 +4290,55 @@ export class UI {
       c.buy.removeAttribute('aria-disabled');
       try { c.buy.classList.remove('cant'); c.buy.classList.add('max'); } catch (_) { /* ignore */ }
       c.buy.setAttribute('aria-label', u.name + STRINGS.common.separator + STRINGS.shop.max);
-      c.estimate.textContent = '';
-      c.estimate.hidden = true;
-      return;
+      // round 7 (r7, explain:2): a maxed card says so (css: success green), next to the final value and the green pips
+      c.estimate.textContent = STRINGS.shop.maxed;
+      c.estimate.hidden = false;
+      this._estimateTip(c, '');
+      if (c.then) c.then.textContent = '';
+      return false;
     }
     const cost = upgradeCost(id, rank + 1);
     const afford = coins >= cost;
     // one-line caption: an upgrade with a unit suffix prints it once ("9 → 11 soldiers", UPGRADES.*.fmtDelta)
     c.effect.textContent = typeof u.fmtDelta === 'function' ? u.fmtDelta(cur, u.effect(rank + 1))
       : STRINGS.shop.delta('', u.fmt(cur), u.fmt(u.effect(rank + 1))).trim();
-    c.price.textContent = String(cost);
+    const price = fmtCoins(cost);                    // r7 (flow-coins:7): "1,130", as the coin pill prints it
+    c.price.textContent = price;
     c.bIcon.hidden = false;
     c.buy.disabled = false;
     try { c.buy.classList.remove('max'); c.buy.classList.toggle('cant', !afford); } catch (_) { /* ignore */ }
     if (afford) c.buy.removeAttribute('aria-disabled'); else c.buy.setAttribute('aria-disabled', 'true');
-    c.buy.setAttribute('aria-label', STRINGS.shop.buy + ' ' + u.name + STRINGS.common.separator + cost + ' ' + STRINGS.common.coins);
+    c.buy.setAttribute('aria-label', STRINGS.shop.buy + ' ' + u.name + STRINGS.common.separator + price + ' ' + STRINGS.common.coins);
+    // r7 (from balance:9): the price of the rank after this one — upgradeCost(id, rank + 2), so it follows the data's price
+    // growth — under BUY on every card that has one
+    if (c.then) c.then.textContent = rank + 2 <= u.ranks ? STRINGS.shop.then(fmtCoins(upgradeCost(id, rank + 2))) : '';
     if (!afford && income > 0) {
       c.estimate.textContent = STRINGS.shop.estimate(Math.ceil((cost - coins) / income));
       c.estimate.hidden = false;
-    } else {
-      c.estimate.textContent = '';
-      c.estimate.hidden = true;
+      this._estimateTip(c, legend || '');
+      return true;
     }
+    c.estimate.textContent = '';
+    c.estimate.hidden = true;
+    this._estimateTip(c, '');
+    return false;
+  }
+
+  /**
+   * r7 final fix (lead decision 6): a "~N runs away" estimate carries the legend's meaning itself — a title (the hover
+   * tooltip) with the legend text and aria-describedby → #shop-note (an accessible description reads a display:none node
+   * it names) — for the boxes whose css hides the legend (landscape ≤ 330 px tall: 512 × 297 = the tester's 200 % zoom,
+   * 568 × 320); set on every box (where the legend shows it only repeats it). Attributes only: the layout does not
+   * change. Written on change (c.tip).
+   */
+  _estimateTip(c, text) {
+    if (c.tip === text) return;
+    c.tip = text;
+    const n = c.estimate;
+    try {
+      if (text) { n.title = text; n.setAttribute('aria-describedby', 'shop-note'); }
+      else { n.removeAttribute('title'); n.removeAttribute('aria-describedby'); }
+    } catch (_) { /* cosmetic */ }
   }
 
   _buy(id, btn) {
@@ -3141,10 +4360,8 @@ export class UI {
     const events = this.ctx.events;
     if (events) events.emit('shop:buy', P_BUY);
     const after = this._saveData() ? this._saveData().coins : before - cost;
-    this._shopFrom = this._shopCoinShown >= 0 ? this._shopCoinShown : before;
-    this._shopTo = after;
-    this._shopT = 0;
-    this._shopTween = true;
+    // r7 (flow-coins:5): the purchase counts down once, on the one wallet model, from the value on screen
+    this._walletSync(after, true);
     this._refreshCards(after);
     const c = this._cards[id];
     if (c) {
@@ -3154,31 +4371,19 @@ export class UI {
     }
   }
 
-  _updateShopCoins(dt) {
-    this._shopT += dt;
-    const k = SHOP_TWEEN_S > 0 ? Math.min(1, this._shopT / SHOP_TWEEN_S) : 1;
-    const v = Math.round(this._shopFrom + (this._shopTo - this._shopFrom) * ease.outCubic(k));
-    if (v !== this._shopCoinShown) {
-      this._shopCoinShown = v;
-      if (this._el.shopCoinsValue) this._el.shopCoinsValue.textContent = fmtCoins(v);
-    }
-    if (k >= 1) this._shopTween = false;
-  }
-
-  /** save:change → title / shop coin pills and shop cards (whichever is visible). */
+  /** save:change → the wallet (outside a run), the SHOP badges and the shop cards (whichever is visible). Round 7 (r7,
+   *  flow-coins:5): the coin pills follow the one wallet model — not while playing / paused, where the run's coins:change
+   *  are authoritative (the header shows the saved coins plus the run's, and a markHint save:change must not drop it). */
   _refreshSaveViews() {
-    const cur = this._current === 'settings' ? this._beforeSettings : this._current;
+    const cur = OVERLAY_IDS[this._current] === true ? this._beforeSettings : this._current;
+    if (cur === 'title' || cur === 'pause') this._syncGuideBadge();   // r7 (teaching:5): the "?" badge (a new entry met)
     const d = this._saveData();
     const coins = d ? d.coins : 0;
-    if (cur === 'title' && this._el.titleCoinsValue) this._el.titleCoinsValue.textContent = fmtCoins(coins);
+    let inRun = false;
+    try { const st = this.ctx.state; inRun = !!st && (st.current === 'playing' || st.current === 'paused'); } catch (_) { inRun = false; }
+    if (!inRun) this._walletSync(coins, true);
     if (cur === 'title' || cur === 'complete' || cur === 'gameover') this._syncShopBadges();
-    if (cur === 'shop') {
-      if (!this._shopTween) {
-        this._shopCoinShown = Math.round(coins);
-        if (this._el.shopCoinsValue) this._el.shopCoinsValue.textContent = fmtCoins(this._shopCoinShown);
-      }
-      this._refreshCards(coins);
-    }
+    if (cur === 'shop') this._refreshCards(coins);
   }
 
   _syncSettings() {
@@ -3192,6 +4397,8 @@ export class UI {
     if (el.setLarge) el.setLarge.checked = !!s.largeText;
     this._syncSeg(el.setQuality, String(s.quality));
     this._syncSeg(el.setSens, String(s.sensitivity));
+    if (el.rowFullscreen && el.rowFullscreen.hidden === this._fsAvailable) el.rowFullscreen.hidden = !this._fsAvailable;
+    this._syncFullscreenButton();                    // r7 (layout:3): the toggle shows the real fullscreen state
     if (this._confirmArmed) this._disarmReset();
   }
 
@@ -3233,54 +4440,106 @@ export class UI {
       if (host && host.setAttribute) host.setAttribute('aria-label', STRINGS.common.star.repeat(c.stars) + STRINGS.common.starEmpty.repeat(3 - c.stars));
     }
     this._cmpCoinShown = fresh ? 0 : c.coins;
-    if (el.completeCoins) el.completeCoins.textContent = STRINGS.complete.coins(this._cmpCoinShown);
+    // r7 (flow-coins:6 / :7): "Earned +1,340" — this run's payout, in full
+    if (el.completeCoins) el.completeCoins.textContent = STRINGS.complete.coins(fmtCoins(this._cmpCoinShown));
     const list = el.completeBreakdown;
     if (list && this._doc) {
       list.textContent = '';
-      const keys = ['kills', 'gates', 'piles', 'boss', 'bonus'];
-      for (let i = 0; i < keys.length; i++) {
-        const n = c[keys[i]] | 0;
-        if (n <= 0) continue;
-        const li = this._doc.createElement('li');
-        li.className = 'bd-' + keys[i];
-        li.textContent = STRINGS.complete.breakdownLine(STRINGS.complete.breakdown[keys[i]], n);
-        list.appendChild(li);
+      const B = STRINGS.complete.breakdown;
+      for (let i = 0; i < BD_KEYS.length; i++) {
+        const key = BD_KEYS[i];
+        // r7 (explain:7): the level bonus as its two parts — the stars' reward ("★★★ +160") and the survivors' ("Survivors +69")
+        if (key === 'bonus' && c.split) {
+          this._chip(list, 'bd-bonus bd-stars', STRINGS.common.star.repeat(c.stars), c.bonusStars);
+          this._chip(list, 'bd-bonus bd-survivors', B.survivors, c.bonusSurv);
+          continue;
+        }
+        this._chip(list, 'bd-' + key, B[key], c[key] | 0);
       }
     }
     if (el.completeBest) {
       const d = this._saveData();
       const rec = d && d.levels ? d.levels[c.level] : null;
       const best = rec && Number.isFinite(rec.bestSurvivors) ? rec.bestSurvivors : c.survivors;
+      const sep = STRINGS.common.separator;
       // round-3 FTUE: a first clear prints its survivors alone (the "best" was this very run: "239 survivors · Best survivors
       // at boss: 239"); beating an earlier best says NEW BEST!; otherwise the best stays the target to beat
       const prev = c.level === this._runLevel ? this._prevBest : -2;
       let line = STRINGS.complete.survivors(c.survivors);
-      if (prev >= 0 && c.survivors > prev && STRINGS.complete.newBest) line += STRINGS.common.separator + STRINGS.complete.newBest;
-      else if (prev !== -1 && best > c.survivors) line += STRINGS.common.separator + STRINGS.complete.best(best);
+      // r7 (explain:0): the star thresholds of this level (data.starNeed, the rule level._commitWon awarded them by) —
+      // "172 survivors · ★★★ at 176" (2★), "65 survivors · ★★ at 178 · ★★★ at 284" (1★), "172 survivors · ★★★ at 164" (3★)
+      if (c.eBoss > 0) {
+        const g3 = STRINGS.complete.goal(3, starNeed(c.eBoss, 3));
+        line += sep + (c.stars < 2 ? STRINGS.complete.goal(2, starNeed(c.eBoss, 2)) + sep + g3 : g3);
+      }
+      if (prev >= 0 && c.survivors > prev && STRINGS.complete.newBest) line += sep + STRINGS.complete.newBest;
+      else if (prev !== -1 && best > c.survivors) line += sep + STRINGS.complete.best(best);
       el.completeBest.textContent = line;
     }
     this._cmpT = 0;
     this._cmpStarsShown = fresh ? 0 : c.stars;
     this._cmpAnimating = fresh;
+    if (fresh) {
+      // r7 (flow-coins:6): the header counts with the payout — from what it shows (the run's coins, a few still in the air)
+      // to the new total, never down; _cmpBase = the wallet before this run (level._commitWon added exactly c.coins)
+      const d = this._saveData();
+      const total = d ? d.coins : 0;
+      this._cmpBase = Math.max(0, total - c.coins);
+      this._cmpWalletFrom = Math.round(this._coinValue);
+      this._cmpDrive = true;
+    }
     this._syncShopBadges();
   }
 
-  /** Results theatre (J17): stars slam in one by one (0.25 s each, ui_star), then the coins count up (30/s, capped). */
+  /** One results chip "Label +N" (N in full, fmtCoins); none for N ≤ 0. Built on entering the screen only. */
+  _chip(list, cls, label, n) {
+    if (!(n > 0) || !this._doc) return;
+    const li = this._doc.createElement('li');
+    li.className = cls;
+    li.textContent = STRINGS.complete.breakdownLine(label, fmtCoins(n));
+    list.appendChild(li);
+  }
+
+  /** Results theatre (J17): stars slam in one by one (0.25 s each, ui_star) while the coins count up (30/s, capped at
+   *  COUNT_UP_MAX_S). Round 7 (r7, flow-coins:6): on real time (rdt), and the count starts with the first star, so "+0"
+   *  shows for at most 0.25 s and the whole theatre ends within 0.25 + 1.5 s on any machine; the wallet header follows the
+   *  count (_driveWallet). */
   _updateComplete(dt) {
     this._cmpT += dt;
     const t = this._cmpT;
     const c = this._cmp;
     while (this._cmpStarsShown < c.stars && t >= STAR_STAGGER * (this._cmpStarsShown + 1)) this._revealStar(this._cmpStarsShown++, true);
-    const countStart = STAR_STAGGER * (c.stars + 1);
+    const countStart = STAR_STAGGER;
     if (t < countStart) return;
     const dur = c.coins > 0 ? Math.min(COUNT_UP_MAX_S, c.coins / COUNT_RATE) : 0;
     const k = dur > 0 ? Math.min(1, (t - countStart) / dur) : 1;
     const v = Math.round(c.coins * ease.outQuad(k));
     if (v !== this._cmpCoinShown) {
       this._cmpCoinShown = v;
-      if (this._el.completeCoins) this._el.completeCoins.textContent = STRINGS.complete.coins(v);
+      if (this._el.completeCoins) this._el.completeCoins.textContent = STRINGS.complete.coins(fmtCoins(v));
+      if (this._cmpDrive) this._driveWallet(v);
     }
-    if (k >= 1 && this._cmpStarsShown >= c.stars) this._cmpAnimating = false;
+    if (k >= 1 && this._cmpStarsShown >= c.stars) this._endCompleteTheatre();
+  }
+
+  /** r7 (flow-coins:6): header = max(what it showed when the results appeared, wallet before the run + the count so far). */
+  _driveWallet(v) {
+    const w = Math.max(this._cmpWalletFrom, this._cmpBase + v);
+    if (!(w > this._coinValue)) return;
+    this._coinTween = false;
+    this._coinHold = false;
+    this._coinFrom = this._coinTo = this._coinValue = w;
+    this._writeWallet(Math.round(w));
+  }
+
+  /** The results theatre is over (counted out, skipped by a tap, or left): the header lets go of the count and settles on
+   *  the save (both end on the same total). */
+  _endCompleteTheatre() {
+    this._cmpAnimating = false;
+    if (!this._cmpDrive) return;
+    this._cmpDrive = false;
+    const d = this._saveData();
+    if (d) this._walletSync(d.coins, false);
   }
 
   _revealStar(i, withSound) {
@@ -3297,13 +4556,15 @@ export class UI {
     }
   }
 
-  /** Tap on the results panel skips the theatre. */
-  _finishCompleteAnim() {
+  /** Tap on the results panel skips the theatre; round 7 (r7): leaving the screen mid-theatre ends it too (`withSound`
+   *  false: no last star sting). Stars, the "Earned" line and the wallet header go final at once. */
+  _finishCompleteAnim(withSound) {
     const c = this._cmp;
-    while (this._cmpStarsShown < c.stars) this._revealStar(this._cmpStarsShown++, this._cmpStarsShown === c.stars);
+    const sound = withSound !== false;
+    while (this._cmpStarsShown < c.stars) this._revealStar(this._cmpStarsShown++, sound && this._cmpStarsShown === c.stars);
     this._cmpCoinShown = c.coins;
-    if (this._el.completeCoins) this._el.completeCoins.textContent = STRINGS.complete.coins(c.coins);
-    this._cmpAnimating = false;
+    if (this._el.completeCoins) this._el.completeCoins.textContent = STRINGS.complete.coins(fmtCoins(c.coins));
+    this._endCompleteTheatre();
   }
 
   _fillGameover() {
@@ -3311,7 +4572,11 @@ export class UI {
     // round 3 (GDD §14 UI-33): the failed level as a kicker above SQUAD LOST, spelled like the HUD and results ('LEVEL 7')
     const lv = this._el.gameoverLevel;
     if (lv) lv.textContent = (STRINGS.gameover.level || STRINGS.hud.level)(f.level);
-    if (this._el.gameoverInfo) this._el.gameoverInfo.textContent = STRINGS.gameover.info(Math.round(clamp(f.fraction, 0, 1) * 100), f.coinsKept);
+    if (this._el.gameoverInfo) this._el.gameoverInfo.textContent = STRINGS.gameover.info(Math.round(clamp(f.fraction, 0, 1) * 100), fmtCoins(f.coinsKept));
+    // round 7 (r7, from balance:10): RETRY after a failure plays a new road (seed 1000 + L + 100·failures); the authored L1
+    // always replays its own, so it gets no note
+    const note = this._el.retryNote;
+    if (note) { const show = !LEVELS.authored[f.level]; if (note.hidden === show) note.hidden = !show; }
     this._syncShopBadges();
   }
 
@@ -3324,9 +4589,49 @@ export class UI {
     const line = (cls, text) => { const d = doc.createElement('div'); d.className = cls; d.textContent = text; host.appendChild(d); };
     if (e.newBest) line('new-best', STRINGS.endless.newBest);
     line('es-distance', STRINGS.endless.distance(e.distance));
-    line('es-score', STRINGS.endless.score(e.score));
-    line('es-best', STRINGS.endless.best(e.best));
-    line('es-coins', STRINGS.endless.coins(e.coins));
+    // round 7 (r7, flow-coins:7): score, best and coins in full with separators, like every other coin number
+    line('es-score', STRINGS.endless.score(fmtCoins(e.score)));
+    line('es-best', STRINGS.endless.best(fmtCoins(e.best)));
+    line('es-coins', STRINGS.endless.coins(fmtCoins(e.coins)));
+  }
+
+  /**
+   * Round 7 (r7, controls:4 + teaching:8): the pause panel's one controls line — STRINGS.pause.controlsKeys with a fine pointer
+   * / no touch (the steerDesktop rule; "F FULLSCREEN" only where fullscreen exists), else controlsTouch. Its " · " items
+   * become nowrap spans that wrap as whole items (css #pause-controls: a centred flex row with gaps, so no line starts or
+   * ends on a stray "·"); in the keys line each item's last word is the action and the words before it are keys, drawn as
+   * key caps (<kbd>; "/" stays a plain "or"). Rebuilt only when the text changes (at most once per input kind).
+   */
+  _fillPauseControls() {
+    const n = this._el ? this._el.pauseControls : null;
+    const doc = this._doc;
+    if (!n || !doc) return;
+    const keys = prefersDesktopSteerHint();
+    const t = keys ? STRINGS.pause.controlsKeys(this._fsAvailable) : STRINGS.pause.controlsTouch;
+    if (n.dataset.text === t) return;
+    n.dataset.text = t;
+    n.textContent = '';
+    try { n.classList.toggle('keys', keys); } catch (_) { /* cosmetic */ }
+    const items = t.split(' · ');
+    for (let i = 0; i < items.length; i++) {
+      const item = doc.createElement('span');
+      item.className = 'pc-item';
+      const words = items[i].split(/[  ]+/);
+      if (!keys || words.length < 2) item.textContent = items[i];
+      else {
+        for (let w = 0; w < words.length - 1; w++) {
+          const k = doc.createElement(words[w] === '/' ? 'span' : 'kbd');
+          if (words[w] === '/') k.className = 'pc-or';
+          k.textContent = words[w];
+          item.appendChild(k);
+        }
+        const act = doc.createElement('span');
+        act.className = 'pc-act';
+        act.textContent = words[words.length - 1];
+        item.appendChild(act);
+      }
+      n.appendChild(item);
+    }
   }
 
   // -------------------------------------------------------------------------------------------
@@ -3348,7 +4653,13 @@ export class UI {
       return;
     }
     if (btn.disabled) return;
+    // round 7 (r7, flow-coins:2): a pointer click (trusted, detail > 0) whose press came before the screen under it was
+    // painted was aimed at the screen before — a second NEXT on a slow box restarted the level, a late results HOME paused
+    // the next level from the HUD pause button in the same corner (r7 fix: _staleAt also holds a new run's HUD buttons for
+    // HUD_ARM_MS after its paint). Keyboard / assistive clicks (detail 0) and synthetic ones (engine's Back guard,
+    // element.click()) are never stale
     const id = btn.id || '';
+    if (e.isTrusted && e.detail > 0 && this._downStamp > 0 && this._staleAt(this._downStamp, id)) return;
     // round 6: FIRE fired on its pointerdown (or the key); only a click with no activation just before it (Enter on the
     // focused button, assistive tech) fires here. No ui:button — the weapon's own sting is the feedback, not ui_tap
     if (id === 'btn-fire') { if (this._realNow() >= this._fireClickUntil) this._fireTap(); return; }
@@ -3356,6 +4667,34 @@ export class UI {
     const events = this.ctx.events;
     if (events) events.emit('ui:button', P_BUTTON);
     this._route(btn, id);
+    // r7 (flow-coins:2): the screen of the state this click set shows now, in the click's own task — not one (multi-second)
+    // frame later, while the old buttons stay up and take more clicks
+    if (this._pendingSet) this._flushPendingScreen();
+  }
+
+  /** r7 (flow-coins:2): true when a trusted press at `stamp` (performance.now() ms) on button `id` was aimed at the screen
+   *  before — pressed before the current screen painted; r7 fix: or, on the HUD pause / FIRE button of a new run, less than
+   *  HUD_ARM_MS after that paint. The error box's RELOAD is never stale (it covers every screen; no screen is under it). */
+  _staleAt(stamp, id) {
+    if (id === 'btn-reload') return false;
+    const painted = this._paintedStamp();
+    if (stamp < painted) return true;
+    return this._hudArm && this._current === null && (id === 'btn-pause' || id === 'btn-fire') && stamp < painted + HUD_ARM_MS;
+  }
+
+  /** r7 (flow-coins:2): performance.now() ms from which the current screen counts as painted (showScreen, _armPaintMark);
+   *  while that is not known yet, STALE_CLICK_MAX_MS after the switch (frames that never come must not eat every click). */
+  _paintedStamp() {
+    const s = this._shownStamp;
+    return s === Infinity ? this._shownAt + STALE_CLICK_MAX_MS : s;
+  }
+
+  /** performance.now() in ms (guarded; NaN without it, which disables the stale-click guard). */
+  _perfMs() {
+    try {
+      if (typeof performance !== 'undefined' && performance && typeof performance.now === 'function') return performance.now();
+    } catch (_) { /* fall through */ }
+    return NaN;
   }
 
   _buttonKind(btn) {
@@ -3376,6 +4715,8 @@ export class UI {
       case 'btn-pause': if (engine) engine.pause(); return;
       case 'btn-settings':
       case 'btn-pause-settings': this.showScreen('settings'); return;
+      case 'btn-guide':
+      case 'btn-pause-guide': this.showScreen('guide'); return;   // r7 (teaching:5): the FIELD GUIDE (title / pause "?")
       case 'btn-play': this._startLevel(this._highestUnlocked(), btn); return;
       case 'btn-shop':
       case 'btn-complete-shop':
@@ -3419,10 +4760,10 @@ export class UI {
   _startLevel(n, btn) {
     const level = this.ctx.level;
     if (!level) return;
-    if (this._startingBtn) { try { this._startingBtn.classList.remove('starting'); } catch (_) { /* ignore */ } this._startingBtn = null; }
+    this._clearStarting();
     if (typeof level.requestStart !== 'function') { level.start(n); return; }
-    if (level.requestStart(n) || !btn || !btn.classList) return;
-    try { btn.classList.add('starting'); this._startingBtn = btn; } catch (_) { /* cosmetic */ }
+    if (level.requestStart(n)) return;
+    this._markStarting(btn);
   }
 
   /** Round 5 integration: RETRY / REPLAY / RESTART through level.requestRestart (same rule as restart(), no synchronous
@@ -3430,16 +4771,23 @@ export class UI {
   _restartLevel(btn) {
     const level = this.ctx.level;
     if (!level) return;
-    if (this._startingBtn) { try { this._startingBtn.classList.remove('starting'); } catch (_) { /* ignore */ } this._startingBtn = null; }
+    this._clearStarting();
     if (typeof level.requestRestart !== 'function') { level.restart(); return; }
-    if (level.requestRestart() || !btn || !btn.classList) return;
-    try { btn.classList.add('starting'); this._startingBtn = btn; } catch (_) { /* cosmetic */ }
+    if (level.requestRestart()) return;
+    this._markStarting(btn);
   }
 
-  /** BACK (§10.3): closes the settings overlay, else returns to title / complete / gameover. */
+  /** The tapped menu button waits for its generated script: .starting (round 7, flow-coins:3: css draws a spinner on it — the
+   *  0.5 s brightness pulse alone was missed) and aria-busy, until the next screen change (_flushPendingScreen). */
+  _markStarting(btn) {
+    if (!btn || !btn.classList) return;
+    try { btn.classList.add('starting'); btn.setAttribute('aria-busy', 'true'); this._startingBtn = btn; } catch (_) { /* cosmetic */ }
+  }
+
+  /** BACK (§10.3): closes the settings overlay (r7: or the FIELD GUIDE), else returns to title / complete / gameover. */
   _back() {
     const state = this.ctx.state;
-    if (this._current === 'settings') {
+    if (OVERLAY_IDS[this._current] === true) {
       this.showScreen(state ? this._mapState(state.current, state.data) : this._beforeSettings);
       return;
     }
@@ -3479,6 +4827,10 @@ export class UI {
       case 'set-reduced': if (isChange) this._setSetting('reducedMotion', !!t.checked); return;
       case 'set-hc': if (isChange) this._setSetting('hcGates', !!t.checked); return;
       case 'set-large': if (isChange) this._setSetting('largeText', !!t.checked); return;
+      // r7 (layout:3): not a saved setting — the toggle asks for the opposite of the real state (the change event runs
+      // inside the click's / Space's user activation, so requestFullscreen is allowed); fullscreenchange or a refusal
+      // re-syncs the box (_syncFullscreenButton)
+      case 'set-fullscreen': if (isChange) this._toggleFullscreen(); return;
       default: return;
     }
   }
@@ -3504,20 +4856,24 @@ export class UI {
     events.emit('settings:change', P_SETTINGS);
   }
 
-  /** Escape closes the settings overlay / leaves levels and shop (consumed so engine does not also resume). */
+  /** Escape closes the settings overlay / leaves levels and shop (consumed so engine does not also resume).
+   *  Round 7 (r7): F toggles fullscreen (layout:3); PageUp / PageDown / Home / End scroll the screen's list (layout:1). */
   _key(e) {
     if (!e) return;
     if (this._pointerMode) this._setPointerMode(false);      // keyboard user: show the focus ring again
     const code = e.code || e.key;
     if (code === 'Space' || code === ' ') { this._fireKey(e); return; }   // round 6: Space fires a stored weapon
+    if (code === 'KeyF') { this._fullscreenKey(e); return; }
+    if (code === 'PageDown' || code === 'PageUp' || code === 'Home' || code === 'End') { this._pageKey(e, code); return; }
     if (code !== 'Escape' || e.repeat) return;
     const cur = this._current;
-    if (cur !== 'settings' && cur !== 'levels' && cur !== 'shop') return;
+    if (cur !== 'settings' && cur !== 'guide' && cur !== 'levels' && cur !== 'shop') return;
     try { e.preventDefault(); e.stopPropagation(); } catch (_) { /* ignore */ }
     P_BUTTON.id = 'back';
     const events = this.ctx.events;
     if (events) events.emit('ui:button', P_BUTTON);
     this._back();
+    if (this._pendingSet) this._flushPendingScreen();   // r7 (flow-coins:2): the state's screen shows in this key task
   }
 
   /** Input modality (UI-14): html.pointer-input scopes out the :focus-visible ring (css) after a pointer press
@@ -3529,36 +4885,131 @@ export class UI {
     try { doc.documentElement.classList.toggle('pointer-input', on); } catch (_) { /* ignore */ }
   }
 
+  /** Title icon, SETTINGS toggle (r7) and F (r7): leave fullscreen when in it, else ask for it. A refused request
+   *  (policy, no user activation) re-syncs the controls, so the SETTINGS toggle never stays ticked by mistake. */
   _toggleFullscreen() {
     const d = this._doc;
     if (!d || !this._fsAvailable) return;
     try {
-      const active = d.fullscreenElement || d.webkitFullscreenElement;
-      if (active) {
+      if (this._fsActive()) {
         const exit = d.exitFullscreen || d.webkitExitFullscreen;
         if (typeof exit === 'function') {
           const p = exit.call(d);
-          if (p && typeof p.catch === 'function') p.catch(NOOP);
+          if (p && typeof p.catch === 'function') p.catch(this._onFsRefused);
         }
         return;
       }
       const root = d.documentElement;
       const req = root.requestFullscreen || root.webkitRequestFullscreen;
-      if (typeof req !== 'function') return;
+      if (typeof req !== 'function') { this._syncFullscreenButton(); return; }
       const p = req.call(root, FULLSCREEN_OPTS);
-      if (p && typeof p.then === 'function') p.then(lockPortrait, NOOP);
-    } catch (_) { /* refused (iframe / policy): nothing to do */ }
+      if (p && typeof p.then === 'function') p.then(lockPortrait, this._onFsRefused);
+    } catch (_) { this._syncFullscreenButton(); }   // refused (iframe / policy)
   }
 
-  _syncFullscreenButton() {
-    const btn = this._el ? this._el.btnFullscreen : null;
+  /** True while the document is in fullscreen (guarded). */
+  _fsActive() {
     const d = this._doc;
-    if (!btn || !d) return;
-    let on = false;
-    try { on = !!(d.fullscreenElement || d.webkitFullscreenElement); } catch (_) { on = false; }
-    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    if (!d) return false;
+    try { return !!(d.fullscreenElement || d.webkitFullscreenElement); } catch (_) { return false; }
+  }
+
+  /** The title icon's aria-pressed and (r7, layout:3) the SETTINGS toggle follow the real fullscreen state. */
+  _syncFullscreenButton() {
+    const el = this._el;
+    if (!el || !this._doc) return;
+    const on = this._fsActive();
+    if (el.btnFullscreen) el.btnFullscreen.setAttribute('aria-pressed', on ? 'true' : 'false');
+    if (el.setFullscreen && el.setFullscreen.checked !== on) el.setFullscreen.checked = on;
     this._coinPosDirty = true;
     this._puPosDirty = true;
+  }
+
+  /** fullscreenchange. Round 7 (r7, layout:3): leaving fullscreen while playing pauses the run — the browser keeps the
+   *  Esc that exits fullscreen (the page never sees it, so engine's Esc-to-pause cannot run) and the run would carry
+   *  on in a window that just shrank. engine.pause() is not a toggle: an already paused run stays paused. */
+  _fsChanged() {
+    this._syncFullscreenButton();
+    if (this._fsActive()) return;
+    const st = this.ctx.state, engine = this.ctx.engine;
+    if (st && typeof st.is === 'function' && st.is('playing') && engine && typeof engine.pause === 'function') engine.pause();
+  }
+
+  /** Round 7 (r7, layout:3): F toggles fullscreen in every state (the desktop convention; keydown is a user
+   *  activation). Never with a modifier (Ctrl+F is the browser's find), held, while typing, or where unavailable. */
+  _fullscreenKey(e) {
+    if (e.repeat || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || !this._fsAvailable) return;
+    const t = e.target;
+    let typing = false;
+    try { typing = !!(t && typeof t.closest === 'function' && t.closest(TEXT_ENTRY_SELECTOR)); } catch (_) { typing = false; }
+    if (typing) return;
+    try { e.preventDefault(); } catch (_) { /* ignore */ }
+    this._toggleFullscreen();
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Round 7 (r7, layout:0 / :1): wheel and page-key forwarding to the current screen's scroll box (SCROLL_LIST_ID).
+  // DOM-event handlers like _key / _click, so the scroll write happens here, not in update().
+  // -------------------------------------------------------------------------------------------
+
+  /** The current screen's scroll box (SCROLL_LIST_ID), or null. */
+  _scrollList() {
+    const lists = this._scrollLists;
+    const cur = this._current;
+    if (!lists || !cur || !Object.prototype.hasOwnProperty.call(lists, cur)) return null;
+    return lists[cur] || null;
+  }
+
+  /** True when the browser scrolls this wheel by itself: `t` or an ancestor below #app is a vertical scroll box whose
+   *  content overflows (the list itself, a results / pause screen that scrolls, SETTINGS) — overscroll-behavior:
+   *  contain keeps the wheel there even at its end, so forwarding it too would scroll twice. */
+  _nativeScroll(t) {
+    const stop = this._el ? this._el.app : null;
+    const view = this._doc ? this._doc.defaultView : null;
+    for (let n = t; n && n !== stop && n.nodeType === 1; n = n.parentElement) {
+      if (!(n.scrollHeight > n.clientHeight + 1)) continue;
+      let oy = '';
+      try { oy = view && typeof view.getComputedStyle === 'function' ? view.getComputedStyle(n).overflowY : ''; } catch (_) { oy = ''; }
+      if (oy === 'auto' || oy === 'scroll') return true;
+    }
+    return false;
+  }
+
+  /** wheel on #app (passive): scrolls the current screen's list when nothing under the pointer scrolls natively.
+   *  ctrl + wheel (and a trackpad pinch) is the browser's zoom; a horizontal-only wheel is left alone. */
+  _wheel(e) {
+    if (!e || e.ctrlKey) return;
+    const list = this._scrollList();
+    if (!list) return;
+    let dy = e.deltaY;
+    if (!(dy > 0 || dy < 0)) return;
+    if (this._nativeScroll(e.target)) return;
+    const max = list.scrollHeight - list.clientHeight;
+    if (!(max > 1)) return;
+    if (e.deltaMode === 1) dy *= WHEEL_LINE_PX;
+    else if (e.deltaMode === 2) dy *= list.clientHeight;
+    const top = list.scrollTop;
+    const to = clamp(top + dy, 0, max);
+    if (to !== top) list.scrollTop = to;
+  }
+
+  /** PageUp / PageDown / Home / End with the focus outside the current screen's list (SHOP opens with it on BACK)
+   *  scroll that list; with the focus inside it the browser scrolls the focused control's own box. Not with a
+   *  modifier (Ctrl+PageDown switches tabs), and only when the list overflows. */
+  _pageKey(e, code) {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const list = this._scrollList();
+    if (!list) return;
+    let inside = false;
+    try { const a = this._doc ? this._doc.activeElement : null; inside = !!a && list.contains(a); } catch (_) { inside = false; }
+    if (inside) return;
+    const max = list.scrollHeight - list.clientHeight;
+    if (!(max > 1)) return;
+    const top = list.scrollTop;
+    const page = Math.max(WHEEL_LINE_PX, list.clientHeight * PAGE_FRAC);
+    const to = code === 'Home' ? 0 : code === 'End' ? max : clamp(top + (code === 'PageDown' ? page : -page), 0, max);
+    if (to !== top) list.scrollTop = to;
+    try { e.preventDefault(); } catch (_) { /* ignore */ }
   }
 
   _reload() {
@@ -3702,15 +5153,19 @@ export class UI {
     }
     const show = count > 0 || active !== null;
     if (show !== this._fireShown) {
+      if (this._fireEmptyUntil > 0) this._endFireEmpty();   // r7 (controls:3): a weapon arrived during the empty flash
       this._fireShown = show;
       b.hidden = !show;
       this._puPosOk[FIRE_POS] = 0;
       const hud = el.hud;
       if (hud) { try { hud.classList.toggle('fire-on', show); } catch (_) { /* ignore */ } }
       if (show) { this._cancelAnim(this._fireAnim); this._fireAnim = this._animate(b, KF_POP_IN, T_NAMECARD); }
-      else this._gpA = false;
+      // (r7: gamepad A is polled all through a run now, so its edge state stays true to the pad when the button hides)
     }
-    if (!show) return;
+    if (!show) {
+      if (this._fireEmptyUntil > 0 && this._realNow() >= this._fireEmptyUntil) this._endFireEmpty();
+      return;
+    }
     const busy = active !== null;
     const id = next !== null ? next : active;
     if (id !== this._fireId) {
@@ -3765,6 +5220,9 @@ export class UI {
   _firePointer(e) {
     if (!e || (typeof e.button === 'number' && e.button > 0)) return;
     try { e.preventDefault(); } catch (_) { /* ignore */ }   // the button never takes focus: keyboard steering stays on #app
+    // r7 fix (flow-coins:2): FIRE fires on its press, so the stale-press rule of _click applies here (a press aimed at the
+    // pause panel or the results must not spend a stored weapon)
+    if (e.isTrusted && e.timeStamp > 0 && this._staleAt(e.timeStamp, 'btn-fire')) return;
     this._fireTap();
   }
 
@@ -3807,10 +5265,52 @@ export class UI {
     const w = this.ctx.weapons;
     let ok = false;
     if (w && typeof w.requestFire === 'function') { try { ok = w.requestFire() === true; } catch (_) { ok = false; } }
-    if (!ok && this._fireShown && this._el.btnFire) {
+    if (ok || !this._el.btnFire) return;
+    if (this._fireShown) {
       this._cancelAnim(this._fireAnim);
       this._fireAnim = this._animate(this._el.btnFire, KF_FIRE_DENY, T_FIRE_DENY);
+    } else this._fireEmpty();   // r7 (controls:3): nothing stored — only Space / gamepad A get here (the button is hidden)
+  }
+
+  /**
+   * Round 7 (r7, controls:3): Space / gamepad A with no weapon stored or running briefly shows the empty FIRE slot ("EMPTY",
+   * dark ring, no pictogram; css #btn-fire.empty — it takes no pointer), so the player learns where weapons go and what the
+   * key does. One flash at a time (FIRE_EMPTY_S); a weapon arriving meanwhile takes the normal pop-in path (_updateFire).
+   */
+  _fireEmpty() {
+    const el = this._el;
+    const b = el ? el.btnFire : null;
+    if (!b) return;
+    const now = this._realNow();
+    if (now < this._fireEmptyUntil) return;
+    this._fireEmptyUntil = now + FIRE_EMPTY_S;
+    try { b.classList.add('empty'); b.classList.remove('ready', 'busy'); } catch (_) { /* cosmetic */ }
+    if (el.fireLabel) el.fireLabel.textContent = STRINGS.fire.empty;
+    if (el.fireBadge && !el.fireBadge.hidden) el.fireBadge.hidden = true;
+    b.setAttribute('aria-label', STRINGS.fire.ariaEmpty);
+    b.hidden = false;
+    if (el.hud) { try { el.hud.classList.add('fire-on'); } catch (_) { /* ignore */ } }   // the hint pill moves left, as for a weapon
+    this._puPosOk[FIRE_POS] = 0;
+    this._cancelAnim(this._fireAnim);
+    this._fireAnim = this._animate(b, KF_FIRE_EMPTY, T_FIRE_EMPTY);
+  }
+
+  /** Ends the empty-slot flash: label and classes back; hidden again unless a weapon now shows (the normal sync redraws). */
+  _endFireEmpty() {
+    this._fireEmptyUntil = 0;
+    const el = this._el;
+    const b = el ? el.btnFire : null;
+    if (!b) return;
+    try { b.classList.remove('empty'); } catch (_) { /* cosmetic */ }
+    if (el.fireLabel) el.fireLabel.textContent = STRINGS.fire.label;
+    if (!this._fireShown) {
+      b.hidden = true;
+      if (el.hud) { try { el.hud.classList.remove('fire-on'); } catch (_) { /* ignore */ } }
+      this._cancelAnim(this._fireAnim);
+      this._fireAnim = null;
     }
+    this._fireId = ''; this._fireBusy = -1; this._fireCount = -1; this._fireRingId = '';
+    this._puPosOk[FIRE_POS] = 0;
   }
 
   _applyIcon(node, css) {

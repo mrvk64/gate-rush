@@ -38,18 +38,25 @@
 // DECALS — makeDecalMaterial(ctx)   (additive, depthWrite false, polygon offset, fog)
 //   Geometry: PlaneGeometry(1, 1) on an InstancedMesh; instance matrix = translation (x, 0, z) only.
 //   Per-instance attributes:
-//     iDecal  vec4  (kind 0 ring / 1 arc / 2 lane / 3 splat / 4 xband, progress 0..1, size m, colorIdx)
-//                   size = DIAMETER for ring / arc / splat, stripe WIDTH for lane / xband
+//     iDecal  vec4  (kind 0 ring / 1 arc / 2 lane / 3 splat / 4 xband / 5 swipe, progress 0..1, size m, colorIdx)
+//                   size = DIAMETER for ring / arc / splat / swipe, stripe WIDTH for lane / xband
 //     iDecalB vec4  (fade 0..1 (fade-in / fade-out envelope written by fx), age s, seed 0..1, unused)
-//   Shapes (all procedural, one draw): ring = telegraph / gauge (pulsing outline, radial fill growing with
-//   progress, clockwise angular gauge from the far point); arc = spit landing marker (rotating dashed circle,
-//   disc filling with progress, crosshair); lane = lane highlight stripe from DECAL_LANE_Z[0] to
+//   Shapes (all procedural, one program): ring = telegraph / gauge (pulsing outline, radial fill growing with
+//   progress, clockwise angular gauge from the far point); arc = spit landing marker (rotating dashed circle whose
+//   every other dash is the hazard orange-red PALETTE.fx.hazard, faint disc filling with progress, a diagonal x —
+//   round 7: it read as a heal pad with an upright +); lane = lane highlight stripe from DECAL_LANE_Z[0] to
 //   DECAL_LANE_Z[1] metres along +z from the origin (toward the squad) with bright rails and chevrons flowing
 //   toward the squad; splat = irregular blob seeded by `seed`, fading as progress → 1; xband = hazard-striped
-//   band (width = size) from DECAL_BAND_Z[0] to DECAL_BAND_Z[1] around the origin, pulsing.
+//   band (width = size) from DECAL_BAND_Z[0] to DECAL_BAND_Z[1] around the origin, pulsing; swipe (round 7) = the
+//   brute's frontal crescent toward +z (JUICE.telegraph: inner edge, half-angle; outer edge = the quad), bright
+//   rim, fill sweeping outward with progress, claw arcs flowing toward the squad, strobe at progress 1.
+//   fx.js draws this material in two meshes (round 7): `fx.decals` depth-tested (lane highlight, splats, the
+//   shield gauge, the stomp ring) and `fx.decalsTop`, a clone with depthTest off for the telegraphs that sit on
+//   the formation (slam ring, charge stripe, car band, acid marks, brute swipe), so a big squad never hides them —
+//   same shaders, same program.
 // ---------------------------------------------------------------------------------------------------
 import { ShaderMaterial, Color, AdditiveBlending, NormalBlending, DoubleSide } from 'three';
-import { WORLD, PALETTE } from './data.js';
+import { WORLD, PALETTE, JUICE } from './data.js';
 
 // ---------------------------------------------------------------------------------------------------
 // Shared FX colour table (index = colorIdx attribute of particles AND decals). Order is part of the
@@ -62,14 +69,16 @@ export const FX_COLORS = Object.freeze([
   PALETTE.fx.confetti[0], PALETTE.fx.confetti[1], PALETTE.fx.confetti[2], PALETTE.fx.confetti[3], PALETTE.fx.confetti[4], PALETTE.fx.confetti[5],   // 15–20
   PALETTE.flash.red, PALETTE.gate.plus.tint, PALETTE.gate.mult.tint, PALETTE.gate.minus.tint, PALETTE.gate.div.tint,   // 21–25
   PALETTE.gate.zero.tint, PALETTE.gate.item.tint, PALETTE.gate.max, PALETTE.boss.shield, PALETTE.ui.success, PALETTE.ui.danger,   // 26–31
+  PALETTE.fx.brute,                                                                                                                // 32 (round 7)
 ]);
-const NFX = FX_COLORS.length;   // 32
+const NFX = FX_COLORS.length;   // 33
 
 /** Named indices into FX_COLORS (fx.js uses these instead of literals). */
 export const FX_COLOR = Object.freeze({
   spark: 0, muzzle: 1, gold: 2, blue: 3, acid: 4, armor: 5, flame: 6, smoke: 7, dust: 8, white: 9, laser: 10, rail: 11,
   rocket: 12, splash: 13, blood: 14, confetti0: 15, confettiCount: PALETTE.fx.confetti.length,
   red: 21, plus: 22, mult: 23, minus: 24, div: 25, zero: 26, item: 27, max: 28, shield: 29, success: 30, danger: 31,
+  brute: 32,
 });
 
 /**
@@ -98,8 +107,8 @@ export const PARTICLE_KIND = Object.freeze({
 // Confetti (6) rides the NORMAL mesh (VIS-6): 200 additive HDR flakes under the boss-death bloom pulse whited out
 // the screen; as tone-mapped paper (bright ≤ 0.8 below) it reads as confetti and leaves the collapsing rig visible.
 export const PARTICLE_ADDITIVE = Object.freeze([true, false, true, false, true, false, false, false, true, false, true]);
-/** Decal kinds (iDecal.x). */
-export const DECAL_KIND = Object.freeze({ ring: 0, arc: 1, lane: 2, splat: 3, xband: 4 });
+/** Decal kinds (iDecal.x). Round 7: 5 swipe = the brute's own frontal telegraph arc (JUICE.telegraph). */
+export const DECAL_KIND = Object.freeze({ ring: 0, arc: 1, lane: 2, splat: 3, xband: 4, swipe: 5 });
 /** Attribute names and item sizes (fx.js builds the InstancedBufferAttributes from these). */
 export const PARTICLE_ATTRS = Object.freeze({ p0: 3, v0: 3, pLife: 4, pKind: 4 });
 export const DECAL_ATTRS = Object.freeze({ iDecal: 4, iDecalB: 4 });
@@ -111,6 +120,10 @@ const DECAL_LANE_Z = [-2, -WORLD.laneDecalZ + 4];   // DATA-MISSING: JUICE.decal
 const DECAL_BAND_Z = [-10, 6];                      // DATA-MISSING: JUICE.decals.bandZ (x-band extent around the origin, m)
 const DECAL_Y = 0.03;                               // DATA-MISSING: JUICE.decals.y (lift above the road plane, m)
 const DECAL_GAIN = 1.5;                             // DATA-MISSING: JUICE.decals.hdrGain (additive HDR gain so telegraphs bloom)
+// Round 7 (r7 brute look): the brute's swipe arc in unit-disc terms — inner edge (fraction of the outer radius = the quad's half
+// size, JUICE.telegraph.bruteReachM) and half-angle (rad) around the +z direction (toward the squad)
+const SWIPE_INNER = JUICE.telegraph.bruteInnerM / JUICE.telegraph.bruteReachM;
+const SWIPE_HALF_RAD = JUICE.telegraph.bruteArcHalfDeg * Math.PI / 180;
 
 // ---------------------------------------------------------------------------------------------------
 // GLSL
@@ -311,6 +324,8 @@ const DECAL_VERT = /* glsl */`
 const DECAL_FRAG = /* glsl */`
   uniform float uTime;
   uniform float uGain;
+  uniform vec3 uHazard;        // round 7: PALETTE.fx.hazard (linear) — the acid mark's orange-red rim dashes
+  uniform vec2 uSwipe;         // round 7: brute swipe arc (inner edge as a fraction of the outer radius, half-angle rad)
   ${FOG_DECL}
   varying vec2 vUv;
   varying vec4 vDecal;
@@ -343,13 +358,23 @@ const DECAL_FRAG = /* glsl */`
       alpha = outline * (0.7 * pulse + 0.3 * full) + gauge * 0.9 + fill + front * 0.7 + strobe;
       col *= 1.0 + gauge * 0.6 + front * 0.5;
     } else if (k == 1) {
-      // arc: spit landing marker — rotating dashed circle, disc filling with progress, crosshair
+      // arc: spit landing marker — rotating dashed circle, disc filling with progress, centre mark. Round 7 (r7 teaching:7: the
+      // tester read the Queen's acid circles as "medkit / heal + circles"): the centre mark is a diagonal x (an upright + is the
+      // heal / pickup sign), every other rim dash is the hazard orange-red, and the base disc is fainter (0.18 → 0.10): a hazard
+      // mark, not a pad
       float a01 = fract(atan(c.x, c.y) / 6.2831853 + uTime * 0.35);
-      float dash = step(0.45, fract(a01 * 12.0));
+      float cell = a01 * 12.0;
+      float dash = step(0.45, fract(cell));
       float ringA = (1.0 - smoothstep(0.05 - aa, 0.05 + aa, abs(r - 0.9))) * dash;
-      float disc = (1.0 - smoothstep(prog * 0.9 - aa, prog * 0.9 + aa, r)) * (0.18 + 0.45 * prog);
-      float crossH = (1.0 - smoothstep(0.03, 0.03 + aa, min(abs(c.x), abs(c.y)))) * (1.0 - smoothstep(0.32, 0.42, r)) * 0.6;
-      alpha = ringA * 0.95 + disc + crossH;
+      float hazard = step(0.5, fract(floor(cell) * 0.5));          // odd dashes
+      float disc = (1.0 - smoothstep(prog * 0.9 - aa, prog * 0.9 + aa, r)) * (0.10 + 0.45 * prog);
+      vec2 xq = vec2(c.x + c.y, c.y - c.x) * 0.70710678;            // the frame turned 45 degrees: its axes are the x's arms
+      // arms 0.065 wide (≈ 8 cm on a 1.2 m splash: thinner ones bloomed away on High) and lifted toward white, so the x reads as a
+      // bright mark over the filling disc
+      float crossX = (1.0 - smoothstep(0.065, 0.065 + aa, min(abs(xq.x), abs(xq.y)))) * (1.0 - smoothstep(0.5, 0.62, r));
+      alpha = ringA * 0.95 + disc + crossX * 0.9;
+      col = mix(col, uHazard, ringA * hazard);
+      col = mix(col, mix(col, vec3(1.0), 0.35) * 1.25, crossX);
       col *= 1.0 + 0.5 * prog;
     } else if (k == 2) {
       // lane highlight: soft fill, bright rails, chevrons flowing toward the squad (+z), faded ends
@@ -370,7 +395,7 @@ const DECAL_FRAG = /* glsl */`
       vec2 d2 = c - 0.8 * vec2(sin(s * 5.3 + 2.0), cos(s * 5.3 + 2.0));
       float drops = (1.0 - smoothstep(0.07, 0.11, length(d1))) + (1.0 - smoothstep(0.05, 0.08, length(d2)));
       alpha = (blob * (0.5 + 0.3 * (1.0 - r)) + drops * 0.6) * (1.0 - prog);
-    } else {
+    } else if (k == 4) {
       // x-band: hazard-striped band with bright borders, pulsing
       float ax = abs(c.x);
       float edge = 1.0 - smoothstep(0.86, 1.0, ax);
@@ -379,6 +404,26 @@ const DECAL_FRAG = /* glsl */`
       float ends = smoothstep(0.0, 0.1, vUv.y) * (1.0 - smoothstep(0.85, 1.0, vUv.y));
       alpha = (0.14 + 0.26 * hz + 0.6 * border) * edge * ends * pulse;
       col *= 1.0 + 0.4 * border;
+    } else {
+      // swipe (round 7, r7 brute look): the brute's own telegraph — an amber crescent on its squad side (+z), from its body
+      // (uSwipe.x) to its real reach (the quad edge), uSwipe.y half-angle; a bright rim (outer arc + both radial edges), a fill
+      // sweeping outward with the 0.8 s telegraph / the swing cooldown, claw arcs flowing toward the squad, a strobe when it swings
+      float ang = atan(c.x, -c.y);                                   // 0 = straight toward the squad (+z)
+      float da = (abs(ang) - uSwipe.y) * r;                          // ~ distance to the radial edges (unit-disc units)
+      float side = 1.0 - smoothstep(-aa, aa, da);
+      float band = (1.0 - smoothstep(0.93 - aa, 0.93 + aa, r)) * smoothstep(uSwipe.x - aa, uSwipe.x + aa, r) * side;
+      float rimO = 1.0 - smoothstep(0.05 - aa, 0.05 + aa, abs(r - 0.9));
+      float rimS = 1.0 - smoothstep(0.035 - aa, 0.035 + aa, abs(da));
+      float rimMask = smoothstep(uSwipe.x - aa, uSwipe.x + aa, r) * (1.0 - smoothstep(0.93, 0.97, r));
+      float rim = max(rimO * side, rimS * rimMask);
+      float fillR = mix(uSwipe.x, 0.93, prog);
+      float fill = (1.0 - smoothstep(fillR - aa, fillR + aa, r)) * band * (0.14 + 0.36 * prog * prog);
+      float front = (1.0 - smoothstep(0.03 - aa, 0.03 + aa, abs(r - fillR))) * band * step(0.02, prog);
+      float claw = smoothstep(0.62, 0.78, fract(r * 3.2 - uTime * 1.8)) * band * 0.22;
+      float full = step(0.999, prog);
+      float strobe = full * band * (0.25 + 0.25 * sin(uTime * 30.0));
+      alpha = rim * (0.75 * pulse + 0.25 * full) + fill + front * 0.7 + claw + strobe;
+      col *= 1.0 + front * 0.5 + rim * 0.3;
     }
     alpha *= vFade;
     #ifdef USE_FOG
@@ -479,6 +524,8 @@ export function makeDecalMaterial(ctx) {
     uBandZ: { value: [DECAL_BAND_Z[0], DECAL_BAND_Z[1]] },
     uLift: { value: DECAL_Y },
     uGain: { value: DECAL_GAIN },
+    uHazard: { value: new Color(PALETTE.fx.hazard) },          // Color(hex) = linear working space (like uColors)
+    uSwipe: { value: [SWIPE_INNER, SWIPE_HALF_RAD] },
   });
   uniforms.uTime = sharedTime(ctx);
   const m = new ShaderMaterial({

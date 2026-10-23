@@ -2069,6 +2069,10 @@ function buildAttempt(L, seed, c, rng) {
     }
     events.push(ev);
   }
+  // round 7 (r7, teaching:0 F / teaching:1): the first mixed wave of LEVELS.curve.biteHintLevels (L2, L3) carries hintOnLoss
+  // 'bite', so a player whose L1 wave A took no bite still meets the bite lesson. Only a field is added — no rng draw, no
+  // placement change: the layout, the declared line and every validator number are unchanged
+  if (waves.length > 0 && cc.biteHintLevels && cc.biteHintLevels.indexOf(c.L) !== -1 && HINTS.bite) waves[0].hintOnLoss = 'bite';
   for (let j = 0; j < waves.length; j++) events.push(waves[j]);
   for (let j = 0; j < intros.length; j++) events.push(intros[j]);
   for (let j = 0; j < crates.length; j++) events.push(crates[j]);

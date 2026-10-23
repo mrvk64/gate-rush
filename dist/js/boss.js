@@ -1283,7 +1283,7 @@ export class BossSystem {
         atk.ax = cx; atk.az = cz;
         atk.radius = params.radius || hulkSlam.radius;
         atk.dur = params.telegraph || hulkSlam.telegraph;
-        atk.decal = this._decal('ring', atk.ax, atk.az, atk.radius * 2, atk.dur, PALETTE.boss.rage);
+        atk.decal = this._decal('ring', atk.ax, atk.az, atk.radius * 2, atk.dur, PALETTE.boss.rage, true);
         unit.pose[POSE_ARMS] = 1; unit.pose[POSE_CROUCH] = 0;
         atk.state = A_TELEGRAPH;
         this._emitAttack(kind, atk.ax, atk.az, atk.radius, atk.dur, -1);
@@ -1314,7 +1314,7 @@ export class BossSystem {
         atk.exec = params.duration || CHARGE_DURATION;
         atk.dur = params.telegraph || BOSSES.archetypes.hulk.phases[1].onEnter[0].telegraph;
         atk.ax = atk.laneX; atk.az = (unit.z + cz) / 2;
-        atk.decal = this._decal('lane', atk.laneX, atk.az, width, atk.dur + atk.exec, PALETTE.boss.rage);
+        atk.decal = this._decal('lane', atk.laneX, atk.az, width, atk.dur + atk.exec, PALETTE.boss.rage, true);
         unit.pose[POSE_LEAN] = 1; unit.pose[POSE_CROUCH] = 1;
         atk.state = A_TELEGRAPH;
         this._emitAttack(kind, atk.laneX, unit.z, half, atk.dur, atk.lane);
@@ -1324,7 +1324,7 @@ export class BossSystem {
         const band = params.band || BOSSES.archetypes.juggernaut.phases[1].onEnter[0].band;
         atk.ax = cx; atk.az = cz; atk.radius = band / 2;
         atk.dur = params.telegraph || BOSSES.archetypes.juggernaut.phases[1].onEnter[0].telegraph;
-        atk.decal = this._decal('xband', atk.ax, atk.az, band, atk.dur, PALETTE.boss.rage);
+        atk.decal = this._decal('xband', atk.ax, atk.az, band, atk.dur, PALETTE.boss.rage, true);
         this._throwCar(unit, atk.ax, atk.az, atk.dur);
         unit.pose[POSE_ARMS] = 1;
         atk.state = A_TELEGRAPH;
@@ -1469,10 +1469,15 @@ export class BossSystem {
     if (fx.emit) fx.emit('dust', x, 0.1, z, dust);
   }
 
-  _decal(kind, x, z, size, seconds, color) {
+  /**
+   * fx ground decal. Round 7 (r7 boss telegraph visibility): `onTop` = a telegraph that sits on the formation (the slam ring at the
+   * squad front, the charge stripe, the car band, the acid marks) — fx draws it without the depth test, so a big squad's bodies never
+   * hide its rim or its fill; the stomp ring at the boss stays depth-tested (the boss rig occludes it as before).
+   */
+  _decal(kind, x, z, size, seconds, color, onTop) {
     const fx = this._fx;
     if (!fx || !fx.decal) return -1;
-    const id = fx.decal(kind, x, z, size, seconds, color);
+    const id = fx.decal(kind, x, z, size, seconds, color, onTop === true);
     return (typeof id === 'number') ? id : -1;
   }
 
@@ -1535,7 +1540,7 @@ export class BossSystem {
     }
     g.tx[i] = tx; g.tz[i] = tz; g.t0[i] = this._t; g.T[i] = T; g.kills[i] = kills;
     g.spin[i] = this.ctx.rngFx ? this.ctx.rngFx.range(-6, 6) : 3;           // cosmetic tumble (rad/s)
-    g.decal[i] = this._decal('arc', tx, tz, ZOMBIES.spitter.spit.splash * 2, T, PALETTE.fx.acid);
+    g.decal[i] = this._decal('arc', tx, tz, ZOMBIES.spitter.spit.splash * 2, T, PALETTE.fx.acid, true);
   }
 
   _launchRainGlob(unit, params) {

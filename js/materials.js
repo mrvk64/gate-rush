@@ -15,7 +15,7 @@
 //
 //   gatePanel()  (gates.panels InstancedMesh; geometry = models.geo.gatePanel = PlaneGeometry(panel.w, panel.h),
 //                centred; the instance matrix already carries the triple x-scale AND the step punch)
-//     iPanel vec4 = (tintIdx + 8·maxed, stripeMix 0..1, flash 0..~1.5, ring01 0..1)
+//     iPanel vec4 = (tintIdx + 8·maxed, stripeMix 0..1, flash 0..~1.5, ring01 0..1 + 2·reach)
 //                   tintIdx: 0 plus, 1 mult, 2 minus, 3 div, 4 zero (x1 / 0, neutral grey), 5 item
 //                            (= GATE_RULES.colors key order); +8 = gold MAX badge (pill centred
 //                            GATE_RULES.glyph.badgeLift above the top edge, under the 3 "MAX" glyph quads gates
@@ -26,7 +26,12 @@
 //                   flash: 0..1 hit flash (brightens the type's own tint, also pulses the MAX pill);
 //                          above 1 (to 1.5) adds the white flip flash on top;
 //                   ring01: x / ÷ step progress → 360° gauge around the panel edge (clockwise from the
-//                           top centre); a mult / div panel shows the empty track at 0; 1 = full ring.
+//                           top centre); a mult / div panel shows the empty track at 0; 1 = full ring. Round 7
+//                           (r7 teaching:4): + progress to MAX, − progress to the flip (a red panel shows its empty
+//                           track from spawn too); ÷ reads full on its final ×1 rung.
+//                   reach (round 7): + 2 on w = the gate reaches its goal before the stop line at the rate it is
+//                           shot → the band takes the colour it is heading for (red → the + blue, + → gold, x / ÷ →
+//                           white) and the head pulses. Same program (no new variant).
 //     iScale float = 1 | GATE_RULES.panel.wTriple / GATE_RULES.panel.w — NOT applied to the position
 //                    (the matrix has it); used to keep stripes, ring, rim and badge in true metres.
 //     The quad is grown in the vertex shader by a few cm on every side (soft outer halo) and further at the
@@ -87,6 +92,12 @@ const RING_HALF_W_M = 0.065;          // ring gauge half thickness
 // districts, the ad included. The full ring still pulses, by up to RING_PULSE below the cap.
 const RING_LUM_CAP = RENDER.bloom.threshold - 0.05;
 const RING_PULSE = 0.3;
+// Round 7 (r7 teaching:4): a red gate's gauge is the "will it flip in time?" read, so its two states must differ by hue at a glance:
+// the band is a saturated red (white mix RING_WHITE_RED instead of 0.5) while it will not make it, and a saturated + blue at
+// REACH_BLUE_LUM luminance (normalised to RING_LUM_CAP the blue washed out to a pale cyan next to the pale pink) once it will
+const RING_WHITE_RED = 0.15;
+const RING_RED_LUM = 0.38;      // (at RING_LUM_CAP the ACES grade turned the red band pink-white)
+const REACH_BLUE_LUM = 0.42;
 // The frame top bar (GATE_RULES.frame.postH) hides the panel top above it: the ring and the top hazard band are
 // pushed below it so they stay visible from the gameplay camera.
 const FRAME_COVER_M = Math.max(0, GATE_RULES.panel.bottom + GATE_RULES.panel.h - GATE_RULES.frame.postH);
@@ -355,10 +366,14 @@ const PANEL_FRAG = /* glsl */`
     vec3 tint = uTints[ti];
     float stripeMix = clamp(vPanel.y, 0.0, 1.0);
     float flash = clamp(vPanel.z, 0.0, 1.5);
-    float ring = clamp(vPanel.w, 0.0, 1.0);
+    // round 7 (r7 teaching:4): w = ring01 + 2·reach (gates' REACH_FLAG: the gate reaches its goal before the stop line at the rate
+    // it is being shot)
+    float reach = step(1.5, vPanel.w);
+    float ring = clamp(vPanel.w - 2.0 * reach, 0.0, 1.0);
     float isZero = ti == 4 ? 1.0 : 0.0;
     float isItem = ti == 5 ? 1.0 : 0.0;
-    float gauge = (ti == 1 || ti == 3 || ring > 0.0005) ? 1.0 : 0.0;
+    // the empty track shows from spawn on x, ÷ and (round 7) red gates — each has something to fill; + gates show it once shot
+    float gauge = (ti == 1 || ti == 2 || ti == 3 || ring > 0.0005) ? 1.0 : 0.0;
     float ff = grGateFog();                                      // raw fog factor (distance cue for alpha / saturation)
 
     vec2 hb = vec2(vHalfW, uHalf.y);
@@ -441,8 +456,13 @@ const PANEL_FRAG = /* glsl */`
       float full = step(0.999, ring);
       // the fill never blooms (luminance capped under the threshold: a blooming full ring washed the plate it frames); a full
       // ring pulses below the cap
-      vec3 fillCol = mix(tint * 1.8, vec3(1.0), 0.5);
-      fillCol *= ${glf(RING_LUM_CAP)} / max(dot(fillCol, vec3(0.2126, 0.7152, 0.0722)), 1e-3);
+      vec3 fillCol = mix(tint * 1.8, vec3(1.0), ti == 2 ? ${glf(RING_WHITE_RED)} : 0.5);
+      fillCol *= (ti == 2 ? ${glf(RING_RED_LUM)} : ${glf(RING_LUM_CAP)}) / max(dot(fillCol, vec3(0.2126, 0.7152, 0.0722)), 1e-3);
+      // round 7 (reach): the band takes the colour the gate is heading for — a red gate that will flip reads + blue, a + gate
+      // that will MAX gold, x / ÷ white — under the capped luminance (no bloom), so "it will make it" reads before it does
+      vec3 reachCol = ti == 2 ? uTints[0] : (ti == 0 ? uGold : vec3(1.0));
+      reachCol *= (ti == 2 ? ${glf(REACH_BLUE_LUM)} : ${glf(RING_LUM_CAP)}) / max(dot(reachCol, vec3(0.2126, 0.7152, 0.0722)), 1e-3);
+      fillCol = mix(fillCol, reachCol, reach * (1.0 - full));
       fillCol *= 1.0 - ${glf(RING_PULSE)} * full * (0.5 + 0.5 * sin(uTime * 6.0 * uMotion));
       col = mix(col, uDark, trackMask * 0.92);
       alpha = max(alpha, 0.82 * trackMask);
@@ -451,6 +471,7 @@ const PANEL_FRAG = /* glsl */`
       // bright head at the progress end
       float dh = abs(a01 - ring);
       float head = exp(-dh * 70.0) * (1.0 - full) * step(0.0005, ring) * (1.0 - smoothstep(-aa, aa, rd - 0.03)) * inside;
+      head *= 1.0 + reach * (0.6 + 0.4 * sin(uTime * 10.0 * uMotion));   // round 7: a reaching gauge's head pulses
       col += vec3(1.0) * head * 1.2;
       alpha = max(alpha, head);
     }

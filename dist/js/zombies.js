@@ -32,7 +32,7 @@ import {
   MeshStandardMaterial, Color,
 } from 'three';
 import { clamp } from './util.js';
-import { WORLD, ZOMBIES, WAVE_PATTERNS, ECONOMY, TROOPS, FIRE, PALETTE, RENDER } from './data.js';
+import { WORLD, ZOMBIES, WAVE_PATTERNS, ECONOMY, TROOPS, FIRE, PALETTE, RENDER, JUICE } from './data.js';
 import { CharacterInstances } from './models.js';
 
 // ---------------------------------------------------------------------------------------------
@@ -183,8 +183,10 @@ for (let t = 0; t < NTYPES; t++) {
   BLOB_SCALE[t] = DEF[t].radius / RENDER.blobShadow.radius;
 }
 
-/** Telegraph decal colours (GDD J11 red ring, GDD §6.1 green arc). */
-const RING_COLOR = PALETTE.flash.red;
+/** Telegraph decal colours (GDD §6.1 green acid arc). Round 7 (r7 brute look): the brute's telegraph is no longer the boss's red
+ *  3 m ring (the tester called it "Hulk slam") but its own amber swipe arc sized to its real reach (JUICE.telegraph). */
+const BRUTE_COLOR = PALETTE.fx.brute;
+const BRUTE_REACH_M = JUICE.telegraph.bruteReachM;
 const ARC_COLOR = PALETTE.fx.acid;
 
 // Burn tint (PALETTE.zombie.burning → linear rgb) applied as a multiplier on the base tint: the red
@@ -1398,10 +1400,11 @@ export class Zombies {
         if (!frozen && !squad.invulnerable && this._timer[s] <= 0 && (flags & F_RING_DONE) !== 0) {
           if (this._swings[s] >= BRUTE_MAX_SWINGS) flags = this._beginBackoff(s, flags);
           else {
-            this._removeSoldiersAt(s, BITE[T_BRUTE]);       // one call with n = 3 → 3 armour plates (ARCH §6.5)
+            const kb = this._bruteKills(squad.count);       // r7: ≤ 3, fewer against a small squad (ZOMBIES.brute.swing.killsFrac)
+            this._removeSoldiersAt(s, kb);                  // one call with n = kb → kb armour plates (ARCH §6.5)
             this._swings[s]++;
             this._timer[s] = ZOMBIES.brute.swing.cooldown;
-            this._emitBite(s, BITE[T_BRUTE]);
+            this._emitBite(s, kb);
           }
         }
       }
@@ -1413,6 +1416,20 @@ export class Zombies {
     if (bite > 0) { this._removeSoldiersAt(s, bite); this._emitBite(s, bite); }
     this._die(s, 'bite');                                   // one bite, one soldier; the biter dies (no coins)
     return true;
+  }
+
+  /**
+   * r7 (balance:5, GDD §6.1): soldiers one brute swing at the formation kills — clamp(round(ZOMBIES.brute.swing.killsFrac · C),
+   * 1, BITE[T_BRUTE]): 3 from C ≈ 42 up, 2 at 25–41, 1 below 25 (a flat 3 per second took 6–10 % of a 30–50 squad and caused
+   * 43–49 % of a below-curve player's bite losses). Without the key: the full bite. The APC swing branch keeps the full bite;
+   * ZOMBIES.brute.bite (the leak model's weight) is unchanged, so the generator and validator are too.
+   */
+  _bruteKills(c) {
+    const f = ZOMBIES.brute.swing.killsFrac;
+    const full = BITE[T_BRUTE];
+    if (!(f > 0)) return full;
+    const k = Math.round(f * c);
+    return k < 1 ? 1 : (k > full ? full : k);
   }
 
   /** Integrates the slot's velocity (x clamped to the road), recycles it behind the camera, eases the facing, burn tint, ring. */
@@ -1462,15 +1479,19 @@ export class Zombies {
     this._emitTelegraph(s, kind, this._x[s], this._z[s], radius, duration);
   }
 
-  /** Brute ring telegraph: red ground decal (r ringR, infinite, follows the brute) + zombie:telegraph 'ring'. */
+  /**
+   * Brute telegraph: ground decal (infinite, follows the brute) + zombie:telegraph 'ring' (the event kind is unchanged: audio's roar).
+   * Round 7 (r7 brute look): an amber 'swipe' arc on the brute's squad side, radius JUICE.telegraph.bruteReachM (its real reach at the
+   * formation front), drawn over the formation (onTop) — the red 3 m ring read as the boss's slam.
+   */
   _startRing(s) {
     const sw = ZOMBIES.brute.swing;
     const x = this._x[s], z = this._z[s];
     if (this._ringDecal[s] < 0) {
-      const id = this.ctx.fx.decal('ring', x, z, sw.ringR * 2, Infinity, RING_COLOR);
+      const id = this.ctx.fx.decal('swipe', x, z, BRUTE_REACH_M * 2, Infinity, BRUTE_COLOR, true);
       this._ringDecal[s] = (typeof id === 'number' && id >= 0) ? id : -1;
     }
-    this._emitTelegraph(s, 'ring', x, z, sw.ringR, sw.telegraph);
+    this._emitTelegraph(s, 'ring', x, z, BRUTE_REACH_M, sw.telegraph);
   }
 
   /** Moves a brute's ring decal onto it and shows the fill (0.8 s telegraph) or, between swings, the cooldown gauge. */
@@ -1597,7 +1618,9 @@ export class Zombies {
       const left = this._gDur[g] - tcur;
       if (!this._gPreview[g] && left <= sp.preview) {
         this._gPreview[g] = 1;
-        const id = ctx.fx.decal('arc', this._gTx[g], this._gTz[g], sp.splash * 2, sp.preview, ARC_COLOR);
+        // r7 INT (with C's boss telegraph visibility): the glob lands at the squad's predicted x, so a big formation hid
+        // the arc — drawn on top like the Queen's acid marks (fx.decalsTop: same program, no depth test)
+        const id = ctx.fx.decal('arc', this._gTx[g], this._gTz[g], sp.splash * 2, sp.preview, ARC_COLOR, true);
         this._gDecal[g] = (typeof id === 'number' && id >= 0) ? id : -1;
         P_TELE.id = this._gOwner[g]; P_TELE.kind = 'spit'; P_TELE.x = this._gTx[g]; P_TELE.z = this._gTz[g];
         P_TELE.radius = sp.splash; P_TELE.duration = left > 0 ? (left < sp.preview ? left : sp.preview) : 0;

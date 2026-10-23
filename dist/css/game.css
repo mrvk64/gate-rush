@@ -242,6 +242,32 @@ html:not(.pointer-input) #ui input[type="range"]:focus-visible, html:not(.pointe
   transition: visibility 0s linear var(--screen-fade, 160ms);
 }
 
+/* round 7 (r7, layout:5): a safety net — a stack taller than its box (the title, results and pause stacks at 200 %
+   browser zoom of a 594 px window = 297 css px, where --ui is floored at 0.85) scrolls instead of clipping. Centred
+   screens centre "safely": when the stack overflows it starts at the top, so its first line is never pushed above the
+   box where no scroll can reach it (browsers without `safe` keep plain centring). Scrolling appears only on overflow
+   and the scrollbar stays hidden; #scr-title keeps pointer-events none (UI never swallows a drag — a wheel or a
+   swipe over its buttons scrolls it, ui._wheel forwards a wheel over its background). Settings, levels and shop
+   have their own scroll boxes (sections 11 / 12). */
+#scr-title, #scr-complete, #scr-gameover, #scr-endless, #scr-pause {
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  scrollbar-width: none;
+}
+#scr-title::-webkit-scrollbar, #scr-complete::-webkit-scrollbar, #scr-gameover::-webkit-scrollbar,
+#scr-endless::-webkit-scrollbar, #scr-pause::-webkit-scrollbar { display: none; }
+#scr-complete, #scr-gameover, #scr-endless, #scr-pause {
+  justify-content: center;
+  justify-content: safe center;
+}
+/* a control the keyboard focuses inside a scrolling screen stops clear of the safe edges, not flush with them */
+#scr-title, #scr-complete, #scr-gameover, #scr-endless, #scr-pause, #scr-settings {
+  scroll-padding-top: var(--safe-top);
+  scroll-padding-bottom: var(--safe-bottom);
+}
+
 /* =============================================================================================
    4. Typography
    ============================================================================================= */
@@ -443,10 +469,49 @@ h1.danger, .danger:not(.btn) { color: var(--danger); }
 .btn.danger.confirm { animation: confirm-pulse 0.5s ease-in-out infinite alternate; }
 @keyframes confirm-pulse { from { filter: brightness(1); } to { filter: brightness(1.25) saturate(1.2); } }
 /* round 5 integration: a menu start waiting for its generated level script (ui._startLevel → level.requestStart: a few frames
-   unthrottled, ≈ 0.5 s at 4× for a cold L13 / L19 / L28) — the tapped PLAY / NEXT / level tile pulses until the run starts */
-.btn.starting, .tile.starting { animation: confirm-pulse 0.5s ease-in-out infinite alternate; }
-html.reduced-motion .btn.starting, html.reduced-motion .tile.starting { filter: brightness(1.25); }
-@media (prefers-reduced-motion: reduce) { .btn.starting, .tile.starting { filter: brightness(1.25); } }
+   unthrottled, ≈ 0.5 s at 4× for a cold L13 / L19 / L28) — the tapped PLAY / NEXT / RETRY / level tile shows it until the run
+   starts. Round 7 (r7, flow-coins:3): a spinner, not the 0.5 s brightness pulse a tester never noticed in 1–5 s of waiting
+   on a no-GPU box (ui adds aria-busy too). A transform animation on its own pseudo-element: the compositor keeps turning it
+   while the main thread is busy. Buttons: inside the right edge (#btn-play's own ::after cta ring gives way to it); tiles: a
+   small badge at the top-left corner (the milestone skull holds the top-right). Reduced motion: a still ring. */
+.btn.starting, .tile.starting { cursor: progress; }
+.btn.starting::after, #btn-play.starting::after {
+  content: "";
+  position: absolute;
+  inset: auto;
+  top: 50%;
+  right: calc(14 * var(--u));
+  width: calc(18 * var(--u));
+  height: calc(18 * var(--u));
+  margin-top: calc(-9 * var(--u));
+  border-radius: 50%;
+  border: 3px solid rgba(0, 0, 0, 0.22);
+  border-top-color: currentColor;
+  opacity: 1;
+  transform: none;
+  animation: spin 0.8s linear infinite;
+  pointer-events: none;
+}
+.btn.secondary.starting::after { right: calc(8 * var(--u)); width: calc(14 * var(--u)); height: calc(14 * var(--u)); margin-top: calc(-7 * var(--u)); border-width: 2.5px; }
+.panel .btn.secondary.starting::after { right: calc(14 * var(--u)); width: calc(18 * var(--u)); height: calc(18 * var(--u)); margin-top: calc(-9 * var(--u)); border-width: 3px; }
+.tile.starting::before {
+  content: "";
+  position: absolute;
+  top: calc(-6 * var(--u));
+  left: calc(-6 * var(--u));
+  width: calc(22 * var(--u));
+  height: calc(22 * var(--u));
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.28);
+  border-top-color: var(--primary-hi);
+  background: rgba(11, 15, 26, 0.88);
+  box-shadow: 0 0 0 2px var(--outline);
+  animation: spin 0.8s linear infinite;
+  pointer-events: none;
+  z-index: 1;
+}
+html.reduced-motion .btn.starting::after, html.reduced-motion #btn-play.starting::after, html.reduced-motion .tile.starting::before { display: block; animation: none; }
+@media (prefers-reduced-motion: reduce) { .btn.starting::after, #btn-play.starting::after, .tile.starting::before { display: block; animation: none; } }
 
 /* round-3 FTUE: a SHOP button (title, results, game over) wears a red "!" notification badge while the coins buy at least
    one more rank (ui._syncShopBadges). Non-interactive; it pulses on the compositor (transform only) and holds still under
@@ -904,6 +969,13 @@ html.reduced-motion .btn.starting, html.reduced-motion .tile.starting { filter: 
   z-index: 2;
 }
 #hud.boss-on #powerups { top: calc(var(--safe-top) + 110 * var(--u) + max(14px, calc(18 * var(--u))) + 12 * var(--u)); }
+/* r7 fix (hud verifier): with Large text the name's box (×1.15 type) reached up 10 px into the progress bar and over the
+   skull ("COLOSSUS PRIME" at 1024 × 594, as in 1.2.2): the bar sits 14u lower then, the power-up row with it. Not on a
+   short landscape box, where the bar shares the top row (its own rule below) */
+@media not all and (orientation: landscape) and (max-height: 500px) {
+  html.large-text #bossbar { top: calc(var(--safe-top) + 124 * var(--u)); }
+  html.large-text #hud.boss-on #powerups { top: calc(var(--safe-top) + 124 * var(--u) + max(14px, calc(18 * var(--u))) + 12 * var(--u)); }
+}
 #boss-name {
   position: absolute;
   left: 0;
@@ -979,6 +1051,12 @@ html.reduced-motion .btn.starting, html.reduced-motion .tile.starting { filter: 
   z-index: 2;
 }
 #bossbar.shielded #boss-name { color: #CFE8FF; text-shadow: var(--stroke-2), 0 3px 0 var(--outline), 0 0 14px rgba(127, 232, 255, 0.6); }
+/* round 7 (r7, teaching:3): a phase change flashes "PHASE 2" / "ENRAGED" in the bar's name for 1.5 s (ui; the bar's colour
+   tells the phase from then on). r7 fix: the phase alone, in place of the name, at every size — "COLOSSUS PRIME · PHASE 2"
+   ran into the progress skull wherever the bar hangs under the progress bar (portrait, and landscape over 500 px tall:
+   25–27 × 9 px at the tester's 1024 × 594); the short-landscape rule that did this is now the rule */
+#boss-name .bn-phase { color: #FFE9C2; }
+#bossbar.phase-flash .bn-name { display: none; }
 @keyframes rage-name { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }   /* UI-22: opacity (compositor), not text-shadow */
 
 /* cinematic letterbox (boss intro): 8 % bars behind the HUD chrome */
@@ -1104,6 +1182,39 @@ html.reduced-motion .btn.starting, html.reduced-motion .tile.starting { filter: 
 #btn-fire.busy .fire-icon { opacity: 0.5; filter: grayscale(0.7) drop-shadow(0 1px 0 rgba(0, 0, 0, 0.6)); }
 #btn-fire.busy .fire-label { display: none; }
 #btn-fire:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+/* round 7 (r7, controls:3): Space / gamepad A with nothing stored — the empty slot shows for 0.9 s (ui._fireEmpty: fade in,
+   a "no" shake, fade out): a dark ring, a dim disc without a pictogram, a grey "EMPTY" tag. It takes no pointer (a touch
+   player never sees it: only the keys reach it) */
+#btn-fire.empty { cursor: default; pointer-events: none; }
+#btn-fire.empty .fire-ring { background: rgba(15, 22, 38, 0.88) !important; }
+#btn-fire.empty .fire-disc { opacity: 0.3; }
+#btn-fire.empty .fire-icon { opacity: 0; }
+#btn-fire.empty .fire-label { background: linear-gradient(180deg, #5A6478, #3A4252); color: var(--text); }
+#btn-fire.empty::after { animation: none; opacity: 0; }
+/* r7 (controls:4 / teaching:8): with a mouse the button wears its key — a small dark "SPACE" key cap under the FIRE tag
+   (inside the 16 px bottom safe floor + 18u that the button sits above); hidden on touch and while a weapon runs (Space is
+   refused then, like a tap) */
+#btn-fire .fire-key { display: none; }
+@media (pointer: fine) {
+  #btn-fire .fire-key {
+    display: block;
+    left: 50%;
+    top: calc(100% + 7 * var(--u) + 3px);
+    transform: translateX(-50%);
+    padding: 1px calc(6 * var(--u));
+    border-radius: 4px;
+    background: rgba(8, 12, 22, 0.82);
+    box-shadow: inset 0 -2px 0 rgba(255, 255, 255, 0.08), 0 0 0 1.5px rgba(255, 255, 255, 0.22);
+    color: var(--text);
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: var(--fs-micro);
+    line-height: 1.15;
+    letter-spacing: 0.08em;
+    white-space: nowrap;
+  }
+  #btn-fire.busy .fire-key { display: none; }
+}
 /* the hint pill moves left, clear of the button, while it shows (same bottom band) */
 #hud.fire-on #hint {
   right: calc(var(--fire-right) + var(--fire-size) + 10 * var(--u));
@@ -1168,12 +1279,18 @@ html.reduced-motion .btn.starting, html.reduced-motion .tile.starting { filter: 
   will-change: transform, opacity;
 }
 @keyframes ripple { 0% { opacity: 0.9; transform: scale(0.6); } 100% { opacity: 0; transform: scale(2); } }
+/* round 7 (r7, teaching:0 D): a 2 px rim says what the lesson is about — red: it costs soldiers / dodge it, green: it grows
+   the squad (ui writes data-tone from its id); info hints keep the plain pill */
+#hint[data-tone="warn"] { box-shadow: 0 0 0 2px var(--danger), 0 0 14px rgba(255, 59, 78, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 4px 12px rgba(0, 0, 0, 0.35); }
+#hint[data-tone="gain"] { box-shadow: 0 0 0 2px var(--success), 0 0 14px rgba(59, 229, 122, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 4px 12px rgba(0, 0, 0, 0.35); }
 #hint-text {
   display: block;
   min-width: 0;
   font-family: var(--font-display);
   font-weight: 400;
-  font-size: calc(21px * var(--ui) * var(--text-scale));   /* JUICE.ui.hintTextPx band 20–22 */
+  /* JUICE.ui.hintTextPx band 20–22; r7 (teaching:0 D): never under 20 css px (the 0.85 --ui floor made it 17.85 px at
+     1024 × 594), 24 on wide landscape boxes (below) */
+  font-size: max(calc(21px * var(--ui) * var(--text-scale)), 20px);
   line-height: 1.12;
   letter-spacing: 0.03em;
   text-align: center;
@@ -1242,6 +1359,47 @@ html.reduced-motion .btn.starting, html.reduced-motion .tile.starting { filter: 
   text-shadow: var(--stroke-3), 0 5px 0 var(--outline), 0 0 24px rgba(255, 59, 78, 0.85);
   white-space: nowrap;
 }
+/* round 7 (r7, teaching:3): the archetype's tagline under its name ("DODGE HIS SLAM · HE CHARGES LATER"; STRINGS.boss.tagline,
+   numbers from BOSSES) — one line where it fits, balanced into two on a phone */
+#namecard .nc-tag {
+  margin-top: calc(4 * var(--u));
+  max-width: min(calc(340 * var(--u)), calc(100vw - 72px));
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: max(13px, calc(16px * var(--ui) * var(--text-scale)));
+  line-height: 1.15;
+  letter-spacing: 0.05em;
+  text-align: center;
+  color: #FFE9C2;
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.7);
+  text-wrap: balance;
+}
+#namecard .nc-tag:empty { display: none; }
+/* r7 fix (teaching:3): each phrase is one box ("ACID FROM ABOVE ·"), so a line breaks only between phrases (ui _buildTagline);
+   top-aligned so phrases on one line share their top (ui compares the tops to find a broken line). A gap that broke becomes
+   the line break and the dot before it goes (_breakTagline: no line ends in a hanging " ·") */
+#namecard .nc-ph { display: inline-block; vertical-align: top; }
+#namecard .nc-gap.nc-br { display: block; height: 0; overflow: hidden; }
+#namecard .nc-dot.nc-br { display: none; }
+
+/* round 7 (r7, explain:6): the squad count docked in the bottom letterbox bar while the boss-intro dolly has the world
+   label faded and the squad under the bars ("144 SOLDIERS"; 8 % of the app box: 27 px at 339 tall, 67 at 844) */
+#letterbox-bottom .lb-count {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  text-align: center;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: min(var(--fs-body), 5vh);       /* inside the 8 vh bar at any height */
+  line-height: 1;
+  letter-spacing: 0.06em;
+  color: #FFFFFF;
+  text-shadow: var(--stroke-2);
+  white-space: nowrap;
+}
 
 /* round 5 — district banner (DISTRICTS.md §5): a hint-style pill centred in the #powerups row (empty at level start),
    "DISTRICT n · NAME" in the display face with a 3 px rule in the district's accent under it (ui writes --db-accent /
@@ -1293,6 +1451,79 @@ html.reduced-motion .btn.starting, html.reduced-motion .tile.starting { filter: 
   border-radius: 2px;
   background: var(--db-accent);
   box-shadow: 0 0 6px var(--db-glow), 0 1px 0 rgba(4, 7, 14, 0.6);
+}
+/* round 7 (r7, explain:4): the big card on a district's first level / an endless rotation — "NEW DISTRICT 2" over the name,
+   the name a size up; the small pill ("NIGHT CITY · 3/5") everywhere else */
+#district-banner { flex-direction: column; }
+#district-banner .db-kicker {
+  display: block;
+  font-family: var(--font-body);
+  font-weight: 800;
+  font-size: var(--fs-micro);
+  line-height: 1.2;
+  letter-spacing: 0.14em;
+  color: var(--db-accent);
+  text-shadow: 0 1px 0 rgba(4, 7, 14, 0.8), 0 0 8px var(--db-glow);
+  white-space: nowrap;
+}
+#district-banner .db-kicker[hidden] { display: none; }
+#district-banner.db-new { padding: calc(8 * var(--u)) calc(24 * var(--u)) calc(12 * var(--u)); border-radius: calc(22 * var(--u)); }
+#district-banner.db-new .db-text { font-size: var(--fs-h3); letter-spacing: 0.05em; }
+
+/* round 7 (r7, teaching:5): the NEW card — a special's or gate rule's first encounter, before the choice ("NEW · MEDIC ·
+   +2 % SOLDIERS EVERY 4 S (UP TO +60)"), in the district banner's slot (it waits for the banner and never shows under the
+   boss bar; ui) and its pill look, with the item's pictogram on a light disc and a rule in the item's colour */
+#newcard {
+  --ncd-accent: #C77DFF;
+  top: calc(var(--safe-top) + var(--icon-btn) + 32 * var(--u));
+  left: 0;
+  right: 0;
+  margin: 0 auto;
+  width: max-content;
+  max-width: min(calc(100% - 32px), calc(420 * var(--u)));
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--u));
+  padding: calc(7 * var(--u)) calc(16 * var(--u)) calc(9 * var(--u)) calc(8 * var(--u));
+  border-radius: calc(20 * var(--u));
+  background:
+    radial-gradient(60% 90% at 0% 50%, rgba(199, 125, 255, 0.22), rgba(0, 0, 0, 0) 70%),
+    linear-gradient(180deg, rgba(26, 38, 64, var(--hint-alpha)), rgba(8, 12, 22, var(--hint-alpha)));
+  box-shadow: 0 0 0 2px var(--ncd-accent), inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 4px 14px rgba(0, 0, 0, 0.4);
+  contain: layout;
+  z-index: 2;
+}
+#hud.pu-on #newcard { top: calc(var(--safe-top) + var(--icon-btn) + 32 * var(--u) + var(--pill-h) + 8 * var(--u)); }
+#newcard .ncd-icon { flex: none; width: calc(44 * var(--u)); height: calc(44 * var(--u)); }
+#newcard .ncd-body { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; text-align: left; }
+#newcard .ncd-kicker {
+  font-family: var(--font-body);
+  font-weight: 800;
+  font-size: var(--fs-micro);
+  line-height: 1.1;
+  letter-spacing: 0.16em;
+  color: var(--coin);
+  text-shadow: 0 1px 0 rgba(4, 7, 14, 0.8);
+}
+#newcard .ncd-name {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: var(--fs-h3);
+  line-height: 1.05;
+  letter-spacing: 0.04em;
+  color: #FFFFFF;
+  text-shadow: var(--stroke-2), 0 3px 0 var(--outline);
+  white-space: nowrap;
+}
+#newcard .ncd-line {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: max(12px, calc(14px * var(--ui) * var(--text-scale)));
+  line-height: 1.15;
+  letter-spacing: 0.04em;
+  color: #E7ECF6;
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.65);
+  text-wrap: balance;
 }
 
 /* full-screen flash / damage vignette (ui writes colour + opacity inline) and DOM coin flights */
@@ -1394,7 +1625,7 @@ html.reduced-motion .btn.starting, html.reduced-motion .tile.starting { filter: 
 }
 #scr-title::before {
   content: "";
-  position: absolute;
+  position: fixed;                           /* r7 (layout:5): the viewport box — the scrim stays put if the stack scrolls */
   inset: 0;
   z-index: -1;
   pointer-events: none;
@@ -1404,7 +1635,9 @@ html.reduced-motion .btn.starting, html.reduced-motion .tile.starting { filter: 
 }
 #scr-title .logo-big { margin-bottom: auto; }
 #btn-settings { position: absolute; top: var(--safe-top); left: var(--safe-left); }
-#btn-fullscreen { position: absolute; top: var(--safe-top); left: calc(var(--safe-left) + var(--icon-btn) + 10px); }
+/* round 7 (r7, teaching:5): the FIELD GUIDE's "?" takes the second slot of the top-left cluster, fullscreen the third */
+#btn-guide { position: absolute; top: var(--safe-top); left: calc(var(--safe-left) + var(--icon-btn) + 10px); }
+#btn-fullscreen { position: absolute; top: var(--safe-top); left: calc(var(--safe-left) + 2 * (var(--icon-btn) + 10px)); }
 #title-coins {
   position: absolute;
   top: calc(var(--safe-top) + (var(--icon-btn) - var(--pill-h)) / 2);
@@ -1501,11 +1734,29 @@ html.reduced-motion .btn.starting, html.reduced-motion .tile.starting { filter: 
   -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
 }
-#level-grid::-webkit-scrollbar, #shop-list::-webkit-scrollbar, #scr-settings::-webkit-scrollbar { display: none; }
+/* round 7 (r7, layout:0): touch screens keep the clean look (no scrollbar; a swipe scrolls) … */
+@media (hover: none), (pointer: coarse) {
+  #level-grid::-webkit-scrollbar, #shop-list::-webkit-scrollbar, #scr-settings::-webkit-scrollbar { display: none; }
+}
+/* … while a mouse user sees that a list scrolls: a thin light scrollbar on a transparent track (the tester read the
+   hidden one as "levels 27–30 cut off"); both-edges gutters keep the centred columns centred */
+@media (hover: hover) and (pointer: fine) {
+  #level-grid, #shop-list, #scr-settings, #endless-stats {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(244, 241, 234, 0.45) transparent;
+  }
+  /* the lists keep their centred columns centred; SETTINGS (a whole screen) reserves nothing, so its two landscape
+     columns keep their width (at 512 px a both-edges gutter took 20 px from the segmented controls' rows) */
+  #level-grid, #shop-list, #endless-stats { scrollbar-gutter: stable both-edges; }
+}
 
-/* level grid: 4 columns of 76 × 76 */
+/* level grid: 4 columns of 76 × 76 (landscape: 8 / 6 / 4, section 15).
+   Round 7 (r7, layout:0): the scroll box spans the screen's width (align-self: stretch; justify-content keeps the
+   columns centred), so a wheel or a swipe anywhere across the band between the heading and BACK scrolls it — the
+   shrink-wrapped 312 px box let a wheel in the gutters fall through the pointer-events:none screen to the canvas */
 #level-grid {
   flex: 0 1 auto;
+  align-self: stretch;
   min-height: 0;
   overflow-y: auto;
   display: grid;
@@ -1514,9 +1765,14 @@ html.reduced-motion .btn.starting, html.reduced-motion .tile.starting { filter: 
   gap: calc(12 * var(--u));
   justify-content: center;
   padding: calc(14 * var(--u)) calc(14 * var(--u)) calc(22 * var(--u));
-  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 14px, #000 calc(100% - 22px), transparent 100%);
-  mask-image: linear-gradient(180deg, transparent 0, #000 14px, #000 calc(100% - 22px), transparent 100%);
+  /* r7 fix round 3: an edge fades only while more lies beyond it (ui._listFade sets .fade-t / .fade-b; section 11) */
+  --fade-t: 0px;
+  --fade-b: 0px;
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 var(--fade-t), #000 calc(100% - var(--fade-b)), transparent 100%);
+  mask-image: linear-gradient(180deg, transparent 0, #000 var(--fade-t), #000 calc(100% - var(--fade-b)), transparent 100%);
 }
+#level-grid.fade-t { --fade-t: 14px; }
+#level-grid.fade-b { --fade-b: 22px; }
 .tile {
   position: relative;
   display: flex;
@@ -1708,9 +1964,17 @@ html.reduced-motion .btn.starting, html.reduced-motion .tile.starting { filter: 
   align-items: center;
   gap: calc(10 * var(--u));
   padding: calc(8 * var(--u)) calc(8 * var(--u)) calc(18 * var(--u));   /* 390 − 2 × 8 safe − 2 × 8 = 358 px cards */
-  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 10px, #000 calc(100% - 18px), transparent 100%);
-  mask-image: linear-gradient(180deg, transparent 0, #000 10px, #000 calc(100% - 18px), transparent 100%);
+  /* r7 fix round 3 (layout verifier): the fades mark more content beyond an edge — ui._listFade sets .fade-t while the
+     list is scrolled down and .fade-b while more is below. Always on, the bottom 18 px dimmed the last card's "~1 run
+     away" when the list fitted exactly (568 × 320, 585 × 340, 640 × 360) and, up to 340 px tall (a 3 px bottom pad), even
+     scrolled to the end */
+  --fade-t: 0px;
+  --fade-b: 0px;
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 var(--fade-t), #000 calc(100% - var(--fade-b)), transparent 100%);
+  mask-image: linear-gradient(180deg, transparent 0, #000 var(--fade-t), #000 calc(100% - var(--fade-b)), transparent 100%);
 }
+#shop-list.fade-t { --fade-t: 10px; }
+#shop-list.fade-b { --fade-b: 18px; }
 .card {
   flex: none;
   display: grid;
@@ -1745,7 +2009,7 @@ html.reduced-motion .btn.starting, html.reduced-motion .tile.starting { filter: 
   background-position: center;
   box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.08), inset 0 -4px 8px rgba(0, 0, 0, 0.3);
 }
-.card-body { display: flex; flex-direction: column; gap: calc(4 * var(--u)); min-width: 0; }
+.card-body { display: flex; flex-direction: column; gap: calc(3 * var(--u)); min-width: 0; }   /* r7 fix: 4u → 3u (a card has a "what" line now) */
 .card-name {
   font-family: var(--font-display);
   font-weight: 400;
@@ -1781,14 +2045,43 @@ html.reduced-motion .btn.starting, html.reduced-motion .tile.starting { filter: 
   line-height: 1.2;
   color: var(--text-muted);
 }
+/* r7 fix: under BUY and "then N" (.card-act), centred: "~2 runs away" / "Fully upgraded" read with the price they are about */
 .card-estimate {
   font-family: var(--font-body);
   font-weight: 800;
   font-size: var(--fs-micro);
   line-height: 1.1;
   color: var(--secondary-hi);
+  text-align: center;
+  white-space: nowrap;
 }
 .card-estimate:empty { display: none; }
+.card.maxed .card-estimate { color: var(--success-hi); }   /* round 7 (r7, explain:2): "Fully upgraded" */
+/* r7 (from balance:8): what a rank buys, under the name — on the card, readable on touch (it was only the hover title) */
+.card-what {
+  font-family: var(--font-body);
+  font-weight: 800;
+  font-size: var(--fs-micro);
+  line-height: 1.2;
+  color: rgba(244, 241, 234, 0.78);
+  text-wrap: pretty;
+}
+.card-what:empty { display: none; }
+/* r7 (from balance:9): BUY with the price of the rank after it ("then 1,510") right under it (r7 fix: and the estimate) */
+.card-act { display: flex; flex-direction: column; align-items: center; gap: calc(3 * var(--u)); }
+.card-then {
+  font-family: var(--font-body);
+  font-weight: 800;
+  font-size: var(--fs-micro);
+  line-height: 1;
+  color: var(--text-muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.card-then:empty { display: none; }
+/* r7 (explain:2): the legend under the coin pill while a card shows "~N runs away" */
+#shop-note { flex: none; max-width: min(calc(358 * var(--u)), 100%); font-size: var(--fs-micro); color: var(--text-muted); opacity: 1; margin-top: calc(-4 * var(--u)); }
+#shop-note:empty { display: none; }
 .btn.buy {
   --depth: calc(4 * var(--u));
   width: calc(104 * var(--u));
@@ -1833,11 +2126,44 @@ html.blur #scr-pause, html.blur #scr-settings {     /* High tier only (ui toggle
   padding: calc(22 * var(--u)) calc(20 * var(--u)) calc(26 * var(--u));
 }
 #scr-pause h1 { margin-bottom: calc(6 * var(--u)); }
+/* round 7 (r7, controls:4 + teaching:8): the one controls line under QUIT — the keys (← → / A D, SPACE, ESC / P, M, F) with a
+   mouse / keyboard, DRAG / TAP FIRE on touch (ui._fillPauseControls). Items never split inside (no-break spaces in STRINGS),
+   lines balance */
+#pause-controls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: calc(6 * var(--u)) calc(14 * var(--u));
+  margin: calc(4 * var(--u)) 0 0;
+  max-width: calc(290 * var(--u));
+  line-height: 1.2;
+  color: var(--text);
+  opacity: 1;
+}
+#pause-controls:empty { display: none; }
+#pause-controls > .pc-item { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; color: var(--text-muted); }
+#pause-controls kbd {
+  display: inline-block;
+  min-width: 1.75em;
+  padding: 2px 5px 1px;
+  border-radius: 4px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.06));
+  box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.2);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-weight: 800;
+  font-size: inherit;
+  line-height: 1.15;
+  text-align: center;
+}
+#pause-controls .pc-or { padding: 0 1px; opacity: 0.7; }
+#pause-controls .pc-act { margin-left: 3px; }
 
 /* settings: rows 56 px; centred when it fits, scrolls when it does not */
 #scr-settings {
   justify-content: flex-start;
-  gap: calc(8 * var(--u));
+  gap: calc(6 * var(--u));                     /* r7 (D1): 8u → 6u, room for the Quality caption (390 × 844 and 1280 × 800 still fit) */
   overflow-y: auto;
   padding-top: calc(var(--safe-top) + 12 * var(--u));
   padding-bottom: calc(var(--safe-bottom) + 18 * var(--u));
@@ -1868,7 +2194,39 @@ html.blur #scr-pause, html.blur #scr-settings {     /* High tier only (ui toggle
   color: var(--text);
   cursor: default;
 }
+/* round 7 (r7): the label is an element (.row-label) that takes the row's free space and can shrink to its longest
+   word, so a narrow row first wraps the label's words, and only moves its control to a second line (narrow
+   landscape, section 15) when even that does not fit */
+#scr-settings > .row > .row-label { flex: 1 1 0; }
+/* round 7 (r7, perf-render:9 item 4): the caption under the Quality row — what Auto does and why a switch may stall a slow
+   device; aligned with the row labels, tucked under its row (landscape: a full-width line under the row pair, section 15) */
+#scr-settings > .row-note {
+  flex: none;
+  width: min(calc(358 * var(--u)), 100%);
+  margin: calc(-4 * var(--u)) 0 0;
+  padding: 0 calc(10 * var(--u)) 0 calc(16 * var(--u));
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: var(--fs-micro);
+  line-height: 1.3;
+  text-align: left;
+  color: var(--text-muted);
+  text-wrap: pretty;
+}
+#scr-settings > .row-note:empty { display: none; }
 #scr-settings > .btn { flex: none; margin-top: calc(6 * var(--u)); }
+/* r7 fix (layout:5): a short portrait phone (360 × 640, 375 × 667) — 9 rows and the Quality caption put BACK's top at the
+   640 px fold; 48 px rows (the 48 px controls fill them, hit areas unchanged), a 4u gap and a 4u top pad bring it back on
+   screen (Large text too) */
+@media (orientation: portrait) and (max-height: 700px) {
+  #scr-settings { gap: calc(4 * var(--u)); padding-top: calc(var(--safe-top) + 4 * var(--u)); }
+  #scr-settings > h1 { margin-bottom: calc(2 * var(--u)); }
+  #scr-settings > .row { min-height: 48px; }
+}
+/* r7 fix: a 568 px phone (320 × 568) leaves the Quality caption out, so BACK sits where 1.2.2 had it (its top on screen) */
+@media (orientation: portrait) and (max-height: 600px) {
+  #scr-settings > .row-note { display: none; }
+}
 /* UI-33 / UI-20: RESET SAVE is destructive, so it is visually secondary — a text-style danger button 24 px below
    BACK (≥ 48 px hit area); armed ("TAP AGAIN TO CONFIRM") it becomes an outlined danger pill */
 #scr-settings > #btn-reset-save {
@@ -1876,7 +2234,7 @@ html.blur #scr-pause, html.blur #scr-settings {     /* High tier only (ui toggle
   width: auto;
   height: auto;
   min-height: 48px;
-  margin-top: calc(24 * var(--u));
+  margin-top: calc(18 * var(--u));             /* r7 (D1): 24u → 18u with the Quality caption (still well clear of BACK) */
   padding: 0 calc(16 * var(--u));
   border-radius: 999px;
   background: transparent;
@@ -2051,6 +2409,383 @@ input[type="checkbox"].toggle:checked::before { transform: translateX(calc(26 * 
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* =============================================================================================
+   12b. Round 7 (r7, teaching:5): the FIELD GUIDE overlay and its "?" entry points; the codex icons (also the NEW card's)
+   ============================================================================================= */
+
+/* the FIELD GUIDE: an overlay like SETTINGS (over the title, or in place of the pause panel — the run stays paused); the
+   heading, a scroll box of sections and rows (wheel / page keys forwarded by ui like the other lists), BACK */
+#scr-guide {
+  z-index: 30;
+  pointer-events: auto;
+  justify-content: flex-start;
+  gap: calc(10 * var(--u));
+  padding-top: calc(var(--safe-top) + 10 * var(--u));
+  padding-bottom: calc(var(--safe-bottom) + 10 * var(--u));
+  background:
+    radial-gradient(120% 60% at 50% 0%, rgba(199, 125, 255, 0.16), rgba(199, 125, 255, 0) 60%),
+    rgba(8, 12, 22, 0.9);
+}
+#scr-guide > h1 { flex: none; }
+#scr-guide > .back { flex: none; margin-top: auto; }
+#guide-list {
+  position: relative;                        /* the rows' offsetParent (ui scrolls the first NEW row into view) */
+  flex: 0 1 auto;
+  align-self: stretch;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: minmax(0, calc(400 * var(--u)));
+  grid-auto-rows: max-content;               /* rows as tall as their text (a wrapped line must not spill into the next row) */
+  justify-content: center;
+  align-content: start;
+  gap: calc(6 * var(--u)) calc(14 * var(--u));
+  padding: calc(6 * var(--u)) calc(8 * var(--u)) calc(20 * var(--u));
+  text-align: left;
+  touch-action: pan-y;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  /* r7 fix round 3: edge fades only while more lies beyond (ui._listFade, as #shop-list) */
+  --fade-t: 0px;
+  --fade-b: 0px;
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 var(--fade-t), #000 calc(100% - var(--fade-b)), transparent 100%);
+  mask-image: linear-gradient(180deg, transparent 0, #000 var(--fade-t), #000 calc(100% - var(--fade-b)), transparent 100%);
+}
+#guide-list.fade-t { --fade-t: 10px; }
+#guide-list.fade-b { --fade-b: 20px; }
+@media (hover: none), (pointer: coarse) { #guide-list::-webkit-scrollbar { display: none; } }
+@media (hover: hover) and (pointer: fine) {
+  #guide-list { scrollbar-width: thin; scrollbar-color: rgba(244, 241, 234, 0.45) transparent; scrollbar-gutter: stable both-edges; }
+}
+#guide-list > .gd-head {
+  grid-column: 1 / -1;
+  margin-top: calc(10 * var(--u));
+  padding: 0 calc(4 * var(--u));
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: var(--fs-h3);
+  line-height: 1.1;
+  letter-spacing: 0.08em;
+  color: var(--primary);
+  text-shadow: var(--stroke-2), 0 3px 0 var(--outline);
+}
+#guide-list > .gd-head:first-child { margin-top: 0; }
+#guide-list > .gd-note {
+  grid-column: 1 / -1;
+  margin: calc(-2 * var(--u)) 0 calc(2 * var(--u));
+  padding: 0 calc(4 * var(--u));
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: var(--fs-micro);
+  line-height: 1.3;
+  color: var(--text-muted);
+  text-wrap: pretty;
+}
+.gd-row {
+  display: grid;
+  grid-template-columns: calc(44 * var(--u)) minmax(0, 1fr);
+  align-items: center;
+  gap: calc(10 * var(--u));
+  min-height: calc(56 * var(--u));
+  padding: calc(6 * var(--u)) calc(12 * var(--u)) calc(6 * var(--u)) calc(8 * var(--u));
+  border-radius: calc(14 * var(--u));
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06) 0%, rgba(255, 255, 255, 0) 50%),
+    var(--bg-panel);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), inset 0 0 0 1.5px rgba(255, 255, 255, 0.06), 0 3px 0 rgba(4, 7, 14, 0.6);
+}
+.gd-row.new { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), inset 0 0 0 2px rgba(255, 210, 63, 0.55), 0 3px 0 rgba(4, 7, 14, 0.6); }
+.gd-row.locked { background: rgba(20, 26, 40, 0.8); }
+.gd-row.locked .gd-title { color: #5B6478; text-shadow: none; }
+.gd-row.locked .gd-line { color: #7A8399; }
+.gd-body { display: flex; flex-direction: column; gap: calc(2 * var(--u)); min-width: 0; }
+.gd-name { display: flex; align-items: center; gap: calc(8 * var(--u)); min-width: 0; }
+.gd-title {
+  min-width: 0;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: calc(18px * var(--ui) * var(--text-scale));
+  line-height: 1.05;
+  letter-spacing: 0.03em;
+  color: var(--text);
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.6);
+}
+.gd-new {
+  flex: none;
+  padding: 1px calc(7 * var(--u)) 0;
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--coin-hi), var(--coin));
+  box-shadow: 0 0 0 1.5px var(--outline);
+  color: var(--primary-text);
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: var(--fs-micro);
+  line-height: 1.25;
+  letter-spacing: 0.08em;
+}
+.gd-new[hidden] { display: none; }
+.gd-line {
+  font-family: var(--font-body);
+  font-weight: 800;
+  font-size: var(--fs-readout);
+  line-height: 1.3;
+  color: rgba(244, 241, 234, 0.82);
+  text-wrap: pretty;
+}
+
+/* codex icons (ui._fillCodexIcon; the NEW card's and every guide row's): 44u boxes */
+.ci {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: calc(44 * var(--u));
+  height: calc(44 * var(--u));
+  border-radius: calc(12 * var(--u));
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: calc(17px * var(--ui));
+  line-height: 1;
+  color: #FFFFFF;
+  white-space: nowrap;
+  background-size: 74%;
+  background-repeat: no-repeat;
+  background-position: center;
+}
+.ci-item {                                   /* the pictogram (texture factory) on a light disc, like the HUD pills */
+  border-radius: 50%;
+  background-color: #DCE2EC;
+  background-size: 70% !important;           /* ui._applyIcon writes `contain` inline; the disc keeps a margin */
+  box-shadow: inset 0 -2px 0 rgba(11, 15, 26, 0.35), 0 0 0 2px rgba(11, 15, 26, 0.85);
+}
+.ci-gate {                                   /* a gate panel in its colours (GATE_RULES.colors, ui writes the vars) */
+  --ci-tint: rgba(46, 155, 255, 0.62);
+  --ci-frame: #1A6FD6;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0) 55%), var(--ci-tint);
+  box-shadow: inset 0 0 0 3px var(--ci-frame), 0 3px 0 rgba(4, 7, 14, 0.6);
+  font-size: calc(18px * var(--ui));
+  text-shadow: var(--stroke-2);
+}
+.ci-gate.ci-wide { width: calc(44 * var(--u)); border-radius: calc(6 * var(--u)); }
+.ci-gate.ci-long { font-size: max(10px, calc(12px * var(--ui))); letter-spacing: -0.02em; }   /* "MAX": three glyphs in the 44u chip */
+.ci-gate:empty::after {                      /* the purple item gate: a light disc where its pictogram floats */
+  content: "";
+  width: 46%;
+  height: 46%;
+  border-radius: 50%;
+  background: radial-gradient(circle at 40% 35%, #FFFFFF 0%, #DCE2EC 55%, #B9C2D2 100%);
+  box-shadow: 0 0 0 2px rgba(11, 15, 26, 0.6);
+}
+.ci-key {                                    /* a key cap */
+  height: calc(34 * var(--u));
+  align-self: center;
+  padding: 0 calc(4 * var(--u));
+  border-radius: calc(7 * var(--u));
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.06));
+  box-shadow: inset 0 -3px 0 rgba(0, 0, 0, 0.45), 0 0 0 1.5px rgba(255, 255, 255, 0.24);
+  font-family: var(--font-body);
+  font-weight: 800;
+  font-size: max(11px, calc(12px * var(--ui)));
+  letter-spacing: 0.04em;
+}
+.ci-key.ci-long { font-size: max(9px, calc(10px * var(--ui))); letter-spacing: 0; padding: 0 2px; }   /* "SPACE" */
+.ci-zombie {                                 /* a zombie's head in its palette (PALETTE.zombie: skin, eye glow) */
+  --ci-skin: #7FA36B;
+  --ci-eyes: #FFE14D;
+  border-radius: 46% 46% 40% 40%;
+  background:
+    radial-gradient(circle at 34% 46%, var(--ci-eyes) 0 9%, rgba(0, 0, 0, 0) 11%),
+    radial-gradient(circle at 66% 46%, var(--ci-eyes) 0 9%, rgba(0, 0, 0, 0) 11%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0) 64%, rgba(30, 10, 16, 0.75) 64% 70%, rgba(0, 0, 0, 0) 70%),
+    radial-gradient(circle at 50% 38%, rgba(255, 255, 255, 0.2), rgba(0, 0, 0, 0) 60%),
+    var(--ci-skin);
+  box-shadow: inset 0 -4px 0 rgba(0, 0, 0, 0.25), 0 0 0 2px rgba(11, 15, 26, 0.85);
+}
+.ci-boss {                                   /* the boss skull (the level tiles' and the HUD's) */
+  border-radius: 50%;
+  background: radial-gradient(circle at 40% 35%, #FF7180, var(--danger) 60%, var(--danger-lo));
+  box-shadow: 0 0 0 2px var(--outline), 0 3px 4px rgba(0, 0, 0, 0.5);
+}
+.ci-boss::before {
+  content: "";
+  position: absolute;
+  left: 21%;
+  right: 21%;
+  top: 17%;
+  height: 50%;
+  border-radius: 50% 50% 42% 42%;
+  background:
+    radial-gradient(circle at 31% 58%, #6B0F1C 0 19%, rgba(107, 15, 28, 0) 21%),
+    radial-gradient(circle at 69% 58%, #6B0F1C 0 19%, rgba(107, 15, 28, 0) 21%),
+    #FFFFFF;
+}
+.ci-boss::after {
+  content: "";
+  position: absolute;
+  left: 33%;
+  right: 33%;
+  top: 64%;
+  height: 17%;
+  border-radius: 0 0 2px 2px;
+  background: repeating-linear-gradient(90deg, #FFFFFF 0 2px, #6B0F1C 2px 3px);
+}
+.ci-crate {                                  /* a crate: wood box, olive lid, glowing orange seams (PALETTE.crate) */
+  border-radius: calc(6 * var(--u));
+  background:
+    linear-gradient(180deg, #4E5633 0 30%, rgba(0, 0, 0, 0) 30%),
+    linear-gradient(90deg, rgba(0, 0, 0, 0) 46%, #FFB02E 46% 54%, rgba(0, 0, 0, 0) 54%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0) 28%, #FFB02E 28% 33%, rgba(0, 0, 0, 0) 33%),
+    #7E6B45;
+  box-shadow: 0 0 0 2px rgba(11, 15, 26, 0.85), 0 0 10px rgba(255, 176, 46, 0.45);
+  transform: scale(0.82);
+}
+.ci-bar::before {                            /* the road bar: a green fill with a gold diamond and the skull end */
+  content: "";
+  width: 86%;
+  height: 26%;
+  border-radius: 999px;
+  background:
+    radial-gradient(circle at 92% 50%, #FF7180 0 22%, rgba(0, 0, 0, 0) 26%),
+    linear-gradient(90deg, var(--progress-fill) 0 45%, rgba(4, 7, 14, 0.85) 45%);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.2);
+}
+.ci-bar::after {
+  content: "";
+  position: absolute;
+  left: 58%;
+  top: 50%;
+  width: 18%;
+  height: 18%;
+  margin: -9% 0 0 -9%;
+  background: linear-gradient(135deg, var(--coin-hi), var(--coin));
+  box-shadow: 0 0 0 1.5px var(--outline);
+  transform: rotate(45deg);
+}
+.ci-bossbar::before {                        /* the boss bar with its two phase ticks */
+  content: "";
+  width: 88%;
+  height: 26%;
+  border-radius: 999px;
+  background:
+    linear-gradient(90deg, rgba(0, 0, 0, 0) 24%, rgba(4, 7, 14, 0.9) 24% 28%, rgba(0, 0, 0, 0) 28% 58%, rgba(4, 7, 14, 0.9) 58% 62%, rgba(0, 0, 0, 0) 62%),
+    linear-gradient(90deg, var(--boss-bar) 0 72%, var(--boss-track) 72%);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.18);
+}
+.ci-stars { color: var(--coin); font-size: max(12px, calc(14px * var(--ui))); letter-spacing: -0.02em; text-shadow: 0 1px 0 var(--outline), 0 0 6px rgba(255, 210, 63, 0.5); }
+.ci-fire {                                   /* the FIRE button */
+  border-radius: 50%;
+  background: radial-gradient(circle at 40% 35%, #FFFFFF 0%, #DCE2EC 40%, #B9C2D2 52%, rgba(0, 0, 0, 0) 54%), radial-gradient(circle, rgba(12, 18, 32, 0.96) 60%, var(--primary) 62%);
+  color: transparent;
+  font-size: 0;
+}
+.ci-pill::before {                           /* a timer pill's draining ring */
+  content: "";
+  width: 70%;
+  height: 70%;
+  border-radius: 50%;
+  background: conic-gradient(var(--primary) 0deg 250deg, rgba(15, 22, 38, 0.88) 250deg);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #000 calc(100% - 4.5px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #000 calc(100% - 4.5px));
+}
+.ci-locked {                                 /* not met yet: a padlock */
+  background: var(--level-locked);
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.45);
+}
+.ci-locked::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 22%;
+  width: 30%;
+  height: 26%;
+  margin-left: -15%;
+  border: 2.5px solid #5B6478;
+  border-bottom: 0;
+  border-radius: 999px 999px 0 0;
+}
+.ci-locked::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 46%;
+  width: 42%;
+  height: 30%;
+  margin-left: -21%;
+  border-radius: calc(3 * var(--u));
+  background: #5B6478;
+}
+
+/* the "?" (FIELD GUIDE) icon buttons: a red dot while a met entry is unread (ui._syncGuideBadge) */
+#btn-guide, #btn-pause-guide { font-family: var(--font-display); font-weight: 400; font-size: calc(26px * var(--ui)); }
+.icon-btn.has-new::after {
+  content: "";
+  position: absolute;
+  top: calc(-4 * var(--u));
+  right: calc(-4 * var(--u));
+  width: calc(16 * var(--u));
+  height: calc(16 * var(--u));
+  border-radius: 50%;
+  background: radial-gradient(circle at 40% 35%, var(--danger-hi), var(--danger) 60%, var(--danger-lo));
+  box-shadow: 0 0 0 calc(2.5 * var(--u)) #0B0F1A;
+  pointer-events: none;
+  will-change: transform;
+  animation: badge-pulse 1.4s ease-in-out infinite;
+}
+/* the pause panel's "?" sits in its top-right corner (the panel has no room for a fifth button — layout:3) */
+#scr-pause .panel > #btn-pause-guide {
+  position: absolute;
+  top: calc(10 * var(--u));
+  right: calc(10 * var(--u));
+  z-index: 1;
+}
+
+/* LEVELS: the skull legend under the heading (r7, explain:3 — the skull marks a DISTRICT FINALE, not "a boss level") */
+#levels-legend {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(6 * var(--u));
+  margin-top: calc(-6 * var(--u));
+  max-width: none;
+  font-size: var(--fs-micro);
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+}
+.legend-skull {
+  position: relative;
+  display: inline-grid;
+  flex: none;
+  width: max(16px, calc(20 * var(--u)));
+  height: max(16px, calc(20 * var(--u)));
+  border-radius: 50%;
+  background: radial-gradient(circle at 40% 35%, #FF7180, var(--danger) 60%, var(--danger-lo));
+  box-shadow: 0 0 0 2px var(--outline);
+}
+.legend-skull::before {
+  content: "";
+  position: absolute;
+  left: 21%;
+  right: 21%;
+  top: 17%;
+  height: 50%;
+  border-radius: 50% 50% 42% 42%;
+  background:
+    radial-gradient(circle at 31% 58%, #6B0F1C 0 19%, rgba(107, 15, 28, 0) 21%),
+    radial-gradient(circle at 69% 58%, #6B0F1C 0 19%, rgba(107, 15, 28, 0) 21%),
+    #FFFFFF;
+}
+.legend-skull::after {
+  content: "";
+  position: absolute;
+  left: 33%;
+  right: 33%;
+  top: 64%;
+  height: 17%;
+  border-radius: 0 0 2px 2px;
+  background: repeating-linear-gradient(90deg, #FFFFFF 0 2px, #6B0F1C 2px 3px);
+}
+
+/* =============================================================================================
    13. Results: level complete, game over, endless run over
    ============================================================================================= */
 
@@ -2065,10 +2800,14 @@ input[type="checkbox"].toggle:checked::before { transform: translateX(calc(26 * 
 }
 /* slow sunburst behind the stars. UI-19: ui draws the rays + radial fade once into a bitmap at boot (--rays); the
    layer is promoted and only rotated, so it never re-rasters (the masked repeating-conic-gradient cost a 255 ms
-   GPU raster flush on the first results screen). Fallback before the bitmap exists: a plain soft glow. */
+   GPU raster flush on the first results screen). Fallback before the bitmap exists: a plain soft glow.
+   Round 7 (r7, layout:5): fixed, not absolute — the screen box is the viewport, so it sits in the same place, but the
+   620u square no longer adds ≈ 150 px of phantom scroll range now that a too-tall results stack scrolls (section 3);
+   no ancestor has a transform / filter / contain, so the viewport stays its containing block, and it still paints
+   behind the content (z −1 inside the screen's isolate stacking context) */
 #scr-complete::before {
   content: "";
-  position: absolute;
+  position: fixed;
   left: 50%;
   top: 34%;
   width: calc(620 * var(--u));
@@ -2171,6 +2910,9 @@ input[type="checkbox"].toggle:checked::before { transform: translateX(calc(26 * 
 #complete-breakdown > li.bd-boss { color: var(--coin); box-shadow: inset 0 0 0 1.5px rgba(255, 210, 63, 0.45); }   /* UI-30: a reward, not a penalty */
 #complete-breakdown > li.bd-bonus { color: #FFE9A8; box-shadow: inset 0 0 0 1.5px rgba(255, 210, 63, 0.35); }
 #complete-best:empty { display: none; }
+/* round 7 (r7, explain:0): the survivors line also names the star thresholds ("65 survivors · ★★ at 178 · ★★★ at 284 ·
+   Best 190") — wider than a caption so it stays one line where it can, balanced where it wraps (its parts never split) */
+#complete-best { max-width: min(calc(480 * var(--u)), 100%); text-wrap: balance; }
 #btn-next { margin-top: calc(10 * var(--u)); }
 
 /* game over */
@@ -2199,6 +2941,10 @@ input[type="checkbox"].toggle:checked::before { transform: translateX(calc(26 * 
 #gameover-level:empty { display: none; }
 #scr-gameover.enter h1 { animation: slam 0.42s var(--ease-pop) both; }
 #gameover-info { font-size: var(--fs-body); margin-bottom: calc(12 * var(--u)); }
+/* round 7 (r7, from balance:10): RETRY plays a new layout after a failure — said right under it (not for the authored L1) */
+/* r7 fix: 15u from the note to SHOP (gap + margin) at every size — the SHOP button's "!" badge rises 7u above the button
+   with a 3u ring and pulses to 1.15 (12.6u): with the bare 12u gap it reached the descenders of "retry" */
+#retry-note { margin-top: calc(-4 * var(--u)); margin-bottom: calc(3 * var(--u)); color: var(--text); opacity: 0.75; text-align: center; }
 @keyframes slam {
   0% { opacity: 0; transform: scale(2.4); }
   60% { opacity: 1; transform: scale(0.94); }
@@ -2405,7 +3151,7 @@ html.reduced-motion #btn-fire.ready::after { animation: none; opacity: 0.7; tran
    `[hidden] { display: none !important }` by specificity. */
 .screen.prewarm[hidden] { display: flex !important; }
 #hud.prewarm[hidden], #bossbar.prewarm[hidden], #letterbox.prewarm[hidden], #letterbox-bottom.prewarm[hidden] { display: block !important; }
-#hint.prewarm[hidden], #namecard.prewarm[hidden], #district-banner.prewarm[hidden] { display: flex !important; }
+#hint.prewarm[hidden], #namecard.prewarm[hidden], #district-banner.prewarm[hidden], #newcard.prewarm[hidden] { display: flex !important; }
 #shield.prewarm[hidden], #powerups > .pu.prewarm[hidden] { display: inline-flex !important; }
 #btn-fire.prewarm[hidden] { display: block !important; }
 .screen.prewarm { opacity: 0.01 !important; visibility: visible !important; pointer-events: none !important; }
@@ -2423,47 +3169,15 @@ html.reduced-motion #btn-fire.ready::after { animation: none; opacity: 0.7; tran
 @media (max-height: 520px) {
   .logo-big { width: auto; font-size: calc(56px * var(--ui) * var(--text-scale)); }
   #scr-complete, #scr-gameover, #scr-endless { gap: calc(6 * var(--u)); }
+  /* r7 fix: with the 6u gap the note's −4u margin put it 1 px into RETRY's box (and its 6u 3-D edge): it clears that edge
+     by 1u, and keeps the 15u to SHOP (the badge) */
+  #retry-note { margin-top: calc(1 * var(--u)); margin-bottom: calc(9 * var(--u)); }
   #complete-breakdown { max-width: calc(520 * var(--u)); }
 }
-/* landscape phones (e.g. 844 × 390; --ui clamps at 0.85): use the width — shop cards in two columns with a
-   compact header, settings rows in two columns, so every card / row and BACK fit without scrolling */
+/* landscape phones (e.g. 844 × 390; --ui clamps at 0.85): the compact pause panel, LEVELS header and HUD rows below.
+   Round 7 (r7, layout:1): the two-column SHOP and SETTINGS moved to the max-height 720 block after this one, and the
+   8-column LEVELS grid to the width blocks after that */
 @media (orientation: landscape) and (max-height: 500px) {
-  #scr-shop {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr) auto;
-    align-items: center;
-    justify-items: center;
-    row-gap: calc(6 * var(--u));
-    column-gap: calc(16 * var(--u));
-    padding-top: var(--safe-top);
-    padding-bottom: var(--safe-bottom);
-  }
-  #scr-shop > h1 { grid-column: 2; grid-row: 1; font-size: var(--fs-h2); padding-bottom: 2px; }
-  #shop-coins { grid-column: 3; grid-row: 1; justify-self: start; height: var(--pill-h); font-size: var(--fs-body); }
-  #shop-list {
-    grid-column: 1 / -1;
-    grid-row: 2;
-    align-self: stretch;
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, calc(358 * var(--u))));
-    justify-content: center;
-    align-content: start;
-    gap: calc(8 * var(--u)) calc(12 * var(--u));
-    padding: calc(4 * var(--u)) calc(8 * var(--u)) calc(8 * var(--u));
-  }
-  #shop-list .card {
-    width: 100%;
-    min-height: calc(76 * var(--u));
-    grid-template-columns: calc(48 * var(--u)) minmax(0, 1fr) auto;
-    gap: calc(10 * var(--u));
-    padding: calc(6 * var(--u)) calc(10 * var(--u));
-  }
-  #shop-list .card-icon { width: calc(48 * var(--u)); height: calc(48 * var(--u)); }
-  /* round-3 polish: the odd last card (5 upgrades) centres under the pair above instead of hanging in the left column */
-  #shop-list > .card:last-child:nth-child(odd) { grid-column: 1 / -1; justify-self: center; width: calc(50% - 6 * var(--u)); }
-  #scr-shop > .back { grid-column: 1 / -1; grid-row: 3; margin: 0; }
-
   /* round-3 polish: the 330 × 380 pause panel was taller than the 390 px box and covered the HUD's top row — RESUME
      spans the panel, RESTART / SETTINGS / QUIT share one row (≈ 215 px tall at --ui 0.85, centred under the HUD) */
   #scr-pause .panel {
@@ -2480,30 +3194,12 @@ html.reduced-motion #btn-fire.ready::after { animation: none; opacity: 0.7; tran
   #scr-pause .panel > h1 { grid-column: 1 / -1; justify-self: center; margin-bottom: 0; }
   #scr-pause .panel > .btn.primary { grid-column: 1 / -1; justify-self: center; }
   #scr-pause .panel > .btn.secondary { width: auto; min-width: var(--w-narrow); padding: 0 calc(20 * var(--u)); }
+  /* r7 (D1): the controls legend takes a row of its own, no wider than the three buttons above it */
+  #scr-pause .panel > #pause-controls { grid-column: 1 / -1; justify-self: center; max-width: calc(3 * var(--w-narrow) + 24 * var(--u)); margin-top: 0; }
 
-  #scr-settings {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, calc(358 * var(--u))));
-    justify-content: center;
-    align-content: center;
-    justify-items: stretch;
-    gap: calc(6 * var(--u)) calc(12 * var(--u));
-    padding-top: var(--safe-top);
-    padding-bottom: var(--safe-bottom);
-  }
-  #scr-settings > :first-child, #scr-settings > :last-child { margin-top: 0; margin-bottom: 0; }
-  #scr-settings > h1 { grid-column: 1 / -1; justify-self: center; font-size: var(--fs-h2); margin-bottom: 0; padding-bottom: 2px; }
-  #scr-settings > .row { width: 100%; }
-  #scr-settings > .btn { justify-self: center; margin-top: calc(4 * var(--u)); }
-  /* BACK and the text-style RESET SAVE share the last row (BACK left, RESET right), whatever the row count */
-  #scr-settings > .back { grid-column: 1; justify-self: end; }
-  #scr-settings > #btn-reset-save { grid-column: 2; justify-self: start; margin-top: calc(4 * var(--u)); }
-
-  /* UI-31: LEVELS uses the width — 8 columns (dense, so 11–16 fill the row beside 9–10 and ENDLESS) put ENDLESS in
-     the first screenful and leave a partial row under the fade, so the grid visibly scrolls */
+  /* UI-31: a compact LEVELS header on landscape phones (the column count is set by width, below) */
   #scr-levels { gap: calc(8 * var(--u)); padding-top: var(--safe-top); }
   #scr-levels > h1 { font-size: var(--fs-h2); padding-bottom: 2px; }
-  #level-grid { grid-template-columns: repeat(8, calc(76 * var(--u))); grid-auto-flow: row dense; }
 
   /* UI-26: the boss bar joins the top row (at hold z −12 the boss's head is at y ≈ 84 and its core ≈ 132; the
      portrait position safe-top + 110 sat on its face): the level label + bar slide left beside the pause button, the
@@ -2531,16 +3227,429 @@ html.reduced-motion #btn-fire.ready::after { animation: none; opacity: 0.7; tran
     left: var(--safe-left);
     right: auto;
     margin: 0;
-    max-width: calc(50% - var(--safe-left) - 100px);
+    /* r7 (explain:4): 100px → 48px and a size down — at 175 % zoom "DISTRICT 3 · NIGHT …" was cut in a 157 px box; the
+       corner still stops ≈ 70 css px short of the road band at 585 px */
+    max-width: calc(50% - var(--safe-left) - 48px);
   }
+  #district-banner .db-text { font-size: var(--fs-small); }
+  #district-banner.db-new .db-text { font-size: var(--fs-body); }
 
-  #complete-breakdown { grid-template-columns: none; grid-auto-flow: column; }   /* one row in landscape */
+  /* one row in landscape where it fits; round 7 (r7, explain:7): with the split ★ / Survivors chips a row of six can be wider
+     than the box (512 / 585 px boxes cut "Kills" and "Survivors" at both edges), so it wraps into centred rows instead */
+  #complete-breakdown { display: flex; flex-wrap: wrap; justify-content: center; max-width: 100%; }
   #complete-breakdown > li:last-child:nth-child(odd) { grid-column: auto; }
 
   /* HUD: an 844 px row has room for the LVL label + bar between the pause button and the coin pill, so they share
      the top row (the column layout hung the bar over the horizon, where the camera's count framing puts the
      gates at spawn — visual QA follow-up to VIS-3) */
   #progress { flex-direction: row; gap: calc(12 * var(--u)); }
+}
+/* round 7 (r7, layout:1): every landscape box up to 720 px tall uses the width — shop cards in two columns with a
+   compact header, settings rows in two columns. One column overflows only while --ui is floored (h < 717): the
+   tester's 1024 × 594 window scrolled both (shop 464 / 394 px, settings 704 / 594 with BACK below the fold); with
+   --ui unclamped the single column is 0.93 h (shop) / 0.98 h (settings). Moved here from the max-height 500 block.
+   r7 fix (layout:5): the settings grid has its own block below (up to 900 px tall). */
+@media (orientation: landscape) and (max-height: 720px) {
+  #scr-shop {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    align-items: center;
+    justify-items: center;
+    row-gap: calc(6 * var(--u));
+    column-gap: calc(16 * var(--u));
+    padding-top: var(--safe-top);
+    padding-bottom: var(--safe-bottom);
+  }
+  #scr-shop > h1 { grid-column: 2; grid-row: 1; font-size: var(--fs-h2); padding-bottom: 2px; }
+  #shop-coins { grid-column: 3; grid-row: 1; justify-self: start; height: var(--pill-h); font-size: var(--fs-body); }
+  #shop-list {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    align-self: stretch;
+    display: grid;
+    /* r7 (D1): columns up to 460u (were the portrait card's 358u) — a card now carries a "what" line and its body column
+       needs the width to keep that line to one row (844 × 390: 109 → ≈ 90 px cards) */
+    grid-template-columns: repeat(2, minmax(0, calc(460 * var(--u))));
+    justify-content: center;
+    align-content: start;
+    /* r7: rows as tall as their cards — with the cards' explicit min-height an auto row's minimum is that min-height,
+       and a list too short for every card (it scrolls) gave no room to grow, so a card with a wrapped name or effect
+       line overflowed into the next row (512 × 297) */
+    grid-auto-rows: max-content;
+    align-items: stretch;                      /* r7 (D1): the two cards of a row share its height (their "what" lines differ) */
+    gap: calc(8 * var(--u)) calc(12 * var(--u));
+    padding: calc(4 * var(--u)) calc(8 * var(--u)) calc(8 * var(--u));
+  }
+  #shop-list .card {
+    width: 100%;
+    min-height: calc(76 * var(--u));
+    grid-template-columns: calc(48 * var(--u)) minmax(0, 1fr) auto;
+    gap: calc(10 * var(--u));
+    padding: calc(6 * var(--u)) calc(10 * var(--u));
+  }
+  #shop-list .card-icon { width: calc(48 * var(--u)); height: calc(48 * var(--u)); }
+  /* round-3 polish: the odd last card (5 upgrades) centres under the pair above instead of hanging in the left column */
+  #shop-list > .card:last-child:nth-child(odd) { grid-column: 1 / -1; justify-self: center; width: calc(50% - 6 * var(--u)); }
+  #scr-shop > .back { grid-column: 1 / -1; grid-row: 3; margin: 0; }
+}
+/* r7 fix (layout:5): SETTINGS in two columns in every landscape box up to 900 px tall (was 720, with the shop): a single
+   column of nine rows, the Quality caption, BACK and RESET SAVE no longer fits 1280 × 800 (815 px) */
+@media (orientation: landscape) and (max-height: 900px) {
+  #scr-settings {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, calc(358 * var(--u))));
+    justify-content: center;
+    align-content: center;
+    align-content: safe center;                /* r7 (layout:5): an overflowing grid starts at the top (the h1 sat at y −9) */
+    grid-auto-rows: max-content;               /* r7: a row whose control wrapped (below) gets its height (see #shop-list) */
+    justify-items: stretch;
+    gap: calc(6 * var(--u)) calc(12 * var(--u));
+    padding-top: var(--safe-top);
+    padding-bottom: var(--safe-bottom);
+    /* r7 fix round 3 (layout verifier): Tab and the screen reader follow the grid's rows, not the DOM — up to 400 px tall
+       BACK and RESET SAVE sit in the title row and (under 560 px wide) Quality is the first row, all three last in
+       index.html (Tab went Sound … Fullscreen, Quality, BACK, RESET). Where reading-flow is unsupported the DOM order stays */
+    reading-flow: grid-rows;
+  }
+  #scr-settings > :first-child, #scr-settings > :last-child { margin-top: 0; margin-bottom: 0; }
+  #scr-settings > h1 { grid-column: 1 / -1; justify-self: center; font-size: var(--fs-h2); margin-bottom: 0; padding-bottom: 2px; }
+  #scr-settings > .row { width: 100%; }
+  /* r7 fix (layout:5): Quality is the last control row (index.html) and its caption takes the cell beside it — the caption's
+     own full-width grid row and the lone Fullscreen row's empty cell had pushed BACK below the fold at 585 × 340 (the
+     tester's 175 % zoom), 800 × 360 and 1024 × 594 fitted with 0 px to spare. Quality in column 1 whatever rows the device
+     hides (Haptics, Fullscreen), the caption in column 2 of the same grid row */
+  #scr-settings > #row-quality { grid-column: 1; }
+  #scr-settings > .row-note { grid-column: 2; align-self: center; width: 100%; margin: 0; padding: 0 calc(4 * var(--u)) 0 calc(6 * var(--u)); line-height: 1.2; }
+  #scr-settings > .btn { justify-self: center; margin-top: calc(4 * var(--u)); max-width: 100%; }   /* r7: never wider than its column (BACK 280u ran 13 px off the left edge of a 460 px box) */
+  /* BACK and the text-style RESET SAVE share the last row (BACK left, RESET right), whatever the row count */
+  #scr-settings > .back { grid-column: 1; justify-self: end; }
+  #scr-settings > #btn-reset-save { grid-column: 2; justify-self: start; margin-top: calc(4 * var(--u)); }
+}
+/* r7 (layout:3): landscape phones — 48 px rows (the 48 px controls fill them, hit areas unchanged) and a 4u row gap.
+   r7 fix (layout:5): with the Fullscreen row and the Quality caption SETTINGS has 9 rows + the caption (5 grid rows) where
+   1.2.2 had 8 (4); up to 400 px tall BACK and RESET SAVE join the title row (next block) */
+@media (orientation: landscape) and (max-height: 500px) {
+  #scr-settings { row-gap: calc(4 * var(--u)); }
+  #scr-settings > .row { min-height: 48px; }
+  /* r7 (D1, explain:2): no row to spare for the shop legend; "~N runs away" reads alone on each card (r7 fix round 2: it
+     comes back from 331 px tall, below) */
+  #shop-note { display: none; }
+  /* r7 (D1): the card's extra "what" line — tighter card lines on a landscape phone, so the five still fit 844 × 390 */
+  #shop-list { row-gap: calc(6 * var(--u)); padding-bottom: calc(6 * var(--u)); }
+  #shop-list .card { padding-top: calc(4 * var(--u)); padding-bottom: calc(4 * var(--u)); }
+  #shop-list .card-body { gap: calc(2 * var(--u)); }
+}
+/* r7 fix (layout:5): a landscape box up to 400 px tall — a phone on its side, a laptop window at 150–200 % zoom (the
+   tester's 1024 × 594 at 175 % is 585 × 340) — has no row to spare under 5 grid rows for BACK and RESET SAVE: they join
+   the title row, BACK at its left, RESET SAVE (text style, confirm-armed) at its right, so BACK is on screen when SETTINGS
+   opens at every size and the rows fit 585 × 340 and 800 × 360 as in 1.2.2. h1, BACK and RESET are placed in row 1
+   explicitly (they share it; the centred title is only as wide as its text), the rows flow from row 2 */
+@media (orientation: landscape) and (max-height: 400px) {
+  /* the title row is a toolbar: the screen keeps only small edge pads (the device's own safe areas still apply) */
+  #scr-settings { padding-top: max(6px, env(safe-area-inset-top)); padding-bottom: max(8px, env(safe-area-inset-bottom)); }
+  #scr-settings > h1 { grid-row: 1; align-self: center; }
+  #scr-settings > .btn.back { grid-row: 1; grid-column: 1; justify-self: start; align-self: center; width: auto; margin-top: 0; padding: 0 calc(22 * var(--u)); }
+  #scr-settings > #btn-reset-save { grid-row: 1; grid-column: 2; justify-self: end; align-self: center; margin-top: 0; }
+  /* armed, "TAP AGAIN TO CONFIRM" is 198 px: it stops 60 px short of its column's inner edge (the centred title reaches
+     ≈ 48 px into the column) and wraps to two lines instead — it ran 4 px into the title at 512 × 297 */
+  #scr-settings > #btn-reset-save.confirm { max-width: calc(100% - 60px); white-space: normal; line-height: 1.1; text-align: center; }
+  /* r7 fix round 2 (layout / walker / hud): SHOP's BACK joins the title row too — BACK at its left, SHOP centred, the coin
+     pill beside it — so the card list gets the bottom row (BACK's 48 px + a gap). With each card's "what" line and
+     "then N" the list was 277 / 222 px at 585 × 340 (the tester's 175 % zoom: Boss damage half below the fold on open,
+     1.2.2 fitted) and 285 / 242 at 640 × 360 */
+  #scr-shop { grid-template-rows: auto minmax(0, 1fr); padding-top: max(6px, env(safe-area-inset-top)); padding-bottom: max(6px, env(safe-area-inset-bottom)); }
+  #scr-shop > .back { grid-row: 1; grid-column: 1; justify-self: start; align-self: center; width: auto; margin: 0; padding: 0 calc(22 * var(--u)); }
+  #shop-list { align-content: center; align-content: safe center; }   /* spare height (844 × 390) splits above and below */
+}
+/* r7 fix round 2 (layout, walker): a two-column shop narrower than 720 px gives the odd fifth card (Boss damage) the whole
+   row instead of a centred half — its "what" line, "Bosses fall faster — best when your squad is small", took 3 lines
+   there (5 and a two-line name at 512 × 297: 154 px for one card) and now takes one */
+@media (orientation: landscape) and (max-height: 720px) and (max-width: 719px) {
+  #shop-list > .card:last-child:nth-child(odd) { width: 100%; }
+}
+/* r7 fix round 2: up to 340 px tall (568 × 320 phones, 200 % zoom) the card list's vertical rhythm tightens a step — the
+   five cards need 7 px more than 568 × 320 has once BACK is in the title row */
+@media (orientation: landscape) and (max-height: 340px) {
+  #shop-list { row-gap: calc(4 * var(--u)); padding-top: calc(2 * var(--u)); padding-bottom: calc(4 * var(--u)); }
+  #shop-list .card { padding-top: calc(3 * var(--u)); padding-bottom: calc(3 * var(--u)); }
+}
+/* r7: taller than a phone (a desktop window), the cards sit centred in the band between the header and BACK
+   instead of leaving it empty under them; r7 (D1, explain:2) the shop legend is a footnote row above BACK */
+@media (orientation: landscape) and (min-height: 401px) and (max-height: 720px) {
+  #shop-list { align-content: center; align-content: safe center; }
+  #scr-shop { grid-template-rows: auto minmax(0, 1fr) auto auto; }
+  #shop-note { display: block; grid-column: 1 / -1; grid-row: 3; margin-top: 0; }
+  #scr-shop > .back { grid-row: 4; }
+}
+/* r7 fix round 2 (walker: the tester raised #26 "+1 run unexplained" at 585 × 340, where the legend was hidden): with BACK in
+   the title row the legend has a row again on a landscape box 331–400 px tall — a footnote under the cards (585 × 340 had
+   25 px to spare, 640 × 360 28, 844 × 390 60); 401–500 px tall it is the 501–720 layout's row above BACK (rule above, was
+   from 501 px). Under 331 px (568 × 320: 5 px to spare, 200 % zoom) it stays out */
+@media (orientation: landscape) and (min-height: 331px) and (max-height: 400px) {
+  #scr-shop { grid-template-rows: auto minmax(0, 1fr) auto; }
+  #shop-note { display: block; grid-column: 1 / -1; grid-row: 3; margin: 0; }
+}
+/* r7 (D1): a landscape window taller than 720 px keeps the one-column shop; its cards take more of the width, so a card's
+   "what" line (balance:8) mostly holds on one line and the five cards still fit (1280 × 800) */
+@media (orientation: landscape) and (min-height: 721px) {
+  .card { width: min(calc(440 * var(--u)), 100%); }
+  #shop-list { gap: calc(8 * var(--u)); }
+}
+/* round 7 (r7, layout:0) — LEVELS columns by width in every landscape box. UI-31: 8 columns (dense, so 11–16 fill the
+   row beside 9–10 and ENDLESS) put ENDLESS in the first screenful; at 1024 × 594 all 30 levels and ENDLESS fit without
+   scrolling. 8 columns are 720u = 612 px at the 0.85 floor (+ 2 × 8 safe = 628); with --ui unclamped (h / 844) they
+   always fit a landscape box. Narrower boxes (a laptop window at 175 % / 200 % zoom, 568 × 320 phones) take 6 columns
+   (544u = 462 + 16 px) — the 8-column grid overflowed both edges there and #ui clipped L1, L8, L9 and L16 — and boxes
+   under 480 px wide 4 (368u = 313 + 16 px), without dense packing, as in portrait */
+@media (orientation: landscape) and (min-width: 640px) {
+  #level-grid { grid-template-columns: repeat(8, calc(76 * var(--u))); grid-auto-flow: row dense; }
+}
+@media (orientation: landscape) and (max-width: 639px) {
+  #level-grid { grid-template-columns: repeat(6, calc(76 * var(--u))); grid-auto-flow: row dense; }
+  /* r7 (layout:1): shop card names wrap instead of ellipsizing ("Start s…", "Coin m…", "Boss d…" at 512 px), and a
+     smaller icon leaves the name column room for its longest word ("multiplier"), so names break between words */
+  #shop-list .card-name { white-space: normal; overflow-wrap: anywhere; font-size: calc(17px * var(--ui) * var(--text-scale)); }
+  #shop-list .card { grid-template-columns: calc(36 * var(--u)) minmax(0, 1fr) auto; gap: calc(8 * var(--u)); }
+  #shop-list .card-icon { width: calc(36 * var(--u)); height: calc(36 * var(--u)); }
+  /* r7: SETTINGS' two columns are narrower than a segmented control's row here (Quality: label + 4 × 48 px buttons ran
+     past the row and off the screen at 512 px — "Hig…"): a row that cannot hold its control on one line puts it on a
+     second line, right-aligned; rows that fit are unchanged and every control keeps its ≥ 48 px hit area */
+  #scr-settings > .row {
+    flex-wrap: wrap;
+    row-gap: calc(4 * var(--u));
+    column-gap: calc(8 * var(--u));
+    padding: calc(3 * var(--u)) calc(8 * var(--u)) calc(3 * var(--u)) calc(12 * var(--u));
+  }
+  #scr-settings > .row > :last-child { margin-left: auto; }
+  /* r7 fix (layout:5): the segmented buttons are 44 px wide here (48 tall, unchanged), so Quality's four fit their 270 px
+     column at 568 px instead of wrapping into a 76 px row (GDD §14: 44 × 48 px on settings segments below 640 px wide) */
+  #scr-settings .seg > button { min-width: 44px; padding: 0 calc(6 * var(--u)); }
+}
+/* r7 fix round 2 (walker, the tester's 200 % zoom): under 560 px wide a two-column card left its body 87 px between the icon
+   and BUY — names, "what" lines and effects wrapped to 2–5 lines (110–154 px cards at 512 × 297, two cards on screen). The
+   icon steps into the name row as a badge, and the "what" line, pips and effect run under it (body 124 px): the card body
+   is laid out on the card's own grid (.card-body display: contents), in the same reading order */
+@media (orientation: landscape) and (max-height: 720px) and (max-width: 559px) {
+  /* r7 fix round 3 (layout verifier): the rows sit together, centred — a card stretched to a taller neighbour's row (512 ×
+     297, beside the two-line "Coin multiplier") spread the extra height between its rows, a band under the "what" line */
+  #shop-list .card { grid-template-columns: calc(22 * var(--u)) minmax(0, 1fr) auto; column-gap: calc(6 * var(--u)); row-gap: calc(2 * var(--u)); align-content: center; }
+  #shop-list .card-body { display: contents; }
+  #shop-list .card-icon { grid-column: 1; grid-row: 1; width: calc(22 * var(--u)); height: calc(22 * var(--u)); border-radius: calc(6 * var(--u)); background-size: 88%; }
+  #shop-list .card-name { grid-column: 2; grid-row: 1; }
+  #shop-list .card-what { grid-column: 1 / 3; grid-row: 2; }
+  #shop-list .pips { grid-column: 1 / 3; grid-row: 3; }
+  #shop-list .card-effect { grid-column: 1 / 3; grid-row: 4; }
+  #shop-list .card-act { grid-column: 3; grid-row: 1 / 5; }
+}
+/* r7 fix (layout:5): ≤ 400 px tall as well, a row that does not wrap gets no extra height (the 3u pads were for a wrapped
+   control's second line; they made the slider and segment rows 53–57 px) */
+@media (orientation: landscape) and (max-width: 639px) and (max-height: 400px) {
+  #scr-settings > .row { padding-top: 0; padding-bottom: 0; }
+}
+/* r7 fix (layout:5): narrower still (200 % zoom of a 1024 px window: 512 × 297) a 243 px column cannot hold Quality's four
+   buttons: Quality takes the whole grid row and its caption is left out (the screen scrolls ≈ 30 px there, 1.2.2: 21) */
+@media (orientation: landscape) and (max-width: 559px) and (max-height: 400px) {
+  /* r7 fix round 2 (layout): …and Quality is the first row under the title, not the last — at 512 × 297 the last row was
+     cut 21 of its 51 px on open (43 with Large text), and Quality is the setting a slow machine needs (the tester's #8);
+     the rows after it flow on (Drag sensitivity / Fullscreen now take the few px of scroll) */
+  #scr-settings > #row-quality { grid-column: 1 / -1; grid-row: 2; }
+  #scr-settings > .row-note { display: none; }
+}
+@media (orientation: landscape) and (max-width: 479px) {
+  #level-grid { grid-template-columns: repeat(4, calc(76 * var(--u))); grid-auto-flow: row; }
+}
+/* round 7 (r7, teaching:0 D): the hint text a size up on wide landscape boxes (a desktop window: the pill reads at arm's
+   length; it still fits beside the FIRE button) */
+@media (orientation: landscape) and (min-width: 900px) {
+  #hint-text { font-size: max(calc(24px * var(--ui) * var(--text-scale)), 22px); }
+}
+/* r7 INT (merged-HUD audit, GDD §14 "never over … the count label"): on a short landscape box — a landscape phone, or a laptop
+   window at 150 % zoom and more (the tester's 1024 × 594 at 175 % is 585 × 340) — the 72 px count label reaches the bottom
+   fifth, and a two-line lesson (round 7's 20 px floor and longer lessons) resting at safe-bottom + 28 covered it: "BOTH LANES
+   HURT…" hid the squad count during the very choice it explains (overlap 28 / 41 / 53 px at 844 × 390 / 585 × 340 /
+   512 × 297, no side free for ui's sideways slide). Here the pill rests on the real bottom inset only (no 16 px design floor,
+   no 28 px gap) with a 18 px text floor (1.2.2: 17.85 px; at 175 % zoom still 1.75× its physical size), and 16 px from
+   320 px tall down (200 % zoom); the sideways slide still applies where a side is free */
+@media (orientation: landscape) and (max-height: 400px) {
+  #hint { bottom: max(6px, env(safe-area-inset-bottom)); padding-top: calc(5 * var(--u)); padding-bottom: calc(5 * var(--u)); }
+  /* …but above the bottom cinematic bar while it is up (the boss intro docks the count in it, "144 SOLDIERS") */
+  #hud:has(> #letterbox-bottom:not([hidden])) #hint { bottom: calc(var(--letterbox) + 6px); }
+  #hint-text { font-size: max(calc(21px * var(--ui) * var(--text-scale)), 18px); }
+}
+@media (orientation: landscape) and (max-height: 320px) {
+  #hint-text { font-size: max(calc(19px * var(--ui) * var(--text-scale)), 16px); }
+}
+/* r7 INT (merged-HUD audit): under 640 px wide (landscape ≤ 500 px tall) the boss bar starts at 50 % + 24 px, and the
+   "LEVEL N" label + bar beside the pause button ran into it — the progress skull sat on the boss bar's left end and touched
+   a long name ("JUGGERNAUT" at 512 × 297 / 585 × 340). The label steps out for the fight (the bar is full by then); under
+   480 px the bar is shorter too */
+@media (orientation: landscape) and (max-height: 500px) and (max-width: 639px) {
+  #hud.boss-on #progress-label { display: none; }
+  /* r7 fix round 2 (walker, the tester's #14 at 200 % zoom): the boss's name starts at its bar's left end and may run 36u
+     past the right end, into the gap before the coin pill — "SPITTER QUEEN" / "COLOSSUS PRIME" ellipsized over the
+     105 px bar at 512 × 297 (as in 1.2.2). Left-aligned here, so a short name does not sit off the bar's centre */
+  /* r7 fix round 3 (hud / walker): … but never under the HUD coin pill — at most the room before it (ui._bossNameRoom sets
+     --bn-room from the layout; with Large text and a 4–5 digit balance the 36u box ran the "…" 7 px into the pill) */
+  #bossbar #boss-name { right: calc(-1 * min(36 * var(--u), var(--bn-room, 36 * var(--u)))); text-align: left; }
+}
+@media (orientation: landscape) and (max-height: 500px) and (max-width: 479px) {
+  #hud.boss-on #progress-bar { width: calc(160 * var(--u)); }
+}
+/* r7 INT (merged-HUD audit): on a landscape box under 800 px wide the NEW card's top-left slot (it moved off the centre,
+   where it hid the gate pair being decided) reaches the centred power-up row once one or more pills are up — a MEDIC card
+   hid the chip and rocket timers at 512 × 297 / 585 × 340. While the card is up (#hud.nc-on, ≤ 3.5 s, never under the
+   boss bar) the row steps to the right edge under the coin pill, over the buildings like the card */
+@media (orientation: landscape) and (max-width: 799px) {
+  #hud.nc-on:not(.boss-on) #powerups { left: auto; right: var(--safe-right); margin: 0; }
+}
+/* round 7 (r7, teaching:5): in every landscape box the NEW card sits top-left under the pause button, over the buildings —
+   centred in the power-up row it covered the gate pair being decided (1024 × 594: the first MAX card hid the gate's badge);
+   portrait keeps the banner's centred slot (the card is as wide as the screen there anyway) */
+@media (orientation: landscape) {
+  #newcard, #hud.pu-on #newcard {
+    top: calc(var(--safe-top) + var(--icon-btn) + 12px);
+    left: var(--safe-left);
+    right: auto;
+    margin: 0;
+    max-width: min(calc(420 * var(--u)), calc(50% - var(--safe-left) - 24px));
+  }
+}
+/* round 7 (r7, teaching:5): the FIELD GUIDE uses a landscape box's width — two columns of rows from 640 px wide (sections
+   span both); a compact heading on landscape phones */
+@media (orientation: landscape) and (min-width: 640px) {
+  #guide-list { grid-template-columns: repeat(2, minmax(0, calc(460 * var(--u)))); }
+}
+@media (orientation: landscape) and (max-height: 500px) {
+  #scr-guide { gap: calc(6 * var(--u)); padding-top: var(--safe-top); }
+  #scr-guide > h1 { font-size: var(--fs-h2); padding-bottom: 2px; }
+  .gd-row { min-height: calc(50 * var(--u)); }
+}
+/* round 7 (r7, layout:5): 200 % browser zoom of a 594 px window (297 css px): the title stack drops its 48u top pad and
+   the results stacks tighten, so they fit (or need only a few px of scroll) */
+@media (max-height: 340px) {
+  #scr-title { padding-top: calc(var(--safe-top) + 4 * var(--u)); gap: calc(6 * var(--u)); padding-bottom: calc(var(--safe-bottom) + 4 * var(--u)); }
+  /* the one-line logo now sits in the icon row's band, between the icons and the coin pill: it keeps its 56u size under
+     Large text (a wordmark, not reading text), which at 512 px wide would have pushed it into the fullscreen icon */
+  .logo-big { font-size: calc(56px * var(--ui)); }
+  #scr-complete, #scr-gameover, #scr-endless { gap: calc(4 * var(--u)); }
+  #retry-note { margin-top: calc(3 * var(--u)); margin-bottom: calc(11 * var(--u)); }   /* r7 fix: the same clearances with the 4u gap */
+  #complete-breakdown { row-gap: calc(4 * var(--u)); }                               /* r7 (D1): wrapped chip rows sit closer */
+  #complete-breakdown > li { padding: calc(3 * var(--u)) calc(9 * var(--u)); }
+  #btn-next { margin-top: calc(2 * var(--u)); }
+  #stars { height: calc(64 * var(--u)); }
+  #stars > i { width: calc(44 * var(--u)); height: calc(44 * var(--u)); }
+  #stars > i:nth-child(2) { width: calc(54 * var(--u)); height: calc(54 * var(--u)); margin-bottom: calc(6 * var(--u)); }
+}
+/* round 7 (r7, layout:6): the title logo starts below the top icon row wherever the two can meet. On a short box
+   (≤ 640 px) the 48u / 4u top pad (52.8 / 15 px at --ui 0.85) put the logo's top above the icons' bottom (safe-top +
+   48 = 60 px); in portrait the stacked logo is centred within reach of the icons (360 × 640: the "G" touched the
+   fullscreen icon by 18 × 15 px). The pad also covers the logo's 2 s bob (it rises 8u at the top of the cycle, tilted
+   −3°). The logo's margin-bottom: auto absorbs the 20 px (≈ 230 px free at 360 × 640). Landscape boxes keep the logo in
+   the icon row's band: up to 520 px tall the "?" and fullscreen icons stack down the left edge (below), so the one-line
+   logo only has the settings icon and the coin pill beside it. r7 final fix (lead decision 4): a second clause, (max-height:
+   640px) and (max-width: 479px), also gave the pad to landscape boxes under 480 px wide — all of them ≤ 479 px tall, in
+   that ≤ 520 px layout, where it is not needed — and it overrode the ≤ 340 px compaction above: at 460 × 300 the 73 px pad
+   pushed ENDLESS below the fold on open. Portrait only now */
+@media (max-height: 640px) and (orientation: portrait) {
+  #scr-title { padding-top: calc(var(--safe-top) + var(--icon-btn) + 6px + 8 * var(--u)); }
+}
+/* r7 final fix (decision 4, the other half): without that pad a landscape box under 480 px wide has the one-line logo in
+   the coin pill's band too, and the centred wordmark (≈ 5.3 × its font size wide, bob and tilt included) met a 6-digit
+   pill at 460 × 300 by 9 px and a 5-digit one at 430 × 300 by 14 px. There its font is at most (100vw − 16 px − 224 px ×
+   the text scale) / 5.2 (the pill is ≈ 104 px × the text scale wide with 6 digits, 8 px in from the edge), so it ends
+   ≥ 4 px before a "123,456" pill at any width, Large text included (460 px: 42 px, was 47.6); wider boxes are unchanged */
+@media (orientation: landscape) and (max-width: 479px) {
+  .logo-big { font-size: min(calc(56px * var(--ui) * var(--text-scale)), calc((100vw - 16px - 224px * var(--text-scale)) / 5.2)); }
+}
+@media (orientation: landscape) and (max-width: 479px) and (max-height: 340px) {
+  .logo-big { font-size: min(calc(56px * var(--ui)), calc((100vw - 16px - 224px * var(--text-scale)) / 5.2)); }
+}
+/* round 7 (r7, teaching:5): on a landscape box up to 520 px tall the logo is one line in the icon row's band (512 × 297: x
+   131–381), so a third top-left icon would meet it (the row's right edge is safe-left + 3 × 48 + 20 = 172 px); the "?" and
+   fullscreen icons stack down the left edge instead (the column ends at safe-top + 3 × 48 + 20, clear of the bottom-left
+   update pill), where the title stack never reaches */
+@media (orientation: landscape) and (max-height: 520px) {
+  #btn-guide { top: calc(var(--safe-top) + var(--icon-btn) + 10px); left: var(--safe-left); }
+  #btn-fullscreen { top: calc(var(--safe-top) + 2 * (var(--icon-btn) + 10px)); left: var(--safe-left); }
+}
+/* r7 fix (layout:1, walker): portrait phones under 480 px wide wrap a shop card's name too, as landscape boxes under 640 px
+   do — with Large text "Coin multiplier" ellipsized at 360–412 px, and both "Coin multiplier" and "Boss damage" at 320 px */
+@media (orientation: portrait) and (max-width: 479px) {
+  #shop-list .card-name { white-space: normal; overflow-wrap: anywhere; }
+}
+/* r7 fix (balance verifier, 390 × 844): the five cards fit a portrait phone again (with their "what" lines and "then N" the
+   list was 704 px in its 596 px box; 1.2.2: 546) — 8u card pads and an 8u gap, with the estimate under BUY (ui). r7 fix
+   round 2: that held only without the legend and with the web fonts (624 / 596 px with the legend and fallback fonts) — see
+   the "what" line below */
+@media (orientation: portrait) {
+  #shop-list { gap: calc(8 * var(--u)); }
+  #shop-list .card { padding-top: calc(8 * var(--u)); padding-bottom: calc(8 * var(--u)); }
+  /* r7 fix round 2 (layout / hud / balance verifiers): the "what" line runs under the icon as the card's last line (the
+     body column between the icon and BUY is ≈ 120 px on a 360–412 px phone: two lines each, three for Boss damage) —
+     one line, and the card is no taller than its BUY column (BUY, "then N", the estimate). The body is laid out on the
+     card's own grid (display: contents): name, pips and effect beside the icon, then the line. 1.2.2 heights again:
+     360 × 640 and 375 × 667 show all five BUY buttons on open, 390 × 844 fits with the legend (and with fallback fonts) */
+  #shop-list .card { grid-template-rows: auto auto auto auto; row-gap: calc(3 * var(--u)); align-content: center; }   /* r7 fix round 3: rows together (min-height) */
+  #shop-list .card-body { display: contents; }
+  #shop-list .card-icon { grid-column: 1; grid-row: 1 / 4; }
+  #shop-list .card-name { grid-column: 2; grid-row: 1; }
+  #shop-list .pips { grid-column: 2; grid-row: 2; }
+  #shop-list .card-effect { grid-column: 2; grid-row: 3; }
+  #shop-list .card-what { grid-column: 1 / 3; grid-row: 4; }
+  #shop-list .card-act { grid-column: 3; grid-row: 1 / 5; }
+  /* Large text (×1.15 type, "Coin multiplier" on two lines) takes 6u pads and gap: 390 × 844 fits again (was 78 px over) */
+  html.large-text #shop-list { gap: calc(6 * var(--u)); }
+  html.large-text #shop-list .card { padding-top: calc(6 * var(--u)); padding-bottom: calc(6 * var(--u)); }
+  /* r7 fix round 3 (layout / balance / hud / walker verifiers: with every card affordable the list was still 8 px taller
+     than 1.2.2 at 360 × 640, 26 px with Large text): a BUY column of two lines — BUY and "then N" (affordable), or BUY and
+     "Fully upgraded" (maxed) — is no taller than the name, pips and effect beside the icon, so it spans only those rows
+     and the "what" line runs the card's whole width under it: one line instead of two for Coin multiplier and Boss damage.
+     With three lines (BUY, "then N", "~N runs away") the column is the card's floor and the line stays beside it */
+  #shop-list .card:has(.card-then:empty) .card-act, #shop-list .card:has(.card-estimate:empty) .card-act { grid-row: 1 / 4; }
+  #shop-list .card:has(.card-then:empty) .card-what, #shop-list .card:has(.card-estimate:empty) .card-what { grid-column: 1 / -1; }
+}
+/* r7 fix round 3: the 44u icon and 8u column gap of the narrow phones (below) also on a short portrait phone (up to 700 px
+   tall: 360 × 640, 375 × 667) and, with Large text, on any portrait phone under 480 px wide — the name column gains 20 px
+   and the "what" line 3 px: with the 64u icon "Coin multiplier" wrapped to two lines with Large text (+17 px, 360 × 640
+   Large 490 / 435 px against 1.2.2's 464 / 435, where the name was ellipsized) and with the fallback fonts (Arial Black;
+   "Boss damage" too, 496 / 440 against 1.2.2's 474), and "More coins from kills and bosses" was 2 px too wide for one line */
+@media (orientation: portrait) and (max-width: 479px) and (max-height: 700px) {
+  #shop-list .card { grid-template-columns: calc(44 * var(--u)) minmax(0, 1fr) auto; column-gap: calc(8 * var(--u)); }
+  #shop-list .card-icon { width: calc(44 * var(--u)); height: calc(44 * var(--u)); border-radius: calc(11 * var(--u)); }
+}
+@media (orientation: portrait) and (max-width: 479px) {
+  html.large-text #shop-list .card { grid-template-columns: calc(44 * var(--u)) minmax(0, 1fr) auto; column-gap: calc(8 * var(--u)); }
+  html.large-text #shop-list .card-icon { width: calc(44 * var(--u)); height: calc(44 * var(--u)); border-radius: calc(11 * var(--u)); }
+}
+/* r7 fix round 2: a portrait box up to 700 px tall (360 × 640, 375 × 667, 320 × 568) also takes 4u card pads and a 6u gap */
+@media (orientation: portrait) and (max-height: 700px) {
+  #shop-list, html.large-text #shop-list { gap: calc(6 * var(--u)); }
+  #shop-list .card, html.large-text #shop-list .card { padding-top: calc(4 * var(--u)); padding-bottom: calc(4 * var(--u)); }
+  /* r7 fix round 3 (layout / balance / hud / walker verifiers: whenever a card read "~N runs away" the legend's own row
+     took 23 px from the list, 360 × 640 55 px over against 1.2.2's 34, 375 × 667 28 against 7): the legend sits beside the
+     coin pill, left-aligned and wrapping in the room beside it — the screen is a grid here (title / pill + legend / list /
+     BACK); without a legend (display: none) the pill is centred as before. The list keeps its flex sizing (start of its
+     row, no taller than it; it scrolls) */
+  #scr-shop {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    justify-items: center;
+    align-items: center;
+    column-gap: 0;
+  }
+  #scr-shop > h1 { grid-column: 1 / -1; grid-row: 1; }
+  #shop-coins { grid-column: 2; grid-row: 2; }
+  #shop-note { grid-column: 3; grid-row: 2; justify-self: start; margin: 0 0 0 calc(10 * var(--u)); text-align: left; line-height: 1.2; }
+  #shop-list { grid-column: 1 / -1; grid-row: 3; align-self: start; max-height: 100%; }
+  #scr-shop > .back { grid-column: 1 / -1; grid-row: 4; margin-top: 0; }
+}
+/* r7 fix round 2: under 360 px wide (320 × 568) a 44u icon and an 8u gap leave the name column room for "Coin multiplier" on
+   one line (its 64u icon left 106 px: two lines, +22 px for that card) */
+@media (orientation: portrait) and (max-width: 359px) {
+  #shop-list .card { grid-template-columns: calc(44 * var(--u)) minmax(0, 1fr) auto; column-gap: calc(8 * var(--u)); }
+  #shop-list .card-icon { width: calc(44 * var(--u)); height: calc(44 * var(--u)); border-radius: calc(11 * var(--u)); }
 }
 /* narrow phones (< 360 px): keep the 4-column grid and cards inside the gutters */
 @media (max-width: 359px) {

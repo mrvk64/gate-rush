@@ -45,6 +45,9 @@ const EXTRA_ALLOWED = {
 const PURE_MODULES = new Set(['data.js', 'levelgen.js']);
 // Modules that nobody but main.js may import (event consumers, §1).
 const CONSUMER_ONLY = new Set(['./ui.js', './audio.js', './fx.js', './engine.js', './save.js', './level.js']);
+// Round 7 (r7 INT): direct console calls a file may make without a warning (method → count). engine.js: the diagnostics
+// dump of window.__gateRushDiag() (engine.diagText, ARCH §13 / §14 rule 5). console.log stays banned everywhere.
+const CONSOLE_SANCTIONED = { 'engine.js': { info: 1 } };
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -451,8 +454,14 @@ function checkFile(absPath, projectFiles) {
   const reLog = /\bconsole\s*\.\s*log\s*\(/g;
   while ((m = reLog.exec(code)) !== null) err(rel(absPath), lineOf(code, m.index), 'console.log is banned in js/ (§14 rule 5)');
   if (base !== 'util.js') {
+    // round 7 (r7 INT): the one sanctioned direct console call outside util.js — engine.diagText's console.info, the dump
+    // a tester asks for with window.__gateRushDiag() (ARCH §13, §14 rule 5). Exactly one per listed file; any other warns.
+    const sanctioned = Object.assign({}, CONSOLE_SANCTIONED[base] || {});
     const reWarn = /\bconsole\s*\.\s*(warn|error|info|debug)\s*\(/g;
-    while ((m = reWarn.exec(code)) !== null) warnAt(rel(absPath), lineOf(code, m.index), `console.${m[1]} — route through util.warnOnce / ctx.ui.showError (§14 rule 5)`);
+    while ((m = reWarn.exec(code)) !== null) {
+      if (sanctioned[m[1]] > 0) { sanctioned[m[1]]--; continue; }
+      warnAt(rel(absPath), lineOf(code, m.index), `console.${m[1]} — route through util.warnOnce / ctx.ui.showError (§14 rule 5)`);
+    }
   }
   const reDebugger = /^[ \t]*debugger\b/gm;
   while ((m = reDebugger.exec(code)) !== null) warnAt(rel(absPath), lineOf(code, m.index), 'debugger statement left in code');

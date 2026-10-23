@@ -7,7 +7,9 @@
 // exact z thresholds of WORLD, the GDD §4.2 per-hit rules for + / − / x / ÷ under the 40 weighted hits/s
 // intake budget, flip / max / step events and coins, the lane highlight decal (single owner, through
 // fx.decal('lane')), decorative title gates, and per-instance hit flash / pop / punch / ring / tint
-// written in render(). Value text is rebuilt into glyph quads only when it changes.
+// written in render(). Value text is rebuilt into glyph quads only when it changes. Round 7: the lane choice (decal, commit,
+// pass fallback) follows the steering target (input.targetX); + / − gates carry the ring gauge too, with a "reaches it in time"
+// flag; pulseEvent(eventId, seconds) pulses an event's frames while a held lesson hint points at it.
 //
 // ============================================================================================
 // PER-INSTANCE ATTRIBUTE PROTOCOL (written here; read by the MaterialLibrary shaders in js/materials.js,
@@ -25,11 +27,12 @@
 //                   running (plain typeIdx colour). Written > 0 only while a recolour runs.
 //     maxed         0 / 1 → frame colour lerps to gold (GATE_RULES.colors.max).
 //     emissiveBoost FAR_EMISSIVE (0.35) before the armed line, 1.0 armed / locked, + the hit flash (see iPanel.flash,
-//                   ≤ HIT_FLASH_CAP 0.45), + the flip flash (FLIP_FLASH_PEAK 1.5 → 1) during the 0.25 s flip.
+//                   ≤ HIT_FLASH_CAP 0.45), + the flip flash (FLIP_FLASH_PEAK 1.5 → 1) during the 0.25 s flip, + (round 7,
+//                   pulseEvent) GATE_RULES.fx.attnGain·(0.5 + 0.5·sin(attnRadPerS·t)) while a held lesson hint points at the event.
 //   instance matrix: translation (x, 0, z), scale (sx, 1, 1) with sx = 1 | wTriple / w (triple lanes).
 //
 // panels  (materials.gatePanel(), ONE ShaderMaterial, InstancedMesh of models.geo.gatePanel 3.6 × 2.4, centred)
-//   iPanel   vec4 = (tintIdx + 8·maxed, stripeMix, flash, ring01)
+//   iPanel   vec4 = (tintIdx + 8·maxed, stripeMix, flash, ring01 + 2·reach)
 //     tintIdx       0..5 current colour type as above, except 4 (grey) during the first half of a recolour
 //                   (red → grey → blue on a flip; ÷2 → grey x1 → green x2 on the ladder);
 //                   + 8 when maxed → gold MAX pill + gold rim; the "MAX" letters are 3 glyph quads gates places
@@ -43,7 +46,13 @@
 //                   recent = hits taken in the last ≈ INTAKE_WINDOW_S (exponentially decayed counter). During the
 //                   GATE_RULES.minus.flipFlash flip: FLIP_FLASH_PEAK (1.5, white) decaying to 1.0; 0 otherwise.
 //     ring01        x lanes: weighted hits toward the next step / that step's cost (1 at the cap);
-//                   ÷ lanes: progress toward the next rung (1 once flipped); 0 for + / − / item.
+//                   ÷ lanes: progress toward the next rung (1 once flipped, and 1 on the ×1 rung when it is final: round 7,
+//                   DIV_TOP_FINAL — one armed window can never pay the ×1 → ×2 flip); round 7 (r7 teaching:4): + lanes:
+//                   (value − spawn value) / (cap − spawn value), 0 once maxed (the MAX badge takes over); − lanes: 1 + value /
+//                   spawn magnitude (0 at spawn → 1 at the flip, 1 once flipped); 0 for item lanes.
+//     reach         round 7 (r7 teaching:4): + 2 (REACH_FLAG) while the gate is being shot (weighted-hits/s EMA > GATE_RULES.reach
+//                   .minRate) fast enough to reach its goal before WORLD.gateStopZ — red: the flip, +: MAX, x: the next step, ÷: the
+//                   ×1 rung; the panel shader recolours the ring band to the colour it is heading for and pulses its head.
 //   iScale   float = 1 | GATE_RULES.panel.wTriple / GATE_RULES.panel.w — NOT applied to the position by the shader
 //                   (the instance matrix already carries it); used in-shader to keep stripes / ring / rim / badge
 //                   in true metres.
@@ -113,6 +122,21 @@ const FAR_PAST = -1e3;                // "long ago" timestamp for flashes / pops
 const EPS = 1e-6;
 
 const INTAKE_CAP = GATE_RULES.intakePerSec * INTAKE_WINDOW_S;   // weighted hits the bucket can hold
+// Round 7 (r7 teaching:4 parts 1–2): the ring gauge also runs on + gates (toward MAX) and − gates (toward the flip), and every gate
+// projects whether it reaches that goal before WORLD.gateStopZ at the rate it is being shot (GATE_RULES.reach): iPanel.w carries
+// ring01 + REACH_FLAG when it will (materials.js decodes it; the same program, no new variant)
+const REACH_FLAG = 2;
+const REACH_TAU_S = GATE_RULES.reach.rateTauS;        // weighted-hits/s EMA time constant
+const REACH_MIN_RATE = GATE_RULES.reach.minRate;      // below this a gate is not "being shot" (no projection)
+const INTAKE_PER_SEC = GATE_RULES.intakePerSec;
+// Round 7 (r7 explain:5 part 2): ×1 is the top a shot ÷ gate can reach in one armed window (levelgen sizes the ×1 → ×2 flip above it,
+// GATE_RULES.div.stepFraction.flipBlock ≥ 1), so the gauge reads FULL on the ×1 rung — "done, no loss" — instead of creeping toward
+// an unreachable ×2. A lane whose flip target is ×1 anyway (endless caps ÷ lanes at ×1) is final there as well.
+const DIV_LAST = GATE_RULES.div.ladder.length - 1;
+const DIV_TOP_FINAL = GATE_RULES.div.stepFraction.flipBlock >= 1;
+// Round 7 (r7 teaching:0 E): pulseEvent() — the frames (and glows) of an event a held lesson hint points at pulse
+const ATTN_GAIN = GATE_RULES.fx.attnGain;
+const ATTN_W = GATE_RULES.fx.attnRadPerS;
 const CAMERA_Z = WORLD.camera.portrait.pos[2];                  // camera z (follow preset) for the glow fog fade
 // Round 5 (r4-release issue 5, r5-render-core needsOtherGroup 1): a decorative title gate sinks into the road once the title
 // squad has marched through it — y −= SINK_RATE per metre of z beyond world.squadDepth + SINK_PAD (WORLD.idleGateSink) —
@@ -218,7 +242,7 @@ function intValueAt(arr, i) {
 }
 
 const TU = new Float64Array(1);       // recolour progress scratch for _currentRGB (integer-only call)
-const SQX = new Float64Array(1);      // squad x scratch for _nearestLane (integer-only call)
+const SQX = new Float64Array(1);      // lane-choice x for _nearestLane (integer-only call): input.targetX from round 7 (step)
 const SEG_IN = new Float64Array(4);   // hitTestSegment → hitTestSeg (x0, z0, x1, z1)
 const NEED = new Float64Array(1);     // _stepNeedTo result (integer-only call)
 const PEN = new Float64Array(1);      // glyph pen x in render (a loop-carried double kept out of phis)
@@ -251,10 +275,14 @@ const QUAD_FRAG = /* glsl */`
   varying vec2 vUv; varying vec3 vColor; varying float vFogDepth;
   void main() {
     vec4 t = uHasMap > 0.5 ? texture2D(uMap, vUv) : vec4(1.0, 1.0, 1.0, 0.85);
-    if (t.a < 0.02) discard;
+    // round 7: coverage × min(1, colour peak) — the item icon (iColor white × its label-yield fade) fades out as a whole
+    // (premultiplied: rgb and alpha scale together); an LDR colour ≥ 1 is unchanged
+    float k = clamp(max(vColor.r, max(vColor.g, vColor.b)), 0.0, 1.0);
+    float a = t.a * k;
+    if (a < 0.02) discard;
     vec3 rgb = t.rgb * vColor;
-    rgb = mix(rgb, fogColor * t.a, smoothstep(fogNear, fogFar, vFogDepth));
-    gl_FragColor = vec4(rgb, t.a);
+    rgb = mix(rgb, fogColor * a, smoothstep(fogNear, fogFar, vFogDepth));
+    gl_FragColor = vec4(rgb, a);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
   }`;
@@ -332,6 +360,9 @@ export class Gates {
     this._hintOnHit = new Array(N).fill(null);
     this._hintOnPass = new Array(N).fill(null);
     this._hintIfOtherBetter = new Array(N).fill(null);
+    // round 7 (r7 teaching:4): weighted hits taken since the last step, and their EMA (hits/s) for the reach projection
+    this._wAcc = new Float32Array(N);
+    this._rate = new Float32Array(N);
     // live gate list (dense, swap-remove) + inverse index
     this._liveSlots = new Int32Array(N);
     this._livePos = new Int32Array(N).fill(-1);
@@ -364,6 +395,7 @@ export class Gates {
     this._evDecalType = new Int8Array(E).fill(-1);
     this._evLockedLane = new Int8Array(E).fill(-1);
     this._evDecorative = new Uint8Array(E);
+    this._evAttnUntil = new Float64Array(E);   // round 7 (pulseEvent): ctx.time.theatre (ms) until which the event's frames pulse
     this._evGen = new Uint32Array(E).fill(1);
     this._evLive = new Uint8Array(E);
     this._evLiveSlots = new Int32Array(E);
@@ -427,10 +459,15 @@ export class Gates {
     ];
     if (ids[0] < 0 || ids[1] < 0 || ids[2] < 0) { this.reset(); return; }
     const last = GATE_RULES.div.ladder.length - 1;
+    const th = time && typeof time.theatre === 'number' ? time.theatre : 0;
     for (let pass = 0; pass < 3; pass++) {
+      // round 7: the pulseEvent attention and the reach projection branches get their feedback too (pulsing / reaching on the
+      // first two passes, idle on the third)
+      for (let k = 0; k < ids.length; k++) this._evAttnUntil[ids[k] & 0xFFF] = pass < 2 ? th + 6e4 : 0;
       for (let i = 0; i < this._liveCount; i++) {
         const g = this._liveSlots[i];
         const op = this._op[g];
+        this._rate[g] = pass < 2 ? 37.5 : 0.25;
         this._state[g] = pass === 0 ? ST_ARMED : (pass === 1 ? ST_LOCKED : (i % 2 === 0 ? ST_PASSED : ST_FAR));
         const live = pass < 2 ? 1 : 0;
         this._flashTime[g] = live ? t - 0.031 : FAR_PAST;
@@ -760,6 +797,25 @@ export class Gates {
   }
 
   /**
+   * Round 7 (r7 teaching:0 part E; contract C → D, DECISIONS §6): points at an event while a held lesson hint talks about it — its
+   * gate frames (and glow quads) pulse, emissive + GATE_RULES.fx.attnGain·(0.5 + 0.5·sin(attnRadPerS·t)), for `seconds` of theatre
+   * time (ctx.time.theatre: real time, paused time excluded, so it matches the hint's own hold); `seconds` ≤ 0 stops it. The pulse
+   * ends by itself when the event resolves (pass / miss) or is freed. `eventId` is the stable handle spawnEvent returned (or an
+   * object carrying it as `eventId`). Returns true when the event is live and unresolved. Event-time only (never per frame).
+   */
+  pulseEvent(eventId, seconds) {
+    if (!this._inited) return false;
+    const id = eventId !== null && typeof eventId === 'object' ? eventId.eventId : eventId;
+    if (typeof id !== 'number' || !(id >= 0)) return false;
+    const e = id & 0xFFF;
+    if (e >= EVENT_POOL || !this._evLive[e] || (id >>> 12) !== this._evGen[e] || this._evResolved[e] || this._evDecorative[e]) return false;
+    const time = this.ctx.time;
+    const now = time && typeof time.theatre === 'number' ? time.theatre : 0;
+    this._evAttnUntil[e] = Number.isFinite(seconds) && seconds > 0 ? now + seconds * 1000 : 0;
+    return true;
+  }
+
+  /**
    * Nearest unpassed (non-decorative) event, or null. Returns a reused object whose `lanes` are the live gate
    * views in lane order (state, x, z, layout, op, value … per ARCH §5.1) — weapons can use it for the rocket /
    * rail / laser panel tests. Do not retain.
@@ -884,6 +940,7 @@ export class Gates {
     this._evDecalType[e] = -1;
     this._evLockedLane[e] = -1;
     this._evDecorative[e] = decorative ? 1 : 0;
+    this._evAttnUntil[e] = 0;
     this._evLivePos[e] = this._evLiveCount;
     this._evLiveSlots[this._evLiveCount++] = e;
 
@@ -917,6 +974,8 @@ export class Gates {
       this._popTime[g] = FAR_PAST;
       this._flashTime[g] = FAR_PAST;
       this._recentHits[g] = 0;
+      this._wAcc[g] = 0;
+      this._rate[g] = 0;
       this._stepTime[g] = FAR_PAST;
       this._flipTime[g] = FAR_PAST;
       this._maxTime[g] = FAR_PAST;
@@ -1020,6 +1079,7 @@ export class Gates {
       return;
     }
     this._intake[g] -= w;
+    this._wAcc[g] += w;                                        // round 7: the accepted weighted hits feed the reach-rate EMA (step)
 
     const prev = this._displayValue(g);
     const op = this._op[g];
@@ -1131,12 +1191,20 @@ export class Gates {
     const roadSpeed = world ? world.roadSpeed : 0;
     const dz = roadSpeed * dt;
     const squad = ctx.squad || null;
-    SQX[0] = squad ? squad.x : (world ? world.squadX : 0);
+    // Round 7 (r7 controls:1, the tester's "-104 nearly taken on L9"): the lane the player is STEERING TO (input.targetX — intent),
+    // not where the squad centre happens to be on its way there, picks the lane highlight decal (from WORLD.laneDecalZ), the commit
+    // at WORLD.gateCommitZ and the unlocked pass fallback. The squad then slides into the committed lane (squad.lockLane) in the
+    // commit window. Physical tests (zombie contact, boss attacks, crate pickup, acid) stay on squad.x.
+    const input = ctx.input || null;
+    SQX[0] = input ? input.targetX : (squad ? squad.x : (world ? world.squadX : 0));
     const fx = this._fx || (this._fx = ctx.fx || null);
     const events = ctx.events;
     const now = ctx.time ? ctx.time.elapsed : 0;
     const refill = GATE_RULES.intakePerSec * dt;
     const hitDecay = Math.exp(-dt / INTAKE_WINDOW_S);           // _recentHits ≈ hits in the last INTAKE_WINDOW_S
+    // round 7 (r7 teaching:4): weighted hits/s EMA over REACH_TAU_S for the reach projection (render)
+    const rateK = dt > 0 ? 1 - Math.exp(-dt / REACH_TAU_S) : 0;
+    const invDt = dt > 0 ? 1 / dt : 0;
 
     // scroll + intake refill
     for (let i = 0; i < this._liveCount; i++) {
@@ -1145,6 +1213,8 @@ export class Gates {
       const b = this._intake[g] + refill;
       this._intake[g] = b > INTAKE_CAP ? INTAKE_CAP : b;
       this._recentHits[g] *= hitDecay;
+      this._rate[g] += (this._wAcc[g] * invDt - this._rate[g]) * rateK;
+      this._wAcc[g] = 0;
     }
 
     // per-event state machine (iterate backwards so freeing an event is safe)
@@ -1170,8 +1240,8 @@ export class Gates {
       if (this._state[g0] === ST_FAR && z >= WORLD.gateArmZ) {
         for (let l = 0; l < n; l++) { const g = this._evGates[e * 3 + l]; this._state[g] = ST_ARMED; this._armTime[g] = now; }
       }
-      // lane highlight decal from WORLD.laneDecalZ — follows the lane nearest squad.x until the commit, then
-      // stays on the committed lane; re-created when the lane (or that lane's colour, e.g. a flip) changes
+      // lane highlight decal from WORLD.laneDecalZ — follows the lane nearest the steering target (round 7: intent, SQX) until
+      // the commit, then stays on the committed lane; re-created when the lane (or that lane's colour, e.g. a flip) changes
       if (z >= WORLD.laneDecalZ && fx) {
         const lane = this._evLockedLane[e] >= 0 ? this._evLockedLane[e] : this._nearestLane(centers, n);
         const type = this._typeIdx(this._evGates[e * 3 + lane]);
@@ -1182,8 +1252,8 @@ export class Gates {
           fx.moveDecal(this._evDecal[e], centers[lane], z);
         }
       }
-      // armed → locked at the commit distance: the squad snaps to the nearer lane; hits are still accepted
-      // until WORLD.gateStopZ so the applied value equals the value the player saw
+      // armed → locked at the commit distance: the lane nearest the steering target (round 7: intent) commits and the squad
+      // slides into it; hits are still accepted until WORLD.gateStopZ so the applied value equals the value the player saw
       if (this._state[g0] === ST_ARMED && z >= WORLD.gateCommitZ) {
         const lane = this._nearestLane(centers, n);
         this._evLockedLane[e] = lane;
@@ -1194,8 +1264,8 @@ export class Gates {
           events.emit('gate:commit', P_COMMIT);
         }
       }
-      // pass at z ≥ 0: the committed lane (= the lane whose centre is nearest squad.x, which the commit
-      // clamp holds within ±SQUAD.steer.laneLockHalfWidth); never geometry. A dead squad (C = 0, or the level
+      // pass at z ≥ 0: the committed lane (the squad is held within ±SQUAD.steer.laneLockHalfWidth of its centre); an event
+      // that somehow never locked passes the lane nearest the steering target; never geometry. A dead squad (C = 0, or the level
       // already lost — the game-over run-on) passes nothing: every lane is missed (QA GAT-6, GDD §7 / §10)
       if (z >= 0) {
         if (this._squadGone()) this._resolveMissAll(e);
@@ -1232,9 +1302,10 @@ export class Gates {
     this._removeEventDecal(e);
     this._evResolved[e] = 1;
     this._evLockedLane[e] = -1;
+    this._evAttnUntil[e] = 0;
   }
 
-  /** Lane index whose centre is nearest the squad x held in SQX[0]. */
+  /** Lane index whose centre is nearest the x held in SQX[0] (round 7: the steering target, input.targetX — see step()). */
   _nearestLane(centers, n) {
     const x = SQX[0];
     let best = 0, bestD = Infinity;
@@ -1364,6 +1435,7 @@ export class Gates {
     this._removeEventDecal(e);
     this._evResolved[e] = 1;
     this._evLockedLane[e] = -1;
+    this._evAttnUntil[e] = 0;                                  // round 7: a pulse (pulseEvent) ends with the pass
   }
 
   _freeGate(g) {
@@ -1400,6 +1472,7 @@ export class Gates {
     }
     this._evLive[e] = 0;
     this._evLockedLane[e] = -1;
+    this._evAttnUntil[e] = 0;
     this._evGen[e] = (this._evGen[e] + 1) & 0xFFFFF;
     if (this._evGen[e] === 0) this._evGen[e] = 1;
     const pos = this._evLivePos[e];
@@ -1516,6 +1589,11 @@ export class Gates {
     const mr = maxRGB[0] * glyphEm, mg = maxRGB[1] * glyphEm, mb = maxRGB[2] * glyphEm;
     const idx = this._glyphIdx, uvs = this._glyphUV, advs = this._glyphAdv, aspects = this._glyphAspect;
     const pulseW = Math.PI * 2 * GLOW_PULSE_HZ;
+    // round 7 (pulseEvent): theatre clock (ms) for the attention deadlines, and the shared pulse value of this frame
+    const theatreNow = ctx.time && typeof ctx.time.theatre === 'number' ? ctx.time.theatre : 0;
+    const attnWave = ATTN_GAIN * (0.5 + 0.5 * Math.sin(t * ATTN_W));
+    // round 7 (reach): seconds of road left to WORLD.gateStopZ per metre (the projection's time base)
+    const invRoad = 1 / Math.max(roadSpeed, 0.1);
 
     const fm = this.frames.instanceMatrix.array, pm = this.panels.instanceMatrix.array, gm = this.glows.instanceMatrix.array;
     const qm = this.glyphs.instanceMatrix.array, im = this.icons.instanceMatrix.array;
@@ -1584,6 +1662,8 @@ export class Gates {
       const flipAge = t - this._flipTime[g];
       const flipFlash = (flipAge >= 0 && flipAge < flipDur ? 1 : 0) * (1 + flipPeakM1 * (1 - flipAge / flipDur));
       const flash = Math.max(flipFlash, hitFlash);
+      // round 7 (r7 teaching:0 E, pulseEvent): a held lesson hint points at this gate's event — its frame and glow pulse
+      const attn = attnWave * (this._evAttnUntil[this._eventSlot[g]] > theatreNow ? 1 : 0);
 
       // ---- frame ----
       MA[0] = x; MA[1] = sy; MA[2] = zr; MA[3] = sx; MA[4] = 1; MA[5] = 1;
@@ -1592,14 +1672,14 @@ export class Gates {
       iFrame[fo] = cur;
       iFrame[fo + 1] = u;
       iFrame[fo + 2] = maxed ? 1 : 0;
-      iFrame[fo + 3] = FAR_EMISSIVE + armedM * litI + hitFlash + flipFlash;
+      iFrame[fo + 3] = FAR_EMISSIVE + armedM * litI + hitFlash + flipFlash + attn;
 
       // ---- glow quad (behind the panel): current tint, faded by the fog like the panel it backs ----
       TU[0] = u;
       const rgb = maxed ? maxRGB : this._currentRGB(g);
       const fogFade = Math.min(1, Math.max(0, (fogFar - (CAMERA_Z - zr)) * invFogSpan));
       const gain = (passed ? 0 : 1) * glowGain * (GLOW_FAR_FRAC + glowLitM * litI) * fogFade
-        * (1 + GLOW_PULSE_AMP * Math.sin(t * pulseW + this._glowPhase[g]) + flash * 0.5);
+        * (1 + GLOW_PULSE_AMP * Math.sin(t * pulseW + this._glowPhase[g]) + flash * 0.5 + attn * 0.5);
       MA[0] = x; MA[1] = panelY + sy; MA[2] = zr + Z_GLOW; MA[3] = panelW * sx * GLOW_SCALE; MA[4] = panelH * GLOW_SCALE; MA[5] = 1;
       setMat(gm, nF);
       const go = nF * 3;
@@ -1622,15 +1702,37 @@ export class Gates {
       const curNeg = cur === T_MINUS || cur === T_DIV ? 1 : 0;
       const fromNeg = u > 0 && (from === T_MINUS || from === T_DIV) ? 1 : 0;
       const stripe = Math.max(curNeg, fromNeg * Math.max(0, 1 - u * 2));
-      // ring gauge: x → weighted hits toward the next step (1 at the cap); ÷ → progress to the next rung (1 flipped)
+      // ring gauge: x → weighted hits toward the next step (1 at the cap); ÷ → progress to the next rung (1 flipped, and 1 on the
+      // ×1 rung when that rung is final — round 7, DIV_TOP_FINAL); round 7 (r7 teaching:4) + → progress from the spawn value to MAX
+      // (0 once maxed: the gold MAX badge takes over); − → progress from the spawn value to 0, the flip (1 once flipped)
       const isMD = op === OP_MULT || op === OP_DIV ? 1 : 0;
-      const full = (op === OP_MULT && this._mult[g] >= this._cap[g]) || (op === OP_DIV && this._flipped[g] === 1) ? 1 : 0;
+      const isPlus = op === OP_PLUS && !maxed ? 1 : 0;
+      const isMinus = op === OP_MINUS ? 1 : 0;
+      const divTop = op === OP_DIV && this._divStage[g] >= DIV_LAST && (DIV_TOP_FINAL || this._cap[g] <= 1) ? 1 : 0;
+      const full = (op === OP_MULT && this._mult[g] >= this._cap[g]) || (op === OP_DIV && this._flipped[g] === 1) || divTop === 1 ? 1 : 0;
       if (isMD === 1) this._stepNeedTo(g); else NEED[0] = 1;
-      const ring = isMD * Math.min(1, Math.max(full, this._hits[g] / NEED[0]));
+      const vF = this._valueF[g], hits = this._hits[g];
+      const baseV = this._base[g];
+      const mdRing = Math.min(1, Math.max(full, hits / NEED[0]));
+      const plusRing = Math.min(1, Math.max(0, (vF - baseV) / Math.max(1, this._cap[g] - baseV)));
+      const minusRing = Math.min(1, Math.max(0, 1 + vF / Math.max(1, baseV)));
+      const ring = isMD * mdRing + isPlus * plusRing + isMinus * minusRing;
+      // reach (round 7, r7 teaching:4 part 2): at the rate this gate is being shot (the accepted weighted hits/s EMA, at most the
+      // intake budget) does it reach its goal before WORLD.gateStopZ? a red gate → the flip, + → MAX, × → its next step, ÷ → the
+      // ×1 rung (never the ×2 flip, unreachable by design). Integer flags scale the double terms (QA GAT-9: no double phis)
+      const shot = (state === ST_ARMED || state === ST_LOCKED) && this._rate[g] > REACH_MIN_RATE && full === 0 ? 1 : 0;
+      const add = shot * Math.min(this._rate[g], INTAKE_PER_SEC) * Math.max(0, (WORLD.gateStopZ - zr) * invRoad);
+      const divBelow = op === OP_DIV && this._divStage[g] < DIV_LAST ? 1 : 0;
+      const divGoal = divBelow * (DIV_LAST - this._divStage[g]) * Math.max(1, this._stepCost[g]) + (1 - divBelow) * NEED[0];
+      const reachI = shot * (
+        isMinus * (this._flipped[g] === 0 && vF + add >= -EPS ? 1 : 0)
+        + isPlus * (vF + add >= this._cap[g] - EPS ? 1 : 0)
+        + (op === OP_MULT ? 1 : 0) * (hits + add >= NEED[0] - EPS ? 1 : 0)
+        + (op === OP_DIV && this._flipped[g] === 0 ? 1 : 0) * (hits + add >= divGoal - EPS ? 1 : 0));
       iPanel[po] = tintIdx + (maxed ? MAX_FLAG : 0);
       iPanel[po + 1] = stripe;
       iPanel[po + 2] = flash;
-      iPanel[po + 3] = ring;
+      iPanel[po + 3] = ring + (reachI > 0 ? REACH_FLAG : 0);
       iScale[nP] = sx;
       if (panelCol) {
         const co = nP * 3;
@@ -1656,17 +1758,25 @@ export class Gates {
         PEN[0] = x - this._textW[g] * 0.5;
         const zq = zr + Z_GLYPH;
         // round-3 FTUE label yield: the op + digit block fades while it overlaps the count label on screen (the glyph
-        // shader fades a quad out once its colour peak drops under its knee) and comes back when the overlap ends
+        // shader fades a quad out once its colour peak drops under its knee) and comes back when the overlap ends.
+        // Round 7 (r7 controls:2): before the commit only the lane the squad will pass (the lane nearest the steering target, as
+        // step() decides it) may yield — a wide landscape count label used to hide BOTH lanes' values from 7–9 m, exactly while the
+        // other lane's value (still changing under fire) decides a last dodge; from the commit on any overlapping text yields
         let tf = this._textFade[g];
         if (fadeStep > 0) {
           let under = false;
           if (labOk && this._decorative[g] === 0) {
-            const dx = x - cpx, dy = panelY - cpy, dz = zq - cpz;
-            const d = dx * cfx + dy * cfy + dz * cfz;
-            if (d > EPS) {
-              const gx = (dx * crx + dy * cry + dz * crz) / d, gy = (dx * cux + dy * cuy + dz * cuz) / d;
-              const hh = (opDH > 0 ? digitH + opDH : digitH) * 0.5 / d, hw = this._textW[g] * 0.5 / d;
-              under = Math.abs(gx - lsx) < (hw + lhw) * LABEL_YIELD_MARGIN && Math.abs(gy - lsy) < (hh + lhh) * LABEL_YIELD_MARGIN;
+            const ev = this._eventSlot[g];
+            const locked = this._evLockedLane[ev];
+            const passLane = locked >= 0 ? locked : this._nearestLane(this._laneTables[this._evLayout[ev]], this._evLaneCount[ev]);
+            if (this._lane[g] === passLane || this._z[g] >= WORLD.gateCommitZ) {
+              const dx = x - cpx, dy = panelY - cpy, dz = zq - cpz;
+              const d = dx * cfx + dy * cfy + dz * cfz;
+              if (d > EPS) {
+                const gx = (dx * crx + dy * cry + dz * crz) / d, gy = (dx * cux + dy * cuy + dz * cuz) / d;
+                const hh = (opDH > 0 ? digitH + opDH : digitH) * 0.5 / d, hw = this._textW[g] * 0.5 / d;
+                under = Math.abs(gx - lsx) < (hw + lhw) * LABEL_YIELD_MARGIN && Math.abs(gy - lsy) < (hh + lhh) * LABEL_YIELD_MARGIN;
+              }
             }
           }
           tf += under ? -fadeStep : fadeStep;
@@ -1718,11 +1828,36 @@ export class Gates {
       // ---- item icon quad (pentagon-top "special" lane, GDD §4.1): slow breathing so it reads as a pickup ----
       if (this._hasIcon[g]) {
         const s = ICON_H * (1 + GLOW_PULSE_AMP * 0.5 * Math.sin(t * pulseW * 2 + this._glowPhase[g]));
-        MA[0] = x; MA[1] = panelY + sy; MA[2] = zr + Z_GLYPH; MA[3] = s; MA[4] = s; MA[5] = 1;
+        const zi = zr + Z_GLYPH;
+        // round 7 (r7 S5 "flame gate: burn icon on the count"): the pictogram of the lane being passed yields to the count label
+        // like value text does — in the last metres the flamer's flame sat right behind the count and read as a burn status on
+        // the squad. Same rule as the text: the pass lane before the commit, any overlapping icon after it
+        let tfI = this._textFade[g];
+        if (fadeStep > 0) {
+          let underI = false;
+          if (labOk && this._decorative[g] === 0) {
+            const evI = this._eventSlot[g];
+            const lockedI = this._evLockedLane[evI];
+            const passI = lockedI >= 0 ? lockedI : this._nearestLane(this._laneTables[this._evLayout[evI]], this._evLaneCount[evI]);
+            if (this._lane[g] === passI || this._z[g] >= WORLD.gateCommitZ) {
+              const dx = x - cpx, dy = panelY - cpy, dz = zi - cpz;
+              const d = dx * cfx + dy * cfy + dz * cfz;
+              if (d > EPS) {
+                const gx = (dx * crx + dy * cry + dz * crz) / d, gy = (dx * cux + dy * cuy + dz * cuz) / d;
+                const hi = s * 0.5 / d;
+                underI = Math.abs(gx - lsx) < (hi + lhw) * LABEL_YIELD_MARGIN && Math.abs(gy - lsy) < (hi + lhh) * LABEL_YIELD_MARGIN;
+              }
+            }
+          }
+          tfI += underI ? -fadeStep : fadeStep;
+          tfI = tfI < 0 ? 0 : (tfI > 1 ? 1 : tfI);
+          this._textFade[g] = tfI;
+        }
+        MA[0] = x; MA[1] = panelY + sy; MA[2] = zi; MA[3] = s; MA[4] = s; MA[5] = 1;
         setMat(im, nI);
         const uo = g * 4, qo = nI * 4, co = nI * 3;
         iIconUV[qo] = this._iconUV[uo]; iIconUV[qo + 1] = this._iconUV[uo + 1]; iIconUV[qo + 2] = this._iconUV[uo + 2]; iIconUV[qo + 3] = this._iconUV[uo + 3];
-        iIconCol[co] = 1; iIconCol[co + 1] = 1; iIconCol[co + 2] = 1;
+        iIconCol[co] = tfI; iIconCol[co + 1] = tfI; iIconCol[co + 2] = tfI;   // the icon shader fades coverage with it (QUAD_FRAG)
         nI++;
       }
     }
@@ -1785,7 +1920,7 @@ export class Gates {
     this._liveCount = 0;
     for (let e = 0; e < EVENT_POOL; e++) {
       this._evLive[e] = 0; this._evLivePos[e] = -1; this._evDecal[e] = -1; this._evDecalLane[e] = -1;
-      this._evDecalType[e] = -1; this._evLockedLane[e] = -1; this._evResolved[e] = 0;
+      this._evDecalType[e] = -1; this._evLockedLane[e] = -1; this._evResolved[e] = 0; this._evAttnUntil[e] = 0;
       this._evGates[e * 3] = -1; this._evGates[e * 3 + 1] = -1; this._evGates[e * 3 + 2] = -1;
     }
     const squad = this.ctx.squad;

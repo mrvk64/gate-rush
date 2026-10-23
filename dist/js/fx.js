@@ -73,8 +73,9 @@ const K_GOLD = PARTICLE_KIND.gold, K_CONFETTI = PARTICLE_KIND.confetti, K_DUST =
 const K_SPLASH = PARTICLE_KIND.splash, K_COINSPARKLE = PARTICLE_KIND.coinSparkle;
 const KIND_COUNT = 11;
 
-// Decal kinds
+// Decal kinds (round 7: + the brute's swipe arc)
 const D_RING = DECAL_KIND.ring, D_LANE = DECAL_KIND.lane, D_SPLAT = DECAL_KIND.splat, D_XBAND = DECAL_KIND.xband;
+const D_ARC = DECAL_KIND.arc, D_SWIPE = DECAL_KIND.swipe, D_LAST = DECAL_KIND.swipe;
 
 // Colour indices (FX_COLORS)
 const C_SPARK = FX_COLOR.spark, C_MUZZLE = FX_COLOR.muzzle, C_GOLD = FX_COLOR.gold, C_BLUE = FX_COLOR.blue, C_ACID = FX_COLOR.acid;
@@ -170,7 +171,10 @@ const NUMBER_ROW_EM = 1.3;           // DATA-MISSING: JUICE.damageNumber.rowPitc
                                      // (a 0.75-em ink box + a ×1.45 crit + bossRise still clear the row above)
 const BOSS_ANCHOR_SNAP = BOSSES.radius * 2;   // DATA-MISSING: JUICE.damageNumber.anchorSnap — a boss hit this close to ctx.world.bossX
                                               // anchors its number on the boss (stable grid); a farther twin keeps the hit x
-const NUMBER_MAX = 9999;             // the atlas has no 'K' glyph; numbers clamp to 4 digits
+// The atlas has no 'K' glyph, so a number shows at most 4 digits. Round 7 (r7 "9999" numbers, the tester's L15): a shown number is
+// never a clamped value — a merge that would pass NUMBER_MAX shows its total so far and starts a fresh number (_accDamage), and a
+// single hit above it reads "9999+" (the atlas has the '+'; writeNumberGlyphs)
+const NUMBER_MAX = 9999;
 const SHARD_SPIN = 14;               // DATA-MISSING: JUICE.shatter.spin — max angular speed (rad/s)
 const SHARD_SPEED_MIN = 3;           // DATA-MISSING: JUICE.shatter.speed[0] — toward / away from the camera (m/s)
 const SHARD_SPEED_MAX = 6;           // DATA-MISSING: JUICE.shatter.speed[1]
@@ -205,7 +209,14 @@ const FOV_KICK_ATTACK = 0.15;        // DATA-MISSING: JUICE.fovKick.attack — f
 const REDUCED_DIM_ALPHA = 0.35;      // DATA-MISSING: JUICE.flashes.reducedDimAlpha — reduced-motion "150 ms dim" strength
 const HAPTIC_GAP_MS = 60;            // DATA-MISSING: JUICE.haptics.minGapMs — single-pulse haptics closer than this are dropped
 const HIT_SPARK_BURSTS_PER_FRAME = 24;   // DATA-MISSING: JUICE.caps.hitSparkBurstsPerFrame — beyond this a hit gets 1 spark (laser / rail floods)
-const MAX_TEXT = 4;                  // quads per floater / number (JUICE.caps.floaterQuads / floaters)
+// quads per floater / number (JUICE.caps.floaterQuads / floaters). Round 7: 4 → 5, so a 4-digit "−k" / "+N" keeps its sign and an
+// overflowing hit has room for its "9999+" mark
+const MAX_TEXT = 5;
+// Round 7 (r7 teaching:1): the loss "−k" beside the label is JUICE.floater.lossScale × its old size, lossScaleBig from k ≥ lossBigFrom
+const FLOATER_SIZE = JUICE.floater.size;
+const LOSS_SCALE = JUICE.floater.lossScale > 0 ? JUICE.floater.lossScale : 1;
+const LOSS_SCALE_BIG = JUICE.floater.lossScaleBig > 0 ? JUICE.floater.lossScaleBig : LOSS_SCALE;
+const LOSS_BIG_FROM = JUICE.floater.lossBigFrom > 0 ? JUICE.floater.lossBigFrom | 0 : 3;
 // Count-label backing plate (round-2 QA FX-10): one dark rounded quad under the digits so beams, flashes and same-font
 // gate glyphs behind the label never merge with it (GDD §3.1 / pillar 5: the count is the most legible thing on screen).
 const PLATE_ALPHA = JUICE.label.plateAlpha;   // opacity of PALETTE.glyph.outline over the world
@@ -265,21 +276,26 @@ function glyphOfCode(code) {
 
 /**
  * Writes a signed integer as glyph indices into `out` at `o` (sign glyph first when `sign` ≥ 0).
- * Values clamp to NUMBER_MAX; when sign + digits exceed `max` quads the sign is dropped. Returns the count.
+ * Round 7: a value above NUMBER_MAX writes NUMBER_MAX followed by a '+' ("9999+", never a bare clamped 9999); when sign + digits
+ * (+ that '+') exceed `max` quads the sign is dropped first. Returns the count.
  */
 function writeNumberGlyphs(out, o, value, sign, max) {
   let v = Math.round(Math.abs(value));
-  if (v > NUMBER_MAX) v = NUMBER_MAX;
+  const over = v > NUMBER_MAX ? 1 : 0;
+  if (over === 1) v = NUMBER_MAX;
   let digits = 1;
   for (let t = v; t >= 10; t = Math.floor(t / 10)) digits++;
-  const useSign = sign >= 0 && digits + 1 <= max;
+  const useOver = over === 1 && digits + 1 <= max;
+  const useSign = sign >= 0 && digits + 1 + (useOver ? 1 : 0) <= max;
   let n = 0;
   if (useSign) out[o + n++] = sign;
   for (let d = digits - 1; d >= 0; d--) {
     out[o + n + d] = v % 10;
     v = Math.floor(v / 10);
   }
-  return n + digits;
+  n += digits;
+  if (useOver) out[o + n++] = G_PLUS;
+  return n;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -430,6 +446,10 @@ const _scale = new Vector3();
 const UV_OUT = { u0: -0, v0: -0, u1: 1, v1: 1, advance: 0.62 };
 const SCREEN_OUT = { x: F64, y: F64 };       // worldToScreen output (Double fields from the start, see F64)
 const TARGET_OUT = { x: F64, y: F64 };
+const ICON_OUT = { x: F64 };                 // round 7: _clearOfLabel result (icon sprite x clear of the count label)
+const ICON_LABEL_GAP_PX = 6;                 // round 7: gap kept between a rising J12 icon and the count label's plate (CSS px)
+const ICON_TROOP_Y = 0.9;                    // round 7: a troop icon drops into the squad at this height (m) of its centre
+const PRIME_TROOP_ITEM = PICKUPS.items.find((id) => id.indexOf('troop.') === 0) || null;   // round 7: warm-up of that path
 const TICK_OPTS = { volume: LABEL_TICK_VOLUME, pitch: 1, value: 0 };
 const LIN = new Float32Array(3);                 // hexToLinear output
 const TRS = new Float64Array(6);                 // writeTRS inputs (x, y, z, sx, sy, sz)
@@ -873,6 +893,7 @@ export class Fx {
     this._boosterOn = false;
     this._labelVisible = false;
     this._lossF = -1; this._lossTime = F64; this._lossTime = -1e9; this._lossK = 0;
+    this._biteVigAt = F64; this._biteVigAt = -1e9;   // round 7: real time of the last bite / spit vignette (JUICE.flashes.biteVignetteGap)
     this._lastHitDmg = F64; this._lastHitStamp = -1; this._lastHitAcc = -1; this._hitStamp = 0;
     this._shieldDecal = -1;
     this._pCap = PARTICLES_PER_MESH;
@@ -961,6 +982,10 @@ export class Fx {
     this._allocDecal(D_LANE, 0.5, -6.5, 2, 0.6, C_SPARK, false, true);
     this._allocDecal(D_SPLAT, 0.5, -6.5, 2, 0.6, C_ACID, false, true);
     this._allocDecal(D_XBAND, 0.5, -6.5, 2, 0.6, C_SPARK, false, false);
+    // round 7: the over-the-formation mesh (fx.decalsTop) and the brute swipe kind
+    this._allocDecal(D_RING, 0.5, -6.5, 2, 0.6, C_SPARK, false, false, 1);
+    this._allocDecal(D_ARC, 0.5, -6.5, 2, 0.6, C_ACID, false, false, 1);
+    this._allocDecal(D_SWIPE, 0.5, -6.5, 2, 0.6, FX_COLOR.brute, false, false, 1);
     const lane = this._allocDecal(D_LANE, 0.5, -6.5, 2, Infinity, C_SPARK, true, false);
     this.moveDecal(ring, 0.7, -6.4); this.decalProgress(ring, 0.5 + f * 1e-3);
     this._floaterNum(12, G_PLUS, 0.5, 1.5, -6.5, PALETTE.flash.gain, 1.2, 0.7, 0.6, LABEL_TEXT_PEAK);
@@ -970,14 +995,17 @@ export class Fx {
     this._numberSpawn(37.5, 0.5, 2.5, -6.5, PALETTE.glyph.fill, NUMBER_BOSS_SCALE, NUMBER_GAIN, -2);
     this._numberSpawn(12.5, 0.5, 2.5, -6.5, PALETTE.glyph.fill, 1, NUMBER_GAIN, 0);
     this._numberSpawn(88.5, 0.5, 2.5, -6.5, PALETTE.gate.max, NUMBER_CRIT_SCALE, NUMBER_CRIT_GAIN, -1);
+    this._numberSpawn(12345.5, 0.5, 2.5, -6.5, PALETTE.gate.max, NUMBER_CRIT_SCALE, NUMBER_CRIT_GAIN, -1);   // round 7: the "9999+" path
     this._accDamage(0, true, 3.5, 0.5, 2.5, -6.5);   // flushed by update's merge-window check
     this._accDamage(1, false, 2.5, 0.5, 2.5, -6.5);
+    this._accDamage(1, false, 9998.5, 0.5, 2.5, -6.5);   // round 7: a merge past NUMBER_MAX flushes first
     this._labelVisible = true;
     L.setCount(5); L.tweenTo(23 + (f & 7)); L._showMultValue(3, 0.05); L.snapTo(21);
     this.addTrauma(0.5);
     this.fovKick(1, 0.2);
     if (this._coinSprites.length > 0) this._launchCoins(0.5, 1, -6.5, 2, 0);
     if (this._iconSprites.length > 0 && PICKUPS.items.length > 0) this.iconFlight(PICKUPS.items[0], 0.5, 0.8, -6.5);
+    if (this._iconSprites.length > 1 && PRIME_TROOP_ITEM) this.iconFlight(PRIME_TROOP_ITEM, 0.5, 0.8, -6.5);   // round 7: the troop drop path
     return lane;
   }
 
@@ -1082,8 +1110,9 @@ export class Fx {
       this._meshes.push(mesh);
       return { mesh, aGlyph: iGlyph, aColor: iColor, glyph: iGlyph.array, color: iColor.array, mat4: mesh.instanceMatrix.array };
     };
-    this._fl = mk(JUICE.caps.floaterQuads, ORDER_FLOATERS, 'fx.floaters');
-    this._nb = mk(JUICE.caps.numberQuads, ORDER_NUMBERS, 'fx.numbers');
+    // every floater / number owns MAX_TEXT consecutive quads (round 7: 5), so a mesh never holds fewer than pool × MAX_TEXT
+    this._fl = mk(Math.max(JUICE.caps.floaterQuads, JUICE.caps.floaters * MAX_TEXT), ORDER_FLOATERS, 'fx.floaters');
+    this._nb = mk(Math.max(JUICE.caps.numberQuads, JUICE.caps.damageNumbers * MAX_TEXT), ORDER_NUMBERS, 'fx.numbers');
     this._lb = mk(LABEL_DIGITS + LABEL_BADGE, ORDER_LABEL, 'fx.label');
     this.floaters = this._fl.mesh; this.numbers = this._nb.mesh; this.labelMesh = this._lb.mesh;
     this._buildPlate();
@@ -1199,10 +1228,33 @@ export class Fx {
     this._meshes.push(mesh);
     this.decals = mesh;
     this._dAttr = iDecal; this._dAttrB = iDecalB;
+    // Round 7 (r7 boss telegraph visibility: "the slam ring and the stripes must stay visible over a big formation"): telegraphs
+    // that sit ON the formation (decal(…, onTop = true): slam ring, charge stripe, car band, acid marks, the brute swipe) draw in a
+    // second mesh whose material is a clone of the same decal material with depthTest off — the same shaders, so the same program
+    // (no new variant), sharing the uniform objects (clock, fog, colours). A 150-soldier squad's bodies no longer hide the ring's
+    // rim and fill. Additive, drawn with the other renderOrder-1 transparents, so particles and numbers still draw over it. The
+    // lane highlight, splats, the shield gauge and the stomp ring stay depth-tested in `fx.decals`.
+    const topMat = mat.clone();
+    topMat.uniforms = mat.uniforms;
+    topMat.depthTest = false;
+    topMat.depthWrite = false;
+    topMat.forceSinglePass = true;
+    topMat.name = 'gr.fx.decals.top';
+    this._ownMats.push(topMat);
+    const geoT = new PlaneGeometry(1, 1);
+    this._ownGeos.push(geoT);
+    const iDecalT = dynAttr(N, 4), iDecalBT = dynAttr(N, 4);
+    geoT.setAttribute('iDecal', iDecalT); geoT.setAttribute('iDecalB', iDecalBT);
+    const meshT = makeInstanced(geoT, topMat, N, 1);
+    meshT.name = 'fx.decalsTop';
+    this._meshes.push(meshT);
+    this.decalsTop = meshT;
+    this._dAttrT = iDecalT; this._dAttrBT = iDecalBT;
     this._dActive = new Uint8Array(N); this._dGen = new Uint32Array(N).fill(1); this._dKind = new Uint8Array(N);
     this._dX = new Float32Array(N); this._dZ = new Float32Array(N); this._dSize = new Float32Array(N); this._dProg = new Float32Array(N);
     this._dSec = new Float32Array(N); this._dAge = new Float32Array(N); this._dSeed = new Float32Array(N); this._dColor = new Uint8Array(N);
     this._dReserved = new Uint8Array(N); this._dRoad = new Uint8Array(N); this._dAuto = new Uint8Array(N);
+    this._dTop = new Uint8Array(N);      // round 7: 1 = drawn in fx.decalsTop (over the formation)
   }
 
   // ---- panel shards -------------------------------------------------------------------------------
@@ -1292,6 +1344,9 @@ export class Fx {
     this._ifAlive = new Uint8Array(IF); this._ifPhase = new Uint8Array(IF); this._ifT = new Float32Array(IF);
     this._ifP = new Float32Array(IF * 7);     // wx wy wz sx sy tx ty
     this._ifBorn = new Float64Array(IF);
+    this._ifTroop = new Uint8Array(IF);       // round 7: 1 = a troop (no HUD pill) — its icon drops into the squad
+    this._ifDx = new Float32Array(IF);        // round 7: sideways offset (CSS px) that keeps the rising icon clear of the count label
+    this._ifDxSet = new Uint8Array(IF);       // … decided once, on the flight's first frame
     this._punchT = F64; this._punchT = -1;
     let doc = null;
     try { doc = typeof document !== 'undefined' ? document : null; } catch (_) { doc = null; }
@@ -1424,7 +1479,7 @@ export class Fx {
     this._fAlive.fill(0); this._fTop = 0; setDrawCount(this._fl.mesh, 0);
     this._nAlive.fill(0); this._nTop = 0; setDrawCount(this._nb.mesh, 0);
     this._naId.fill(-1);
-    this._lossF = -1; this._lossK = 0; this._lossTime = -1e9;
+    this._lossF = -1; this._lossK = 0; this._lossTime = -1e9; this._biteVigAt = -1e9;
     this._lastHitStamp = -1; this._lastHitAcc = -1;
     this.label._clear();
     this._labelPending = -1;
@@ -1433,6 +1488,7 @@ export class Fx {
     // decals (every live id becomes stale)
     for (let i = 0; i < DECAL_SLOTS; i++) if (this._dActive[i]) this._freeDecal(i);
     setDrawCount(this.decals, 0);
+    setDrawCount(this.decalsTop, 0);
     this._shieldDecal = -1;
     // shards / beams
     this._shAlive.fill(0); this._shNext = 0; setDrawCount(this.shards, 0);
@@ -1888,10 +1944,14 @@ export class Fx {
       if (sid >= 0 && this._naT0[s] < oldestT) { oldestT = this._naT0[s]; oldest = s; }
     }
     if (slot >= 0) {
-      this._naSum[slot] += amount; this._naX[slot] = x; this._naY[slot] = y; this._naZ[slot] = z;
-      return slot;
-    }
-    if (slot <= -2) slot = -2 - slot;
+      // round 7 (r7 "9999" numbers): a merge that would carry the total past NUMBER_MAX shows the total so far as its own number
+      // and starts a fresh one with this hit, so a merged number is always the exact sum of real hits, never a clamped 9999
+      if (!(this._naSum[slot] + amount > NUMBER_MAX) || this._naSum[slot] < 0.5) {
+        this._naSum[slot] += amount; this._naX[slot] = x; this._naY[slot] = y; this._naZ[slot] = z;
+        return slot;
+      }
+      this._flushSlot(slot);
+    } else if (slot <= -2) slot = -2 - slot;
     else { this._flushSlot(oldest); slot = oldest; }
     this._naId[slot] = id; this._naBoss[slot] = boss ? 1 : 0;
     this._naSum[slot] = amount; this._naX[slot] = x; this._naY[slot] = y; this._naZ[slot] = z; this._naT0[slot] = this._real;
@@ -1964,7 +2024,7 @@ export class Fx {
     const hb = SQUAD.label.px * L.mPerPx;
     let lw = 0;
     for (let k = 0; k < L.nDigits; k++) lw += this._gAdv[L.digits[k]] * hb;
-    const fw = (this._gAdv[G_MINUS] + 2 * this._gAdv[0]) * hb * LOSS_SIZE_EM;
+    const fw = (this._gAdv[G_MINUS] + 2 * this._gAdv[0]) * hb * LOSS_SIZE_EM * LOSS_SCALE_BIG;   // round 7: room for the big "−k"
     return lw * 0.5 + LOSS_GAP_EM * hb + fw + LOSS_DRIFT > (rel + halfW) * 0.97 ? 1 : -1;
   }
 
@@ -1974,7 +2034,7 @@ export class Fx {
     const hb = SQUAD.label.px * L.mPerPx;          // label glyph height without the punch (m)
     let lw = 0;
     for (let k = 0; k < L.nDigits; k++) lw += this._gAdv[L.digits[k]] * hb;
-    const fh = hb * LOSS_SIZE_EM;
+    const fh = hb * LOSS_SIZE_EM * (this._fSize[i] / FLOATER_SIZE);   // round 7: × the floater's loss scale (_onSquadLoss)
     const g0 = i * MAX_TEXT, n = this._fN[i];
     let fw = 0;
     for (let k = 0; k < n; k++) fw += this._gAdv[this._fGlyph[g0 + k]] * fh;
@@ -2154,20 +2214,22 @@ export class Fx {
   // ===========================================================================================
 
   /**
-   * Ground decal. kind 'ring' | 'arc' | 'lane' | 'splat' | 'xband'; size = diameter (ring / arc / splat) or
-   * stripe width (lane / xband); seconds = Infinity keeps it until removeDecal. Returns an id ≥ 0, or −1 when
-   * the pool is full (callers retry / tolerate). Cosmetic splats yield their slots to gameplay telegraphs, and
-   * DECAL_RESERVE slots stay free for the lane highlight (seconds = Infinity) and the shield gauge.
+   * Ground decal. kind 'ring' | 'arc' | 'lane' | 'splat' | 'xband' | 'swipe' (round 7: the brute's frontal arc); size = diameter
+   * (ring / arc / splat / swipe) or stripe width (lane / xband); seconds = Infinity keeps it until removeDecal. Round 7: `onTop`
+   * (optional, default false) = a telegraph that sits on the formation (slam ring, charge stripe, car band, acid marks, brute swipe):
+   * drawn without the depth test (fx.decalsTop) so the squad's bodies never hide it. Returns an id ≥ 0, or −1 when the pool is full
+   * (callers retry / tolerate). Cosmetic splats yield their slots to gameplay telegraphs, and DECAL_RESERVE slots stay free for the
+   * lane highlight (seconds = Infinity) and the shield gauge.
    */
-  decal(kind, x, z, size, seconds, colorHex) {
+  decal(kind, x, z, size, seconds, colorHex, onTop) {
     if (!this._inited) return -1;
     const k = typeof kind === 'number' ? kind : DECAL_KIND[kind];
-    if (k === undefined || k < 0 || k > D_XBAND) return -1;
+    if (k === undefined || k < 0 || k > D_LAST) return -1;
     const reserved = k === D_LANE && seconds === Infinity;
-    return this._allocDecal(k, x, z, size, seconds, fxColorIndex(colorHex), reserved, false);
+    return this._allocDecal(k, x, z, size, seconds, fxColorIndex(colorHex), reserved, false, onTop === true ? 1 : 0);
   }
 
-  _allocDecal(k, x, z, size, seconds, colorIdx, reserved, roadAttached) {
+  _allocDecal(k, x, z, size, seconds, colorIdx, reserved, roadAttached, top = 0) {
     let free = 0, slot = -1;
     for (let i = 0; i < DECAL_SLOTS; i++) if (!this._dActive[i]) { free++; if (slot < 0) slot = i; }
     if (k === D_SPLAT && !reserved) {
@@ -2195,6 +2257,7 @@ export class Fx {
     this._dReserved[slot] = reserved ? 1 : 0;
     this._dRoad[slot] = roadAttached ? 1 : 0;
     this._dAuto[slot] = k === D_SPLAT ? 1 : 0;
+    this._dTop[slot] = top === 1 ? 1 : 0;
     return ((this._dGen[slot] & 0x7FFFF) << ID_SHIFT) | slot;
   }
 
@@ -2248,8 +2311,9 @@ export class Fx {
       if (s < 0) this._shieldDecal = -1;
       else if (world && world.bossActive) { this._dX[s] = world.bossX; this._dZ[s] = world.bossZ; }
     }
-    const M = this.decals.instanceMatrix.array, A = this._dAttr.array, B = this._dAttrB.array;
-    let n = 0;
+    const M0 = this.decals.instanceMatrix.array, A0 = this._dAttr.array, B0 = this._dAttrB.array;
+    const M1 = this.decalsTop.instanceMatrix.array, A1 = this._dAttrT.array, B1 = this._dAttrBT.array;
+    let n = 0, nt = 0;
     for (let i = 0; i < DECAL_SLOTS; i++) {
       if (!this._dActive[i]) continue;
       const age = this._dAge[i] + dt;
@@ -2261,18 +2325,28 @@ export class Fx {
       if (this._dAuto[i] && finite) this._dProg[i] = age / sec;
       let fade = age < DECAL_FADE_IN_S ? age / DECAL_FADE_IN_S : 1;
       if (finite && sec - age < DECAL_FADE_OUT_S) fade *= (sec - age) / DECAL_FADE_OUT_S;
+      // round 7: a telegraph on the formation goes to fx.decalsTop (no depth test), everything else to fx.decals
+      const top = this._dTop[i];
+      const j = top === 1 ? nt : n;
+      const M = top === 1 ? M1 : M0, A = top === 1 ? A1 : A0, B = top === 1 ? B1 : B0;
       TRS[0] = this._dX[i]; TRS[1] = 0; TRS[2] = this._dZ[i]; TRS[3] = 1; TRS[4] = 1; TRS[5] = 1;
-      writeTRS(M, n * 16);
-      const o = n * 4;
+      writeTRS(M, j * 16);
+      const o = j * 4;
       A[o] = this._dKind[i]; A[o + 1] = this._dProg[i]; A[o + 2] = this._dSize[i]; A[o + 3] = this._dColor[i];
       B[o] = fade; B[o + 1] = age; B[o + 2] = this._dSeed[i]; B[o + 3] = 0;
-      n++;
+      if (top === 1) nt++; else n++;
     }
     setDrawCount(this.decals, n);
     if (n > 0) {
       markItems(this.decals.instanceMatrix, 0, n - 1);
       markItems(this._dAttr, 0, n - 1);
       markItems(this._dAttrB, 0, n - 1);
+    }
+    setDrawCount(this.decalsTop, nt);
+    if (nt > 0) {
+      markItems(this.decalsTop.instanceMatrix, 0, nt - 1);
+      markItems(this._dAttrT, 0, nt - 1);
+      markItems(this._dAttrBT, 0, nt - 1);
     }
   }
 
@@ -2549,6 +2623,33 @@ export class Fx {
     const o = slot * 7;
     this._ifP[o] = x; this._ifP[o + 1] = y; this._ifP[o + 2] = z;
     this._ifAlive[slot] = 1; this._ifPhase[slot] = 0; this._ifT[slot] = 0; this._ifBorn[slot] = this._real;
+    this._ifTroop[slot] = typeof item === 'string' && item.indexOf('troop.') === 0 ? 1 : 0;
+    this._ifDx[slot] = 0; this._ifDxSet[slot] = 0;
+  }
+
+  /**
+   * Round 7 (r7 S5 "flame gate: burn icon on the count"): a rising J12 icon is never drawn over the count label — an item lane is
+   * passed at the squad, so its icon used to pop up right under the count and read as a status on it (the flamer's flame as
+   * "burning"). Called once per flight (its first frame) with the icon's screen point and full half size: when the rise column
+   * (the point and up to PICKUPS.iconRise above it) meets the label's plate on screen, ICON_OUT.x is the sideways offset (CSS px)
+   * that keeps it just clear, toward the side the icon already leans to (the screen centre when it starts right under the label);
+   * else 0. Reads fx.label's anchor / size; event-rate (≤ 4 sprites).
+   */
+  _clearOfLabel(sx, sy, half) {
+    ICON_OUT.x = 0;
+    const L = this.label;
+    const r = this.ctx.render;
+    if (!this._labelVisible || !L.hasPos || !(L.width > 0) || !(L.mPerPx > 0) || !r || typeof r.worldToScreen !== 'function') return;
+    _v.set(L.x, L.y, L.z);
+    try { r.worldToScreen(_v, SCREEN_OUT); } catch (_) { return; }
+    const lx = SCREEN_OUT.x - this._domOffX, ly = SCREEN_OUT.y - this._domOffY;
+    const hw = L.width * 0.5 / L.mPerPx, hh = L.plateH * 0.5 / L.mPerPx;
+    const top = sy - PICKUPS.iconRise / L.mPerPx;                  // ≈ the top of the rise (same depth as the label)
+    if (Math.abs(sx - lx) >= hw + half || top - half > ly + hh || sy + half < ly - hh) return;
+    const size = this._rsize;
+    const midX = size !== null && size.w > 0 ? size.w * 0.5 : lx;
+    const side = sx > lx + 2 ? 1 : (sx < lx - 2 ? -1 : (lx < midX ? 1 : -1));
+    ICON_OUT.x = lx + side * (hw + half + ICON_LABEL_GAP_PX) - sx;
   }
 
   _updateFlights(udt, sdt) {
@@ -2603,24 +2704,43 @@ export class Fx {
         let ok = false;
         if (r && typeof r.worldToScreen === 'function') { try { r.worldToScreen(_v, SCREEN_OUT); ok = Number.isFinite(SCREEN_OUT.x) && Number.isFinite(SCREEN_OUT.y); } catch (_) { ok = false; } }
         if (!ok) { this._ifAlive[i] = 0; sp.hide(); continue; }
-        const sx = SCREEN_OUT.x - this._domOffX, sy = SCREEN_OUT.y - this._domOffY;
+        const sy = SCREEN_OUT.y - this._domOffY;
+        const sc = 0.5 + 0.5 * eOutBack(u, BACK_S);
+        const rx = SCREEN_OUT.x - this._domOffX;
+        // round 7: never over the count label — the sideways offset is decided once and eased in over the first 30 % of the rise
+        if (this._ifDxSet[i] === 0) { this._ifDxSet[i] = 1; this._clearOfLabel(rx, sy, ICON_PX * 0.5); this._ifDx[i] = ICON_OUT.x; }
+        const sx = rx + this._ifDx[i] * eOutCubic(u < 0.3 ? u / 0.3 : 1);
         sp.show();
-        sp.move(sx, sy, 0.5 + 0.5 * eOutBack(u, BACK_S), u < 0.3 ? u / 0.3 : 1);
+        sp.move(sx, sy, sc, u < 0.3 ? u / 0.3 : 1);
         if (u >= 1) {
           this._ifPhase[i] = 1; this._ifT[i] = 0;
           this._ifP[o + 3] = sx; this._ifP[o + 4] = sy;
-          this._iconTarget(this._iconItem[i], TARGET_OUT);
+          // round 7: a troop has no HUD pill (it flew to an empty spot at the top) — its icon drops into the squad it joins
+          if (this._ifTroop[i] === 1) this._squadTarget(sx, sy, TARGET_OUT);
+          else this._iconTarget(this._iconItem[i], TARGET_OUT);
           this._ifP[o + 5] = TARGET_OUT.x - this._domOffX; this._ifP[o + 6] = TARGET_OUT.y - this._domOffY;
         }
       } else {
         const u = t / ICON_FLY_S;
         if (u >= 1) { this._ifAlive[i] = 0; sp.hide(); continue; }
         const e = eInOutCubic(u);
+        const troop = this._ifTroop[i] === 1;
         const x = this._ifP[o + 3] + (this._ifP[o + 5] - this._ifP[o + 3]) * e;
-        const y = this._ifP[o + 4] + (this._ifP[o + 6] - this._ifP[o + 4]) * e - Math.sin(Math.PI * u) * 30;
-        sp.move(x, y, 1 - 0.45 * e, u > 0.85 ? (1 - u) / 0.15 : 1);
+        const y = this._ifP[o + 4] + (this._ifP[o + 6] - this._ifP[o + 4]) * e - Math.sin(Math.PI * u) * (troop ? 12 : 30);
+        if (troop) sp.move(x, y, 1 - 0.65 * e, u > 0.6 ? (1 - u) / 0.4 : 1);
+        else sp.move(x, y, 1 - 0.45 * e, u > 0.85 ? (1 - u) / 0.15 : 1);
       }
     }
+  }
+
+  /** Round 7: screen point (app px, before the #coin-flights offset) of the squad's centre for a troop icon; (sx, sy) when unknown. */
+  _squadTarget(sx, sy, out) {
+    out.x = sx + this._domOffX; out.y = sy + this._domOffY;
+    const r = this.ctx.render, w = this.ctx.world, sq = this.ctx.squad;
+    if (!r || typeof r.worldToScreen !== 'function' || !w) return;
+    _v.set(w.squadX, ICON_TROOP_Y, sq && typeof sq.centerZ === 'number' ? sq.centerZ : 0);
+    try { r.worldToScreen(_v, SCREEN_OUT); } catch (_) { return; }
+    if (Number.isFinite(SCREEN_OUT.x) && Number.isFinite(SCREEN_OUT.y)) { out.x = SCREEN_OUT.x; out.y = SCREEN_OUT.y; }
   }
 
   _iconTarget(item, out) {
@@ -2685,10 +2805,14 @@ export class Fx {
     else ui.flash(colorHex, seconds, alpha === undefined ? 1 : alpha);
   }
 
-  /** Screen-edge vignette pulse via ui.vignette. */
-  vignette(colorHex, seconds) {
+  /**
+   * Screen-edge vignette pulse via ui.vignette. Round 7 (contract C → D, DECISIONS §6): `alpha` (0..1, optional) is passed through
+   * as ui.vignette's third argument — it scales the vignette's edge alpha (the bite / spit pulse is fainter than a red-gate pass);
+   * omitted = full strength.
+   */
+  vignette(colorHex, seconds, alpha) {
     const ui = this.ctx.ui;
-    if (ui && typeof ui.vignette === 'function') ui.vignette(colorHex, seconds);
+    if (ui && typeof ui.vignette === 'function') ui.vignette(colorHex, seconds, alpha);
   }
 
   /** FOV kick (degrees added by render.update): quick ramp in, ease out over `seconds`; none under reduced motion. */
@@ -2899,23 +3023,36 @@ export class Fx {
     this._emitRaw(K_DUST, 5, p.x, 0.1, p.z, 0, 0, 0, 2.2, 0.15, P_LIFE[K_DUST], P_SIZE[K_DUST], P_GRAVITY[K_DUST], 0, C_DUST);
   }
 
-  /** J10: soldier dies — 6 blood particles, "−1" floater (merged into "−k" within JUICE.floater.mergeMs), haptic. */
+  /**
+   * J10: soldier dies — 6 blood particles, "−1" floater (merged into "−k" within JUICE.floater.mergeMs), haptic. Round 7 (r7
+   * teaching:1, the tester's "zombie threat not obvious … the only feedback is small −1 popups"): deaths within 300 ms merge, the
+   * "−k" reads lossScale × its old size (lossScaleBig from k ≥ lossBigFrom), the haptic is 25 ms, and a bite or spit loss pulses the
+   * red edge vignette (JUICE.flashes.biteVignette*, at most once per biteVignetteGap s, stronger for a bigger "−k").
+   */
   _onSquadLoss(p) {
     if (!p) return;
     const x = p.x, z = p.z;
     this._burstColored(B_BLOODSMALL, x, 0.9, z, C_BLOOD, 1);
-    const merge = this._lossF >= 0 && this._fAlive[this._lossF] && (this._real - this._lossTime) * 1000 <= JUICE.floater.mergeMs;
+    const merge = this._lossF >= 0 && this._fAlive[this._lossF] && (this._real - this._lossTime) * 1000 <= JUICE.floater.mergeMs
+      && this._lossK < NUMBER_MAX;
     if (merge) {
       const i = this._lossF;
       this._lossK++;
       this._fN[i] = writeNumberGlyphs(this._fGlyph, i * MAX_TEXT, this._lossK, G_MINUS, MAX_TEXT);
       this._fAge[i] = Math.min(this._fAge[i], this._fLife[i] * 0.1);   // re-pop the merged number
+      this._fSize[i] = FLOATER_SIZE * (this._lossK >= LOSS_BIG_FROM ? LOSS_SCALE_BIG : LOSS_SCALE);
     } else {
       this._lossK = 1;
       // world position = fallback while the label has no anchor; otherwise it reads beside the label (_followLoss)
-      this._lossF = this._floaterNum(1, G_MINUS, x, LOSS_FLOATER_Y, z, PALETTE.flash.loss, JUICE.floater.rise, JUICE.floater.life, JUICE.floater.size, LABEL_TEXT_PEAK);
+      this._lossF = this._floaterNum(1, G_MINUS, x, LOSS_FLOATER_Y, z, PALETTE.flash.loss, JUICE.floater.rise, JUICE.floater.life, FLOATER_SIZE * LOSS_SCALE, LABEL_TEXT_PEAK);
       if (this._lossF >= 0) { this._fFollow[this._lossF] = 1; this._fSide[this._lossF] = this._lossSide(); }
       this._lossTime = this._real;
+    }
+    const cause = p.cause;
+    if ((cause === 'bite' || cause === 'spit') && this._real - this._biteVigAt >= JUICE.flashes.biteVignetteGap) {
+      this._biteVigAt = this._real;
+      const a = JUICE.flashes.biteVignetteAlpha + JUICE.flashes.biteVignetteAlphaPer * (this._lossK - 1);
+      this.vignette(PALETTE.flash.red, JUICE.flashes.biteVignette, a < 1 ? a : 1);
     }
     this.haptic(JUICE.haptics.loss);
   }

@@ -150,10 +150,23 @@ export function hashString(s) {
 }
 
 /**
- * Formats a coin total for the HUD: "999", "1.2K", "12.5K", "250K", "1.3M".
- * Trailing ".0" is dropped ("12K", not "12.0K").
+ * Formats a coin amount in full with comma thousands separators: "999", "1,000", "1,130", "12,345", "1,234,567";
+ * negative values keep a leading "-". Round 7 (r7, flow-coins:7): every coin pill, price and results line uses it — the
+ * "1.1K" header could not tell whether it affords a 1,080 or a 1,130 rank. No Intl: the same output in every locale.
  */
 export function fmtCoins(n) {
+  n = Math.round(Number.isFinite(n) ? n : 0);
+  const neg = n < 0;
+  let s = String(Math.abs(n));
+  for (let i = s.length - 3; i > 0; i -= 3) s = s.slice(0, i) + ',' + s.slice(i);
+  return neg ? '-' + s : s;
+}
+
+/**
+ * Compact form for a tight label: "999", "1.2K", "12.5K", "250K", "1.3M" (trailing ".0" dropped: "12K"). Round 7: only
+ * the LEVELS screen's ENDLESS tile best score uses it (the fmtCoins of rounds 1–6).
+ */
+export function fmtCompact(n) {
   n = Math.round(Number.isFinite(n) ? n : 0);
   const neg = n < 0;
   const m = Math.abs(n);

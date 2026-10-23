@@ -14,11 +14,13 @@
 // Writes (per the §3 ctx table): ctx.world.roadSpeed / roadSpeedBase / distance (plus the full
 // in-place overwrite of ctx.world that §6.16 assigns to start()), ctx.rng, ctx.rngFx, ctx.run.
 
-import { Rng, clamp, lerpExp, warnOnce } from './util.js';
+import { Rng, clamp, lerpExp, warnOnce, roundDesign } from './util.js';
 import {
-  WORLD, SQUAD, ZOMBIES, LEAK_MODEL, LEAK_BANDS, BOSSES, LEVELS, ECONOMY, STARS, SCORE,
+  WORLD, SQUAD, ZOMBIES, LEAK_MODEL, LEAK_BANDS, BOSSES, LEVELS, ECONOMY, SCORE,
   QUALITY_TIERS, RENDER, JUICE, HINTS, GATE_RULES, PICKUPS, WAVE_PATTERNS, STRINGS, FIRE,
   DISTRICT_RULES, districtForLevel, districtForChunk,
+  starNeed,                                               // round 7 (r7, explain:0): the star thresholds the results print
+  CODEX,                                                  // round 7 (r7, teaching:5): FIELD GUIDE entries met in play (_codexSeen)
 } from './data.js';
 import { generateLevel, levelGenerator, generateChunk, solveWaveHp, gateDefaults, endlessGateGuard, eventWorstCase, leakCalib, endlessPressure, endlessParams, endlessDesignMult, endlessHpCap, endlessPoolReserve } from './levelgen.js';
 
@@ -102,14 +104,20 @@ function endlessEquivalentLevel(difficulty) { return LEVELS.endlessUnlock + diff
 
 const P_START = { level: 0, seed: 0, endless: false, script: null, district: '' };
 /** DISTRICTS.md §8.5: district:change payload (reused); reason 'start' | 'rotate' | 'title'. */
-const P_DISTRICT = { id: '', name: '', index: 0, label: '', accent: 0, seconds: -0, reason: '', banner: false };
+const P_DISTRICT = { id: '', name: '', index: 0, label: '', accent: 0, seconds: -0, reason: '', banner: false, first: false, step: 0, steps: 0 };
 const P_PROGRESS = { distance: -0, length: -0, fraction: -0 };
 const P_RUNUP = { secondsToBoss: -0 };
 const P_COMPLETE = { level: 0, stars: 0, survivors: 0, eBoss: 0, coins: 0, breakdown: null };
 const P_FAILED = { level: 0, fraction: -0, coinsKept: -0 };
 const P_CHUNK = { index: 0, difficulty: -0 };
 const P_END = { distance: -0, score: 0, best: 0, coins: 0, chunks: 0, newBest: false };
-const P_HINT = { id: '', text: '' };
+// round 7 (r7, teaching:0 B / teaching:3): hint:show also carries how the hint is bound — hold (theatre s it cannot be cut
+// by a waiting hint; 0 = the normal duration), until (release key: the gate event id or 'crate'; null = none), priority
+// (a boss attack's lesson: it cuts a normal hint on screen) and event (the gate event whose gates pulse while it is up, −1)
+const P_HINT = { id: '', text: '', hold: -0, until: null, priority: false, event: -1 };
+const P_RELEASE = { key: null };                          // r7: hint:release { key } — the subject of a held hint is resolved
+const P_CODEX = { id: '' };                               // r7 (teaching:5): codex:new { id } — a NEW card's first encounter
+const HOLD = { hold: -0, until: null, priority: false, event: -1 };   // r7: reused showHint options (event time, never retained)
 const P_COINS = { total: -0, runTotal: -0, delta: -0, source: '' };
 const P_BONUS = { amount: -0, x: -0, y: -0, z: -0, source: 'bonus' };
 const P_HISTO = { key: '', value: 0 };
@@ -132,6 +140,29 @@ const RESET_ORDER = ['fx', 'weapons', 'zombies', 'boss', 'gates', 'pickups', 'tr
 const TYPES = ZOMBIES.common.types;   // ['walker', 'runner', 'crawler', 'brute', 'spitter']
 /** Round 5d (GDD §10.1): the script events the endless mini-boss hold keeps back (the boss's own minions are boss.js's). */
 const HOLD_TYPES = { gates: true, wave: true, crate: true, coins: true };
+
+// Round 7 (r7) — tutorial and FIELD GUIDE bookkeeping (structure, not tuning; the timings live in JUICE.ui / JUICE.slowmo)
+/** teaching:3: the lesson of each telegraphed boss attack (boss:attack.kind → HINTS id); the safety-valve chew has none. */
+const LESSON_OF = Object.freeze({ slam: 'dodge.slam', charge: 'dodge.charge', lane: 'dodge.charge', car: 'dodge.car',
+  spit3: 'dodge.acid', rain: 'dodge.acid', stomp: 'boss.stomp' });
+/** teaching:3: the phase-change hints by base archetype (twins → hulk, prime → colossus) and phase number. */
+const PHASE_HINT = Object.freeze({
+  hulk: [null, null, 'boss.hulk.2', 'boss.hulk.3'], spitterQueen: [null, null, 'boss.spitterQueen.2', 'boss.spitterQueen.3'],
+  juggernaut: [null, null, 'boss.juggernaut.2', 'boss.juggernaut.3'], colossus: [null, null, 'boss.colossus.2', 'boss.colossus.3'],
+});
+/** teaching:5: the save key ('seen:<id>') of every FIELD GUIDE entry, built once (no string per event). */
+const SEEN_KEY = (() => {
+  const o = {};
+  for (let s = 0; s < CODEX.sections.length; s++) for (const id of CODEX.sections[s].ids) o[id] = 'seen:' + id;
+  return Object.freeze(o);
+})();
+const CARD_OK = Object.freeze(CODEX.cards.reduce((o, id) => { o[id] = true; return o; }, {}));
+/** gate op → its FIELD GUIDE entry. */
+const GATE_CODEX = Object.freeze({ '+': 'gate.plus', '-': 'gate.minus', x: 'gate.mult', '/': 'gate.div', item: 'gate.item' });
+const ZOMBIE_CODEX = TYPES.map((t) => 'zombie.' + t);
+const RELEASE_CRATE = 'crate';                            // hint:release key of the held "GRAB THE CRATE" (L1)
+/** teaching:0 B: the core gate lessons held while their gate event is on the road (and slowed the first time, ui). */
+const GATE_LESSONS = Object.freeze({ red: true, single: true });
 
 // ---------------------------------------------------------------------------------------------
 // Pure helpers
@@ -289,6 +320,8 @@ function newRunStats(level, seed, endless, script, replay) {
     bossHpScale: 0.5,    // QA LVL-14: count × shop scale applied to the boss table HP
     assist: 0,           // QA LVL-21: soldiers added by the fail-streak assist at level start
     rubberEvents: 0,     // QA LVL-17: endless gate events rewritten by the rubber band
+    redCapped: 0,        // r7: campaign gate events whose red lanes _capRedLanes capped at spawn (debug)
+    bossTtkBand: 0,      // r7: 1 when _bossTtkBand raised the campaign boss HP to the fight floor (r7 fix round 3: or the weak floor), else 0 (debug)
     eBoss: script.eBoss,
     newBest: false,      // endless: this run set a new best score
   };
@@ -380,9 +413,26 @@ export class LevelRunner {
 
     // waves / hints
     this._waveHz = 0.5; this._waveHz = 1;   // Double field from the start (round-2 cross-group, FX-14 item 2)
-    this._lossHint = null;      // armed hintOnLoss of the most recently spawned wave
+    this._lossHint = null;      // armed hintOnLoss (r7: kept armed until a bite shows it — a later wave no longer disarms it)
     this._waveCount = 0;
     this._lossesThisWave = 0;
+    // round 7 (r7, teaching:0 / :3 / :5): the script event whose gates.spawnEvent is running (gates forwards ev.hint to
+    // showHint during it; _fireGates shows it itself right after, bound to the new event id), the gate event id of each gate
+    // slot (hint:release at its pass / miss), the boss archetype of this run, the zombie types already marked seen this run
+    // (zombie:spawn is frequent) and the NEW cards shown this run (an item its card explained skips its pickup hint)
+    this._spawningEv = null;
+    this._spawnTaught = false;       // r7 fix: a lesson was bound to the event being spawned (its gate:spawn taught 'div')
+    // r7 fix round 2: the gate event the 'lesser' lesson is bound to (−1 none) — released as soon as one of its lanes stops
+    // costing soldiers (a − flipped, a ÷ shot to ×1), so "BOTH LANES HURT" never stays up over a harmless lane
+    this._lesserEv = -1;
+    // r7 fix round 3 (teaching / walker): "GRAB THE CRATE" was emitted (on screen or waiting) and no crate resolved it yet —
+    // step() releases it once no closed crate is left ahead (one the squad steered past unopened, L1 held left: the caption
+    // stayed 2–2.6 s over an empty road, then counted as learnt, and held "×3 MULTIPLIES YOUR SQUAD" 5.6 s past its gate)
+    this._crateHintUp = false;
+    this._gateEv = new Float64Array(GATE_SLOTS).fill(-1);
+    this._bossArch = '';
+    this._zSeenRun = new Uint8Array(TYPES.length);
+    this._runCards = [];
 
     // endless
     this._difficulty = 1;
@@ -456,9 +506,24 @@ export class LevelRunner {
     offs.push(ev.on('gate:pass', (p) => this._onGatePass(p)));
     offs.push(ev.on('gate:miss', (p) => this._onGateMiss(p)));
     offs.push(ev.on('boss:fight', (p) => this._onBossFight(p)));
-    offs.push(ev.on('boss:attack', (p) => this._onBossAttack(p)));      // round-3 FTUE: 'dodge' hint
+    offs.push(ev.on('boss:attack', (p) => this._onBossAttack(p)));      // round-3 FTUE: the dodge lesson (r7: one per attack kind)
     offs.push(ev.on('item:pickup', (p) => this._onItemPickup(p)));      // round-3 FTUE: first-pickup hints
-    offs.push(ev.on('weapon:stored', () => this._onWeaponStored()));     // round 6: "TAP THE GUN BUTTON TO FIRE" (once ever)
+    offs.push(ev.on('weapon:stored', () => this._onWeaponStored()));     // round 6: the FIRE lesson, HINTS.fire (once ever)
+    // round 7 (r7): the weapon's name hint when it really fires (teaching:0 C), the crate hint's release (teaching:0 B), the
+    // boss phase lessons (teaching:3), a spitter's first glob (teaching:7), the first grey ×1 (teaching:5) and the FIELD
+    // GUIDE entries met in play (zombie types, armour, power-up timers)
+    offs.push(ev.on('weapon:start', (p) => this._onWeaponStart(p)));
+    offs.push(ev.on('crate:open', () => { this._crateHintUp = false; this._release(RELEASE_CRATE); }));
+    // r7 fix round 3 (teaching / walker): a weapon's name lesson ("SHOTGUN! WIDE SPREAD, SHORT RANGE") is bound to the weapon
+    // — weapon:end takes it down, or drops it from the queue unshown (it showed 0.5 s past the shotgun, mostly in its last
+    // 2.5 s, when the FIRE lesson was read first); under HINT_MARK_S on screen it stays unmarked for the next firing
+    offs.push(ev.on('weapon:end', (p) => { if (p && typeof p.id === 'string') this._release(p.id); }));
+    offs.push(ev.on('boss:phase', (p) => this._onBossPhase(p)));
+    offs.push(ev.on('zombie:telegraph', (p) => this._onZombieTelegraph(p)));
+    offs.push(ev.on('zombie:spawn', (p) => this._onZombieSpawn(p)));
+    offs.push(ev.on('gate:step', (p) => this._onGateStep(p)));
+    offs.push(ev.on('armor:change', (p) => { if (p && p.plates > 0) this._codexSeen('hud.shield', false); }));
+    offs.push(ev.on('gear:start', (p) => { if (p && Number.isFinite(p.duration)) this._codexSeen('hud.pills', false); }));
     offs.push(ev.on('boss:dead', (p) => this._onBossDead(p)));
     offs.push(ev.on('squad:loss', (p) => this._onSquadLoss(p)));
     offs.push(ev.on('squad:dead', (p) => this._onSquadDead(p)));
@@ -589,20 +654,66 @@ export class LevelRunner {
    * when the hint is actually displayed, so a hint overwritten in the same frame is shown later instead of lost.
    * QA LVL-33: a template hint (HINTS[id] is a function) is called with `arg` (x2: the pass's effective multiplier).
    */
-  showHint(id, arg) {
-    if (!id) return;
+  showHint(id, arg, opts) {
+    if (!id) return false;
     const entry = HINTS[id];
-    if (entry === undefined) { warnOnce('level.hint.' + id, 'unknown hint id ' + id); return; }
+    if (entry === undefined) { warnOnce('level.hint.' + id, 'unknown hint id ' + id); return false; }
+    // round 7 (r7, teaching:0 B): gates.spawnEvent forwards ev.hint here without options while _fireGates is spawning that
+    // event — _fireGates shows it itself right after, bound to the new gate event id (hold, release, gate pulse)
+    if (!opts && this._spawningEv && this._spawningEv.hint === id) return false;
     const save = this.ctx.save;
-    if (save && save.hintDone(id)) return;
+    if (save && save.hintDone(id)) return false;
     const run = this.ctx.run;
     if (run && run.hintsShown) {
-      if (run.hintsShown.indexOf(id) !== -1) return;     // at most once per run
+      if (run.hintsShown.indexOf(id) !== -1) return false;     // at most once per run
       run.hintsShown.push(id);
     }
     P_HINT.id = id;
     P_HINT.text = typeof entry === 'function' ? entry(arg) : entry;
+    P_HINT.hold = opts && opts.hold > 0 ? opts.hold : 0;
+    P_HINT.until = opts && opts.until !== undefined ? opts.until : null;
+    P_HINT.priority = !!(opts && opts.priority);
+    P_HINT.event = opts && opts.event >= 0 ? opts.event : -1;
     this.ctx.events.emit('hint:show', P_HINT);
+    if (this._spawningEv) this._spawnTaught = true;
+    return true;
+  }
+
+  /** Round 7 (r7, teaching:0 B): the subject of a held hint is resolved (its gate event passed, a crate opened) → ui
+   *  takes that hint down (or drops it from the queue) via hint:release { key }. */
+  _release(key) {
+    if (key === null || key === undefined) return;
+    P_RELEASE.key = key;
+    this.ctx.events.emit('hint:release', P_RELEASE);
+  }
+
+  /** Round 7 (r7): the reused showHint options for a hint bound to gate event `eventId` until it passes (hold = the
+   *  theatre seconds until it reaches the squad at the current road speed; ui pulses the event's gates meanwhile). */
+  _gateHold(eventId) {
+    const v = Math.max(1, this.ctx.world.roadSpeed);
+    HOLD.hold = -WORLD.spawnZ / v;
+    HOLD.until = eventId >= 0 ? eventId : null;
+    HOLD.priority = false;
+    HOLD.event = eventId >= 0 ? eventId : -1;
+    return HOLD;
+  }
+
+  /**
+   * Round 7 (r7, teaching:5): an entry of the FIELD GUIDE met in play — marked seen in the save ('seen:<id>', once ever;
+   * save.hints takes any id). With `card` and a CODEX.cards entry it is announced by a NEW card (codex:new { id }) — a purple
+   * item lane at its spawn, before the choice; a crate's item at its pickup; the first MAX; the first grey ×1. Returns true
+   * when the card was announced. Event time only (the key strings are built once, SEEN_KEY).
+   */
+  _codexSeen(id, card) {
+    const key = SEEN_KEY[id];
+    const save = this.ctx.save;
+    if (!key || !save || save.hintDone(key)) return false;
+    save.markHint(key);
+    if (!card || !CARD_OK[id] || this._phase === 'idle') return false;
+    this._runCards.push(id);
+    P_CODEX.id = id;
+    this.ctx.events.emit('codex:new', P_CODEX);
+    return true;
   }
 
   // -------------------------------------------------------------------------------------------
@@ -666,10 +777,19 @@ export class LevelRunner {
     return this.requestStart(this._level, (this._failStreak.get(this._level) | 0) > 0 ? undefined : this._seed);
   }
 
-  _scheduleRequest() {
+  /**
+   * Next slice of a pending requestStart. Round 7 (r7, flow-coins:3): a 0 ms timer task, not an animation frame — on a
+   * no-GPU box a frame takes 0.3–2 s, and one 8 ms slice per frame made NEXT wait 1.3 s (Low) to 5 s (High) for L2's 9
+   * attempts while the results looked unchanged. Timer tasks interleave with input and frames, so no frame still waits on
+   * more than one slice. `hidden` (a hidden tab, _runRequest): re-armed on an animation frame instead, which a hidden tab
+   * does not run, so the run never starts unseen. requestAnimationFrame is the fallback without setTimeout.
+   */
+  _scheduleRequest(hidden) {
     const g = typeof globalThis !== 'undefined' ? globalThis : null;
-    if (g && typeof g.requestAnimationFrame === 'function') { this._reqRaf = true; this._reqHandle = g.requestAnimationFrame(this._reqTick); }
-    else if (g && typeof g.setTimeout === 'function') { this._reqRaf = false; this._reqHandle = g.setTimeout(this._reqTick, 0); }
+    const raf = !!(g && typeof g.requestAnimationFrame === 'function');
+    const timer = !!(g && typeof g.setTimeout === 'function');
+    if (raf && (hidden || !timer)) { this._reqRaf = true; this._reqHandle = g.requestAnimationFrame(this._reqTick); }
+    else if (timer) { this._reqRaf = false; this._reqHandle = g.setTimeout(this._reqTick, 0); }
     else { this._reqOn = false; this.start(this._reqLevel, this._reqSeed); }   // no scheduler (node harness): synchronous
   }
 
@@ -686,12 +806,16 @@ export class LevelRunner {
     this._reqHandle = 0;
   }
 
-  /** One frame of a pending requestStart: generation attempts for START_SLICE_MS (one at least), then start or re-queue. */
+  /** One slice of a pending requestStart: generation attempts for START_SLICE_MS (one at least), then start or re-queue.
+   *  Round 7 (r7, flow-coins:3): a hidden tab waits for the next animation frame (it gets one once visible again). */
   _runRequest() {
     this._reqHandle = 0;
     if (!this._reqOn) return;
     const st = this.ctx.state;
     if (st && st.current !== this._reqState) { this._reqOn = false; return; }   // the menu was left: dropped
+    let hidden = false;
+    try { hidden = typeof document !== 'undefined' && !!document && document.visibilityState === 'hidden'; } catch (_) { hidden = false; }
+    if (hidden && typeof globalThis !== 'undefined' && typeof globalThis.requestAnimationFrame === 'function') { this._scheduleRequest(true); return; }
     const key = this._reqKey;
     const t0 = perfNow();
     let ready = this._scriptCache.has(key);
@@ -918,10 +1042,13 @@ export class LevelRunner {
     if (render && typeof render.setDistrict === 'function') render.setDistrict(this._district, seconds);
   }
 
-  /** district:change { id, name, index, label, accent, seconds, reason, banner } for the district shown (reused payload). */
-  _emitDistrict(seconds, reason, banner) {
+  /** district:change { id, name, index, label, accent, seconds, reason, banner, first, step, steps } for the district shown
+   *  (reused payload). Round 7 (r7, explain:4): `first` — the big "NEW DISTRICT" card (a district's first level, an
+   *  endless start or rotation); `step` / `steps` — the campaign level's place in its district (k / 5; 0 in endless). */
+  _emitDistrict(seconds, reason, banner, first) {
     const d = this._district;
     if (!d) return;
+    const per = DISTRICT_RULES.levelsPerDistrict > 0 ? DISTRICT_RULES.levelsPerDistrict : 5;
     P_DISTRICT.id = d.id;
     P_DISTRICT.name = d.name;
     P_DISTRICT.index = d.index;
@@ -930,6 +1057,9 @@ export class LevelRunner {
     P_DISTRICT.seconds = seconds;
     P_DISTRICT.reason = reason;
     P_DISTRICT.banner = !!banner;
+    P_DISTRICT.first = !!first;
+    P_DISTRICT.step = this._endless || reason === 'title' ? 0 : ((Math.max(1, this._level) - 1) % per) + 1;
+    P_DISTRICT.steps = per;
     this.ctx.events.emit('district:change', P_DISTRICT);
   }
 
@@ -974,7 +1104,7 @@ export class LevelRunner {
     }
     this._district = target;
     this._applyDistrict(R.fadeSeconds);
-    this._emitDistrict(R.fadeSeconds, 'rotate', true);
+    this._emitDistrict(R.fadeSeconds, 'rotate', true, true);   // r7 (explain:4): an endless rotation gets the big card
   }
 
   // -------------------------------------------------------------------------------------------
@@ -1044,12 +1174,22 @@ export class LevelRunner {
     const ctx = this.ctx;
     this._script = script;
     this._seed = seed;
-    // DISTRICTS.md §3.1 / §8.5: the run's district snaps (seconds 0) after the undo list and before env.setLevel; the
-    // banner shows unless the previous run this session was the same level (endless: also endless)
+    // DISTRICTS.md §3.1 / §8.5: the run's district snaps (seconds 0) after the undo list and before env.setLevel. Round 7
+    // (r7, explain:4): the banner shows at EVERY run start, retries included (a small "NAME · k/5" tag); the big "NEW
+    // DISTRICT" card only on a district's first level (and an endless start) when the previous run this session was not the
+    // same level — the old rule showed one identical pill at every new level's start and none on a retry
     this._district = this._endless ? districtForChunk(1) : districtForLevel(this._level);
     const runKey = this._endless ? -1 : this._level;
-    const banner = runKey !== this._lastRunKey;
+    const per = DISTRICT_RULES.levelsPerDistrict > 0 ? DISTRICT_RULES.levelsPerDistrict : 5;
+    const firstOfDistrict = runKey !== this._lastRunKey && (this._endless || (this._level - 1) % per === 0);
     this._lastRunKey = runKey;
+    this._spawningEv = null;
+    this._gateEv.fill(-1);
+    this._lesserEv = -1;
+    this._crateHintUp = false;
+    this._bossArch = '';
+    this._zSeenRun.fill(0);
+    this._runCards.length = 0;
     this._lastGatesAt = -1e9;
     this._undoRuntimeState(script.roadSpeed);
     this._applyDistrict(0);
@@ -1104,7 +1244,10 @@ export class LevelRunner {
     P_START.script = script;
     P_START.district = this._district.id;
     ctx.events.emit('level:start', P_START);
-    this._emitDistrict(0, 'start', banner);
+    this._emitDistrict(0, 'start', true, firstOfDistrict);
+    // r7 (teaching:5): the FIELD GUIDE's controls and the road bar are met at the first run
+    this._codexSeen('ctl.steer', false); this._codexSeen('ctl.pause', false); this._codexSeen('ctl.mute', false);
+    if (!this._endless) this._codexSeen('hud.progress', false);
   }
 
   _findBossAt(script) {
@@ -1119,6 +1262,7 @@ export class LevelRunner {
     this._gateIds.fill(-1);
     this._gateLane.fill(null);
     this._gateHits.fill(0);
+    this._gateEv.fill(-1);
   }
 
   _setPhase(p) {
@@ -1221,6 +1365,13 @@ export class LevelRunner {
 
       // run-up bursts
       if (this._runupActive) this._stepRunup(dt);
+
+      // r7 fix round 3: the held "GRAB THE CRATE" comes down (or leaves the queue unshown) once no closed crate is left
+      // ahead — its crate passed the squad unopened (pickups: ≤ 8 slots, only while the hint is up)
+      if (this._crateHintUp) {
+        const pk = ctx.pickups;
+        if (!pk || !pk.hasClosedCrateAhead()) { this._crateHintUp = false; this._release(RELEASE_CRATE); }
+      }
 
       // round 5 integration: the boss hand-off's helpers, once, BOSS_WARM_LEAD_M before the boss event
       if (this._bossWarmAt >= 0 && w.distance >= this._bossWarmAt) this._warmBossPath();
@@ -1464,11 +1615,28 @@ export class LevelRunner {
       case 'wave': this._fireWave(ev); break;
       case 'crate': this._fireCrate(ev); break;
       case 'coins': this._fireCoins(ev); break;
-      case 'hint': this.showHint(ev.id); break;
+      case 'hint': this._fireHint(ev); break;
       case 'runup': this._fireRunup(ev); break;
       case 'boss': this._fireBoss(ev); break;
       default: warnOnce('level.event.' + ev.type, 'unknown script event type ' + ev.type); break;
     }
+  }
+
+  /** A script 'hint' row. Round 7 (r7, teaching:0 B): "GRAB THE CRATE" (L1) stays until a crate opens or an item is picked
+   *  up (hint:release 'crate'), at most JUICE.ui.crateHintHoldSeconds — it was a flat 2.5 s, often cut to 1.5 s. r7 fix
+   *  round 2: the row trails its crate's spawn by LEVELS.curve.crateHintAfterM, and a squad in the crate's lane can shoot
+   *  it open first — with no closed crate left ahead the row shows nothing (the release only came with a LATER crate, so
+   *  the caption stayed its full 6 s over an opened crate: L6, fresh save). Unshown, it stays unmarked for a later crate.
+   *  r7 fix round 3: it is also released once its crate passes the squad unopened (_crateHintUp, step). */
+  _fireHint(ev) {
+    if (ev.id !== 'crate') { this.showHint(ev.id); return; }
+    const pk = this.ctx.pickups;
+    if (pk && !pk.hasClosedCrateAhead()) return;
+    HOLD.hold = JUICE.ui.crateHintHoldSeconds > 0 ? JUICE.ui.crateHintHoldSeconds : 0;
+    HOLD.until = RELEASE_CRATE;
+    HOLD.priority = false;
+    HOLD.event = -1;
+    if (this.showHint(ev.id, undefined, HOLD)) this._crateHintUp = true;
   }
 
   /**
@@ -1507,6 +1675,35 @@ export class LevelRunner {
     if (this._aheadCount < PENDING_GATES) this._aheadGates[this._aheadCount++] = ev;
   }
 
+  /**
+   * r7 (balance:1, GDD §4.4): generated red lanes are sized on the design line E(z), so a squad below it met a −A as large as
+   * its whole count (L9 retry seed 1109: ÷2 | −130 at C 117). At spawn every '−' lane of a generated campaign level shows at
+   * most LEVELS.curve.redCap.multi (pair / triple) or .single (single) of the live count, on the design grid (roundDesign),
+   * never below GATE_RULES.generation.minValue. With redCap.keepFlipCap the lane keeps its authored flipCap (a capped −60 that
+   * was −130 still flips up to +130: shooting a red gate blue keeps its payoff); without it flipCap ≤ the cap. Authored levels
+   * (L1) and events with nothing to cap are returned as they are; the cached script stays frozen — a capped event is a shallow
+   * copy with a new lanes array (one small allocation per capped gate event, event time, never per frame).
+   */
+  _capRedLanes(ev) {
+    const cap = LEVELS.curve.redCap;
+    const squad = this.ctx.squad;
+    if (!cap || !squad || LEVELS.authored[this._level] || !ev.lanes) return ev;
+    const frac = ev.layout === 'single' ? cap.single : cap.multi;
+    if (!(frac > 0)) return ev;
+    const lim = Math.max(GATE_RULES.generation.minValue, roundDesign(frac * squad.count));
+    let lanes = null;
+    for (let i = 0; i < ev.lanes.length; i++) {
+      const l = ev.lanes[i];
+      if (l.op !== '-' || !(l.value > lim)) continue;
+      if (!lanes) lanes = ev.lanes.slice();
+      const flip0 = l.flipCap > 0 ? l.flipCap : l.value;        // gates' own fallback: flipCap = the spawn value
+      lanes[i] = Object.assign({}, l, { value: lim, flipCap: cap.keepFlipCap ? flip0 : Math.min(flip0, lim) });
+    }
+    if (!lanes) return ev;
+    this.ctx.run.redCapped++;
+    return Object.assign({}, ev, { lanes });
+  }
+
   /** gates.spawnEvent(ev) + lane guards (12 m ahead of the lane, HP from the leak solve at their contact point). */
   _fireGates(ev) {
     const ctx = this.ctx;
@@ -1515,12 +1712,29 @@ export class LevelRunner {
     if (!gates) return;
     this._lastGatesAt = ev.at;                            // DISTRICTS.md §3.2 (b): the last fired gate event
     if (this._endless) this._guardEndlessGate(ev);
-    if (ev.hint) this.showHint(ev.hint);                  // gates forwards ev.hint as well; once-ever makes this a no-op then
+    else ev = this._capRedLanes(ev);                      // r7: a campaign red lane never shows more than LEVELS.curve.redCap of C
     this._pendingEvent = ev;
+    this._spawningEv = ev;                                // r7: showHint ignores gates' bare forward of ev.hint (below)
+    this._spawnTaught = false;
     const eid = gates.spawnEvent(ev);
+    this._spawningEv = null;
     this._pendingEvent = null;
     const hasId = eid !== undefined && eid !== null && eid >= 0;
     if (hasId) this._bindEvent(eid, ev);
+    // round 7 (r7, teaching:0 B): the event's lesson ('red' / 'single') is held while its gates are on the road — released
+    // at their pass, the gates pulsing meanwhile (C's gates.pulseEvent, via ui) — and slowed the first time (ui). The lead's
+    // 'lesser' lesson takes the first lesser-evil pair (every lane − or ÷) when no other lesson is shown for it. r7 fix: that
+    // includes the 'div' lesson its own ÷ gate taught during spawnEvent (gate:spawn) — on L3's first [÷2 | −13] 'lesser'
+    // waited behind 'div' and flashed for 0.64 s after the red lane had flipped; it now waits for the next lesser pair
+    const id = hasId ? eid : -1;
+    let taught = this._spawnTaught;
+    if (ev.hint) taught = this.showHint(ev.hint, undefined, GATE_LESSONS[ev.hint] ? this._gateHold(id) : undefined) || taught;
+    if (!taught && this._lesserEvil(ev) && this.showHint('lesser', undefined, this._gateHold(id))) this._lesserEv = id;
+    // r7: a special on the road for the first time on a generated level: the gold diamond it rides on the bar (the HUD
+    // ticks are the campaign's; the authored L1 teaches its crate itself)
+    if (this._hasItemLane(ev)) this._specialsHint();
+    if (ev.layout === 'single') this._codexSeen('gate.single', false);
+    if (ev.guards && ev.guards.length > 0) this._codexSeen('gate.guards', false);
 
     const guards = ev.guards;
     if (!guards || guards.length === 0 || !ctx.zombies) return;
@@ -1529,6 +1743,7 @@ export class LevelRunner {
     const centres = WORLD.laneCenters[ev.layout] || WORLD.laneCenters.pair;
     const laneW = WORLD.laneWidth[ev.layout] || WORLD.laneWidth.pair;
     const guardZ = WORLD.spawnZ + WORLD.guardOffset;
+    const low = this._lowSideMult(this._expectedAt(w.distance));   // r7: low-side band (C vs the design count now; 1 in endless)
     for (let g = 0; g < guards.length; g++) {
       const guard = guards[g];
       const units = guard.units;
@@ -1539,9 +1754,9 @@ export class LevelRunner {
       const sBar = meanOwnSpeed(units);
       const contactAt = w.distance + ((-WORLD.spawnZ - WORLD.guardOffset) * v) / (v + sBar);
       // QA LVL-15: damped shop-rank scaling (LEAK_MODEL.profileExp); endless: solved at the live count (QA LVL-17); round 5d:
-      // endless guards are clamped to the chunk's per-zombie HP cap like its waves (_capEndlessHp)
+      // endless guards are clamped to the chunk's per-zombie HP cap like its waves (_capEndlessHp); r7: × the low-side band
       const eContact = this._expectedAt(contactAt);
-      let hp = scaleHp(guard.hp || solveWaveHp(eContact, v, units, this._bandMid), this._liveHpMult(guard.hp ? eContact : 0));
+      let hp = scaleHp(guard.hp || solveWaveHp(eContact, v, units, this._bandMid), this._liveHpMult(guard.hp ? eContact : 0) * low);
       if (this._endless) hp = this._capEndlessHp(hp, units, eContact);
       GUARD_OPTS.guardEventId = hasId ? eid : -1;
       GUARD_OPTS.guardLane = laneIdx;
@@ -1577,16 +1792,20 @@ export class LevelRunner {
     const contactAt = ctx.world.distance + (-WORLD.spawnZ * v) / (v + sBar);
     // authored / baked HP or the live leak solve; `hpMult` scales either (the validator applies it to ev.hp too);
     // QA LVL-15: × p^LEAK_MODEL.profileExp for the shop's fire-rate × damage ranks; QA LVL-17: endless at the live count;
-    // round 5d: endless tables are then clamped to the chunk's per-zombie HP cap (_capEndlessHp — the horde grows in numbers)
+    // round 5d: endless tables are then clamped to the chunk's per-zombie HP cap (_capEndlessHp — the horde grows in numbers);
+    // r7: × the campaign low-side band, C against the design count at spawn (not at contact: that E already holds the gain of
+    // the gate the squad has not passed yet)
     const eContact = this._expectedAt(contactAt);
     const base = ev.hp ? ev.hp : solveWaveHp(eContact, v, units, this._bandMid);
-    let hp = scaleHp(base, (ev.hpMult || 1) * this._liveHpMult(ev.hp ? eContact : 0));
+    let hp = scaleHp(base, (ev.hpMult || 1) * this._liveHpMult(ev.hp ? eContact : 0) * this._lowSideMult(this._expectedAt(ctx.world.distance)));
     if (this._endless) hp = this._capEndlessHp(hp, units, eContact);
     if (ev.lag) this._spawnStaggered(ev, hp);
     else zombies.spawnWave(ev, hp);
     this._noteWaveSpawned(hzOf(hp, units));
     if (ev.hint) this.showHint(ev.hint);
-    this._lossHint = ev.hintOnLoss || null;
+    // r7 (teaching:0 F): an armed loss hint stays armed until a bite shows it — the next wave's spawn used to disarm L1's
+    // 'bite', so a player whose wave A took no bite was never told (levelgen also arms the first wave of L2 / L3)
+    if (ev.hintOnLoss) this._lossHint = ev.hintOnLoss;
   }
 
   /**
@@ -1716,12 +1935,38 @@ export class LevelRunner {
     if (this._bossReached && !this._endless) return;     // pickups stop spawning after the boss row (campaign)
     const pickups = this.ctx.pickups;
     if (pickups) pickups.spawnCrate(ev.item, ev.x);
+    this._codexSeen('pickup.crate', false);              // r7 (teaching:5)
+    this._specialsHint();                                // r7: the gold diamond on the bar
   }
 
   _fireCoins(ev) {
     if (this._bossReached && !this._endless) return;
     const pickups = this.ctx.pickups;
     if (pickups) pickups.spawnCoinLine(ev.x, ev.count !== undefined ? ev.count : PICKUPS.coinLine.count);
+    this._codexSeen('pickup.coins', false);              // r7 (teaching:5)
+  }
+
+  /** Round 7 (r7, lead decision): every lane of a pair / triple costs soldiers (− or ÷: "lesser evil", GDD §4.4). */
+  _lesserEvil(ev) {
+    const lanes = ev.lanes;
+    if (!lanes || lanes.length < 2) return false;
+    for (let i = 0; i < lanes.length; i++) { const op = lanes[i] ? lanes[i].op : ''; if (op !== '-' && op !== '/') return false; }
+    return true;
+  }
+
+  _hasItemLane(ev) {
+    const lanes = ev.lanes;
+    if (!lanes) return false;
+    for (let i = 0; i < lanes.length; i++) if (lanes[i] && lanes[i].op === 'item') return true;
+    return false;
+  }
+
+  /** Round 7 (r7, lead decision; the tester read the bar's gold diamonds as checkpoints): the first special that reaches
+   *  the road on a generated campaign level — the squad marker is on its diamond at that moment — names the diamonds,
+   *  once ever. Not on an authored level (L1 teaches its crate with its own hint) and not in endless (no diamonds). */
+  _specialsHint() {
+    if (this._endless || LEVELS.authored[this._level]) return;
+    this.showHint('specials');
   }
 
   /** Run-up: phase 'runup', fog closes in, level:runup, then `bursts` horde bursts every burstGap seconds. */
@@ -1739,7 +1984,7 @@ export class LevelRunner {
     const sBar = meanOwnSpeed(units);
     const contactAt = ctx.world.distance + (-WORLD.spawnZ * v) / (v + sBar);
     const hp = scaleHp(ev.hp || solveWaveHp(this._expectedAt(contactAt), v, units, this._bandMid),
-      (ev.hpMult || 1) * this._liveHpMult(ev.hp ? this._expectedAt(contactAt) : 0));   // QA LVL-15
+      (ev.hpMult || 1) * this._liveHpMult(ev.hp ? this._expectedAt(contactAt) : 0) * this._lowSideMult(this._expectedAt(ctx.world.distance)));   // QA LVL-15; r7 low side
     // one small record per run-up (event time): only the types present, counts rewritten per burst
     const burstUnits = {};
     for (let k = 0; k < TYPES.length; k++) {
@@ -1783,14 +2028,21 @@ export class LevelRunner {
     const union = unionMinionUnits(phases);
     // QA LVL-15: boss minions share the damped shop-rank scaling of the wave solve. r5c: an endless mini-boss's minions are soak
     // like a campaign boss's (_miniMinionMult), never the waves' design multiple × pressure (they were walls: docs/build/r5c-endless.md)
+    // r7: a campaign boss's minions also carry the low-side band against E_boss (a small squad no longer soaks a 0.15 × E_boss solve)
     const minionHp = scaleHp(ev.minionHp || solveWaveHp(eBoss, w.roadSpeedBase, union, this._bandMid),
-      (this._endless ? this._miniMinionMult() : this._liveHpMult(eBoss)) * (ev.minionHp ? 1 : (LEAK_MODEL.minionScale > 0 ? LEAK_MODEL.minionScale : 1)));
+      (this._endless ? this._miniMinionMult() : this._liveHpMult(eBoss) * this._lowSideMult(eBoss)) * (ev.minionHp ? 1 : (LEAK_MODEL.minionScale > 0 ? LEAK_MODEL.minionScale : 1)));
     let hp = ev.hp;
     if (!(hp > 0)) hp = roundBossHp((this._endless ? LEVELS.endless.miniBossHpPerE : BOSSES.hpPerE) * eBoss);
-    // QA LVL-14 (GDD §7): table HP × count scale × shop scale, never below the table — every fight lasts long enough
-    // for its phases and attacks to be seen, and a bigger army or a better shop still wins faster
+    // QA LVL-14 (GDD §7): table HP × count scale × shop scale — every fight lasts long enough for its phases and attacks to be
+    // seen, and a bigger army or a better shop still wins faster. Never below the table in endless (and with an older data.js);
+    // r7: in the campaign BOSSES.squadScale.minMult < 1 takes a squad under E_boss below it (its fight no longer runs 25–43 s),
+    // and the fight floor (_bossTtkBand) keeps a squad at / above the curve from erasing the boss in a few seconds
     const hpScale = this._bossHpScale(eBoss);
-    hp = Math.max(hp, roundBossHp(hp * hpScale));
+    const sq = BOSSES.squadScale;
+    hp = (sq && sq.minMult > 0 && sq.minMult < 1 && !this._endless) ? roundBossHp(hp * hpScale) : Math.max(hp, roundBossHp(hp * hpScale));
+    const floored = this._bossTtkBand(hp, mini, eBoss);
+    run.bossTtkBand = floored > hp ? 1 : 0;
+    hp = floored;
     run.bossHpScale = hpScale;
     this._histogram('bossHpScale', hpScale);
     // round-3 QA LVL-17: an endless mini-boss carries the chunk's pressure — HP and every attack's kills. r5c: each through its
@@ -1804,6 +2056,10 @@ export class LevelRunner {
       if (kHp > 1) hp = roundBossHp(hp * kHp);
       if (kKills > 1) bossPhases = pressurePhases(ev.phases || phases, kKills);
     }
+    // r7 (teaching:3 / :5): the archetype picks the phase lessons; the boss and its bar are FIELD GUIDE entries met now
+    this._bossArch = archetype;
+    this._codexSeen('boss.' + archetype, false);
+    this._codexSeen('hud.bossbar', false);
     // fresh spec per boss event: the boss keeps minionHp for its bursts during the whole fight
     const spec = { id: ev.id || ('boss.' + archetype), archetype, hp, phases: bossPhases, minionHp, mini };
     if (ev.x !== undefined) spec.x = ev.x;
@@ -1845,9 +2101,9 @@ export class LevelRunner {
       const phases = ev.phases || archetypePhases(archetype);
       const eBoss = this._endless ? endlessE(this._difficulty) : this._script.eBoss;
       const union = unionMinionUnits(phases);
-      scaleHp(ev.minionHp || solveWaveHp(eBoss, w.roadSpeedBase, union, this._bandMid), this._endless ? this._miniMinionMult() : this._liveHpMult(eBoss));
+      scaleHp(ev.minionHp || solveWaveHp(eBoss, w.roadSpeedBase, union, this._bandMid), this._endless ? this._miniMinionMult() : this._liveHpMult(eBoss) * this._lowSideMult(eBoss));
       const hp = ev.hp > 0 ? ev.hp : roundBossHp(BOSSES.hpPerE * eBoss);
-      roundBossHp(hp * this._bossHpScale(eBoss));
+      this._bossTtkBand(roundBossHp(hp * this._bossHpScale(eBoss)), this._endless || !!ev.mini, eBoss);   // r7: pure, the result is discarded
       if (this._endless) pressurePhases(phases, 2);
     } catch (err) {
       warnOnce('level.bossWarm', 'boss warm-up failed: ' + (err && err.message ? err.message : err));
@@ -1856,18 +2112,20 @@ export class LevelRunner {
 
   /**
    * QA LVL-14: boss HP multiplier = countScale · shopScale.
-   * countScale = clamp((C / E)^BOSSES.squadScale.exp, 1, maxMult) with C = the live count, E = E_boss (endless: E(D));
+   * countScale = clamp((C / E)^BOSSES.squadScale.exp, lo, maxMult) with C = the live count, E = E_boss (endless: E(D)); lo = 1,
+   * r7: BOSSES.squadScale.minMult (0.6) in the campaign — a squad below E_boss meets less than the table (_fireBoss);
    * shopScale = clamp(m^(BOSSES.shopScale.exp·min(1, C/E)), 1, maxMult) with m = (fireRate / FIRE.rateBase)·damage·bossDamage (1 at
    * base ranks). TTK ∝ HP / (C·m) falls strictly with m, and with C from E up (exponents < 1). Below E the faded exponent makes
    * HP / C rise with C once C > E / (exp·ln m) (≈ 0.44·E at m = 12.5): measured flat, and on L28 at ranks 9·8·8·10·9 11.5 s at
-   * 0.45·E against 15.1 s at E (docs/build/r5-balance-audit.md §4; lead decision pending).
+   * 0.45·E against 15.1 s at E (docs/build/r5-balance-audit.md §4). r7 answers that pending decision: below E_boss the count
+   * scale now falls to minMult, which outweighs the faded shop exponent (never-steering bot: TTK max 41 → 20 s).
    */
   _bossHpScale(E) {
     const ctx = this.ctx;
     const sq = BOSSES.squadScale, sh = BOSSES.shopScale;
     let scale = 1;
     const ratio = Math.max(0, ctx.squad ? ctx.squad.count : 0) / Math.max(1, E);
-    if (sq) scale *= clamp(Math.pow(ratio, sq.exp), 1, sq.maxMult);
+    if (sq) scale *= clamp(Math.pow(ratio, sq.exp), (sq.minMult > 0 && !this._endless) ? sq.minMult : 1, sq.maxMult);
     if (sh) {
       const pr = ctx.profile;
       const m = pr ? (pr.fireRate / FIRE.rateBase) * pr.damage * pr.bossDamage : 1;
@@ -1876,6 +2134,51 @@ export class LevelRunner {
       scale *= clamp(Math.pow(m > 0 ? m : 1, sh.exp * Math.min(1, ratio)), 1, sh.maxMult);
     }
     return scale;
+  }
+
+  /**
+   * r7 (balance:4, GDD §7 "fight floor"): the shortest fight a campaign boss allows a squad at or above the curve. With
+   * BOSSES.ttkBand = { acc, min, milestoneMin, shopExp, fromRatio }: when C ≥ fromRatio·E_boss, HP ≥ round50(DPS · tMin) with
+   * DPS = C · fireRate · damage · bossDamage · acc (GDD §3.3 squad DPS) and tMin = (milestone ? milestoneMin : min) · m^−shopExp,
+   * m = (fireRate / FIRE.rateBase)·damage·bossDamage — a better shop still wins faster, at the r5 rate. Milestone = the curve level
+   * (min(L, loopAfter)) is in BOSSES.milestones. A regular boss at C = E_boss already lasts ≈ 12.5·m^−0.1 s, so the floor binds
+   * for big squads (C > ≈ 1.3·E_boss) and on milestones (the 393-soldier L15 Colossus died in 12 s). Mini-bosses, endless, a
+   * missing key: HP unchanged (r7 fix round 3: a squad below fromRatio·E_boss meets the weak floor only). Pure (no write), so
+   * the boss warm-up can run it.
+   * r7 fix (balance verifier): the floor fades in — its weight rises from 0 at fromRatio·E_boss to 1 at (fromRatio +
+   * fadeWidth)·E_boss, HP = hp + w·(floor − hp) — so the boss HP no longer steps where the band switches on (L15: 365
+   * soldiers met 28,550 HP, 369 met 32,300: +13 % HP, ≈ +3 s of fight, for +1 % soldiers). At and above (fromRatio +
+   * fadeWidth)·E_boss, the band's own numbers.
+   * r7 fix round 3: under the band, at any C, the weak floor HP ≥ round50(DPS · weakMin · m^−shopExp) (see below).
+   */
+  _bossTtkBand(hp, mini, eBoss) {
+    const band = BOSSES.ttkBand;
+    if (!band || mini || this._endless) return hp;
+    const ctx = this.ctx;
+    const pr = ctx.profile;
+    const c = ctx.squad ? ctx.squad.count : 0;
+    if (!pr || !(c > 0)) return hp;
+    const m = (pr.fireRate / FIRE.rateBase) * pr.damage * pr.bossDamage;
+    const shop = Math.pow(m > 0 ? m : 1, -band.shopExp);
+    const dps = c * pr.fireRate * pr.damage * pr.bossDamage * band.acc;
+    // r7 fix round 3 (balance / walker verifiers): every campaign boss lives at least weakMin · m^−shopExp s against the
+    // squad's DPS, whatever its size — below fromRatio·E_boss the count scale's minMult and the faded shop exponent of
+    // _bossHpScale let a late, upgraded, under-curve squad erase it in 4–8 s (never-steering, worst-lane and tester-like bots
+    // on L16–L29, the phases flashing past; 1.2.2 had 0–1 such fights of 30). weakMin 11 (BOSSES.ttkBand) binds from L13
+    // below the curve (model 8.7–9.8 s); up to L12, and at the curve, the fight is already longer. The band below (min /
+    // milestoneMin) fades in from this floor, not from the table HP
+    let base = hp;
+    if (band.weakMin > 0) {
+      const weak = roundBossHp(dps * band.weakMin * shop);
+      if (weak > base) base = weak;
+    }
+    if (c < band.fromRatio * eBoss) return base;
+    const curveL = Math.min(this._level, LEVELS.curve.loopAfter);
+    const tMin = (BOSSES.milestones.indexOf(curveL) !== -1 ? band.milestoneMin : band.min) * shop;
+    const floor = roundBossHp(dps * tMin);
+    if (!(floor > base)) return base;
+    const fade = band.fadeWidth > 0 ? (c / eBoss - band.fromRatio) / band.fadeWidth : 1;
+    return fade >= 1 ? floor : roundBossHp(base + (floor - base) * fade);
   }
 
   /**
@@ -1935,6 +2238,21 @@ export class LevelRunner {
     return mult;
   }
 
+  /**
+   * r7 (balance:2, GDD §6.3 "Low side"): the campaign's low-side rubber band. Waves, guards and the run-up are solved for the
+   * design line and boss minions for E_boss; a squad below it leaked ≈ 55–60 % at 0.5·E and spiralled (each leak lowers C, DPS
+   * and gate intake). Below E the live tables are × max(LEAK_MODEL.lowSide.floor, C / E)^exp. `E` = the design count at the
+   * SAME moment as C (the spawn: _expectedAt(distance); boss minions: E_boss), never the contact point, whose E already holds the
+   * gain of a gate the squad has not passed. 1 at / above E, in endless, on the authored L1, for E ≤ 0 and without the key.
+   */
+  _lowSideMult(E) {
+    const ls = LEAK_MODEL.lowSide;
+    if (!ls || this._endless || LEVELS.authored[this._level] || !(E > 0)) return 1;
+    const c = this.ctx.squad ? this.ctx.squad.count : 0;
+    if (!(c < E)) return 1;
+    return Math.pow(Math.max(ls.floor, c / E), ls.exp);
+  }
+
   // -------------------------------------------------------------------------------------------
   // Gate bookkeeping: script event ↔ gate event id ↔ lane (for Lane.hint* and hitsPerGate)
   // -------------------------------------------------------------------------------------------
@@ -1970,6 +2288,7 @@ export class LevelRunner {
     this._gateIds[slot] = -1;
     this._gateLane[slot] = null;
     this._gateHits[slot] = 0;
+    this._gateEv[slot] = -1;
   }
 
   // -------------------------------------------------------------------------------------------
@@ -1994,12 +2313,41 @@ export class LevelRunner {
     this._gateIds[slot] = gate.id;
     this._gateLane[slot] = (lanes && p.laneIndex >= 0 && p.laneIndex < lanes.length) ? lanes[p.laneIndex] : null;
     this._gateHits[slot] = 0;
+    this._gateEv[slot] = p.eventId >= 0 ? p.eventId : -1;   // r7: hint:release at this gate's pass / miss
     // round-4 (r3 FTUE §6.2): the ÷ ladder is taught once ever (HINTS.div, showHint's save / per-run gates) when the first
-    // ÷ lane spawns that can still flip to ×2 — an endless lane the gate guard capped at ×1 (cap 1) would contradict it
+    // ÷ lane spawns. Round 7 (r7, explain:5): "SHOOT ÷ TO CANCEL IT: ÷2 → ×1 (NO LOSS)" — from this gate's divisor, held
+    // while its gate is on the road (teaching:0 B) and slowed the first time (ui); an endless lane the gate guard capped at
+    // ×1 (cap 1) is already harmless, so it teaches nothing
     if (gate.op === '/') {
       const lane = this._gateLane[slot];
-      if (!lane || !(lane.cap <= 1)) this.showHint('div');
+      if (!lane || !(lane.cap <= 1)) this.showHint('div', gate.base, this._gateHold(p.eventId));
     }
+    // r7 (teaching:5): the FIELD GUIDE — a purple item lane gets its NEW card now, before the choice (the pickup hint only
+    // came after it: a skipped special was never explained); the other gate kinds are taught by their hints
+    const cid = GATE_CODEX[gate.op];
+    if (cid) this._codexSeen(cid, false);
+    if (gate.op === 'item' && gate.item) this._codexSeen(gate.item, true);
+  }
+
+  /** r7 (teaching:5): a shot ÷ gate reached the grey ×1 (gate:step mult 1) — the NEW card "×1 · NO CHANGE, NOTHING LOST". */
+  _onGateStep(p) {
+    if (this._phase === 'idle' || !p || !p.gate) return;
+    if (p.gate.op === '/' && p.mult === 1) {
+      this._codexSeen('gate.zero', true);
+      this._lesserResolved(p.gate);                      // r7 fix round 2: a ÷ at ×1 costs nothing — "BOTH LANES HURT" is over
+    }
+  }
+
+  /** r7 fix round 2: a lane of the event the held 'lesser' lesson is about stopped costing soldiers (a − flipped, a ÷ shot to
+   *  ×1) — its premise is gone, so it comes down now (hint:release by the event id; teaching verifier: it stayed 2.5 s over
+   *  "×1 | −12" on L5 and 1.7 s over a flipped −100 on L6). Under HINT_MARK_S on screen it stays unmarked and teaches at
+   *  the next lesser pair. */
+  _lesserResolved(gate) {
+    if (this._lesserEv < 0) return;
+    const slot = this._gateSlot(gate);
+    if (slot < 0 || this._gateEv[slot] !== this._lesserEv) return;
+    this._release(this._lesserEv);
+    this._lesserEv = -1;
   }
 
   /** gate:hit → hitsPerGate accumulator; the first registered hit on a lane with hintOnHit shows it (once ever). */
@@ -2014,11 +2362,13 @@ export class LevelRunner {
   _onGateMax() {
     if (this._phase === 'idle') return;
     this.ctx.run.gatesMaxed++;
+    this._codexSeen('gate.max', true);                   // r7 (teaching:5): the first MAX gets its NEW card
   }
 
-  _onGateFlip() {
+  _onGateFlip(p) {
     if (this._phase === 'idle') return;
     this.ctx.run.gatesFlipped++;
+    if (p && p.gate && p.gate.op === '-') this._lesserResolved(p.gate);   // r7 fix round 2: the red lane turned blue
   }
 
   /** gate:pass → gatesPassed, finalVsBase, lostToRed, lane hints (hintOnPass / hintIfOtherBetter), endless score. */
@@ -2039,6 +2389,8 @@ export class LevelRunner {
     }
     const slot = this._gateSlot(gate);
     if (slot >= 0) {
+      this._release(this._gateEv[slot] >= 0 ? this._gateEv[slot] : null);   // r7: its event's held lesson comes down
+      if (this._gateEv[slot] === this._lesserEv) this._lesserEv = -1;
       const lane = this._gateLane[slot];
       if (lane) {
         const onPass = lane.hintOnPass;
@@ -2053,7 +2405,10 @@ export class LevelRunner {
 
   _onGateMiss(p) {
     const slot = this._gateSlot(p.gate);
-    if (slot >= 0) this._closeGate(slot);
+    if (slot < 0) return;
+    if (this._phase !== 'idle') this._release(this._gateEv[slot] >= 0 ? this._gateEv[slot] : null);   // r7
+    if (this._gateEv[slot] === this._lesserEv) this._lesserEv = -1;
+    this._closeGate(slot);
   }
 
   /** zombie:die → kills / killsByType (a zombie that dies by biting or by cleanup is not a kill). */
@@ -2145,42 +2500,129 @@ export class LevelRunner {
     const run = this.ctx.run;
     if (this._phase === 'bossIntro' || this._phase === 'run' || this._phase === 'runup') this._setPhase('boss');
     run.bossStartTime = run.elapsed;
-    // QA LVL-25 (GDD §1.1 / §7): "SHOOT THE BOSS" when shooting starts to count (the intro is immune), campaign only
-    if (!this._endless) this.showHint('boss');
+    // QA LVL-25 (GDD §1.1 / §7): the boss lesson when shooting starts to count (the intro is immune), campaign only. Round 7
+    // (r7, teaching:3): "YOUR SQUAD SHOOTS THE BOSS — DODGE ITS ATTACKS", then — with a weapon waiting in the FIRE button —
+    // "FIRE YOUR STORED WEAPON AT THE BOSS!"
+    if (this._endless) return;
+    this.showHint('boss');
+    if (this._storedCount() > 0) this.showHint('bossFire');
+  }
+
+  /** Weapons waiting in the FIRE button (weapons.storedCount; 0 without weapons). */
+  _storedCount() {
+    const w = this.ctx.weapons;
+    let stored = 0;
+    try { stored = w ? w.storedCount | 0 : 0; } catch (_) { stored = 0; }
+    return stored;
   }
 
   /**
-   * Round-3 FTUE (GDD §1.1): the first telegraphed boss attack teaches the dodge — "STEER CLEAR OF THE MARKS!" ('dodge', once
-   * ever, queued behind "SHOOT THE BOSS", so it is up before the second attack). A first-time player saw a red ring /
-   * stripe / band / spit marks under the squad with no word that steering out of it saves soldiers. The stomp and the
-   * safety-valve chew have no mark to dodge.
+   * Round 7 (r7, teaching:3; replaces round-3's one generic "STEER CLEAR OF THE MARKS!", which went on screen as the first
+   * slam landed): each telegraphed attack teaches itself the moment its telegraph starts — "RED RING = SLAM! STEER OUT OF IT",
+   * "RED STRIPE = CHARGE! …", "RED BAND = FLYING CAR! …", "GREEN CIRCLES = ACID! …", "STOMPS HIT EVERYONE — FIRE A STORED
+   * WEAPON AT HIM" (r7 fix round 2: "… — THEY CANNOT BE DODGED" with nothing stored; HINTS['boss.stomp'] is a template) —
+   * once ever, as a PRIORITY hint (it cuts a normal hint on screen, which comes back afterwards) held for the telegraph +
+   * JUICE.ui.hintHoldPadSeconds; the first time ever the telegraph also plays in slow motion (JUICE.slowmo.bossTutorial:
+   * the 0.8 s slam ring reads for ≈ 2.5 s). The safety-valve chew is a FIELD GUIDE entry, not a lesson.
    */
   _onBossAttack(p) {
     if (this._phase === 'idle' || this._finished || !p) return;
-    const k = p.kind;
-    if (k === 'stomp' || k === 'chew') return;
-    this.showHint('dodge');
+    if (p.kind === 'chew') { this._codexSeen('boss.valve', false); return; }
+    this._attackLesson(LESSON_OF[p.kind], p.delay);
+  }
+
+  /** r7 (teaching:3 / :7): a spitter's glob telegraph teaches the acid circles like the Queen's (the same lesson id). */
+  _onZombieTelegraph(p) {
+    if (this._phase === 'idle' || this._finished || !p || p.kind !== 'spit') return;
+    this._attackLesson('dodge.acid', p.duration);
+  }
+
+  /** The attack lesson `id` (priority, held for `delay` + the pad; slowed the first time ever — see _onBossAttack). */
+  _attackLesson(id, delay) {
+    if (!id) return;
+    const ctx = this.ctx;
+    const save = ctx.save, run = ctx.run, fx = ctx.fx;
+    const d = delay > 0 ? delay : 0;
+    const S = JUICE.slowmo.bossTutorial;
+    const fresh = !!(save && !save.hintDone(id) && run && run.hintsShown && run.hintsShown.indexOf(id) === -1);
+    const slow = fresh && !!S && S[0] > 0 && S[0] < 1 && d > 0 && !!fx && typeof fx.slowmo === 'function';
+    const theatre = slow ? d / S[0] + S[1] : d;        // the telegraph in theatre seconds (the slow-mo stretches it)
+    HOLD.hold = theatre + (JUICE.ui.hintHoldPadSeconds > 0 ? JUICE.ui.hintHoldPadSeconds : 0);
+    HOLD.until = null;
+    HOLD.priority = true;
+    HOLD.event = -1;
+    // r7 fix round 2: the stored-weapon count is the template argument ('boss.stomp' names the FIRE lever only with one)
+    if (this.showHint(id, this._storedCount(), HOLD) && slow) fx.slowmo(S[0], d / S[0] + S[1]);
+  }
+
+  /** r7 (teaching:3): boss:phase → that phase's lesson for the base archetype (twins → hulk, prime → colossus), once ever. */
+  _onBossPhase(p) {
+    if (this._phase === 'idle' || this._finished || !p) return;
+    let a = this._bossArch;
+    const arch = BOSSES.archetypes[a];
+    if (arch && arch.base) a = arch.base;
+    const table = PHASE_HINT[a];
+    const id = table ? table[p.phase | 0] : null;
+    if (id && HINTS[id] !== undefined) this.showHint(id);
+  }
+
+  /** r7 (teaching:5): every zombie type is a FIELD GUIDE entry, met at its first spawn (a per-run flag keeps this cheap). */
+  _onZombieSpawn(p) {
+    if (this._phase === 'idle' || !p) return;
+    const k = TYPES.indexOf(p.type);
+    if (k < 0 || this._zSeenRun[k]) return;
+    this._zSeenRun[k] = 1;
+    this._codexSeen(ZOMBIE_CODEX[k], false);
   }
 
   /**
    * Round-3 FTUE (GDD §8): the first pickup of each special names it — HINTS[item id] ("ARMOR! EACH PLATE STOPS A BITE"),
-   * once ever; a duplicate (coins instead) never does. A new HUD pill, a shield counter or a new trooper used to appear
-   * with no word on what it does.
+   * once ever; a duplicate (coins instead) never does. Round 7 (r7): a weapon's name hint waits for the weapon to fire
+   * (weapon:start — at its pickup it is only stored, teaching:0 C); a special's first pickup ever shows its NEW card
+   * (FIELD GUIDE) — a crate's item now, a purple lane's item already did at the lane's spawn — and a special its card
+   * explained this run skips the hint (marked done: the card taught it). A crate's pickup also releases "GRAB THE CRATE".
    */
   _onItemPickup(p) {
-    if (this._phase === 'idle' || !p || p.duplicate) return;
+    if (this._phase === 'idle' || !p) return;
+    this._crateHintUp = false;
+    this._release(RELEASE_CRATE);
+    if (p.duplicate) { this._codexSeen('pickup.duplicate', false); return; }
     const id = p.item;
-    if (typeof id === 'string' && HINTS[id] !== undefined) this.showHint(id);
+    if (typeof id !== 'string') return;
+    this._codexSeen(id, true);
+    if (id.indexOf('weapon.') === 0 || HINTS[id] === undefined) return;
+    if (this._runCards.indexOf(id) !== -1) {
+      const save = this.ctx.save, eng = this.ctx.engine;
+      // r7 final fix (lead decision 5): the NEW card stood in for this lesson — done only if someone was there to read it
+      if (save && typeof save.markHint === 'function' && !(eng && typeof eng.inputIdleS === 'function' && eng.inputIdleS() > JUICE.ui.hintIdleS)) save.markHint(id);
+      return;
+    }
+    this.showHint(id);
   }
 
   /**
    * Round 6 (stored weapons): the first weapon ever stored teaches the HUD FIRE button — HINTS.fire, once ever (showHint's
-   * save gate). weapon:stored is emitted inside grantItem before item:pickup, so this hint queues ahead of the weapon's own
-   * name hint: the action first (a stored weapon that is never fired is the one thing this hint must prevent).
+   * save gate). weapon:stored is emitted inside grantItem before item:pickup, so this hint queues ahead of the weapon's
+   * NEW card: the action first (a stored weapon that is never fired is the one thing this hint must prevent).
    */
   _onWeaponStored() {
     if (this._phase === 'idle') return;
     this.showHint('fire');
+    this._codexSeen('ctl.fire', false);                  // r7 (teaching:5)
+    this._codexSeen('hud.fire', false);
+  }
+
+  /** r7 (teaching:0 C): the weapon's name hint ("SHOTGUN! WIDE SPREAD, SHORT RANGE") when it actually fires, once ever. */
+  _onWeaponStart(p) {
+    if (this._phase === 'idle' || !p || typeof p.id !== 'string') return;
+    this._codexSeen('hud.pills', false);
+    if (HINTS[p.id] === undefined) return;
+    // r7 fix round 3: bound to the weapon (release key = its id, no hold) — weapon:end releases it (init)
+    HOLD.hold = 0;
+    HOLD.until = p.id;
+    HOLD.priority = false;
+    HOLD.event = -1;
+    this.showHint(p.id, undefined, HOLD);
   }
 
   /**
@@ -2328,16 +2770,19 @@ export class LevelRunner {
     const level = this._level;
     const eBoss = this._script.eBoss;
     const survivors = run.survivors;
-    // GDD §9.3: 1★ boss killed, 2★ R ≥ STARS.two·E_boss, 3★ R ≥ STARS.three·E_boss
+    // GDD §9.3: 1★ boss killed, 2★ R ≥ STARS.two·E_boss, 3★ R ≥ STARS.three·E_boss — round 7 (r7, explain:0): through
+    // data.starNeed, the same helper the results line prints its thresholds with (identical stars for every reachable pair)
     let stars = 1;
-    if (survivors >= STARS.two * eBoss) stars = 2;
-    if (survivors >= STARS.three * eBoss) stars = 3;
+    if (survivors >= starNeed(eBoss, 2)) stars = 2;
+    if (survivors >= starNeed(eBoss, 3)) stars = 3;
     run.stars = stars;
     // level bonus (ECONOMY.starBonus by stars) plus the survivor bonus (round-3 QA LVL-23: ECONOMY.survivorCoins per soldier
     // alive at the kill beyond ECONOMY.survivorFrom·E_boss — the squad a better run brings home pays), credited through the
     // only income path: no coinMult, replay ×0.6 applies
     const surplus = Math.max(0, survivors - (ECONOMY.survivorFrom > 0 ? ECONOMY.survivorFrom : 0) * eBoss);
-    this._emitBonus(Math.round(ECONOMY.levelBonus(level) * (1 + ECONOMY.starBonus[stars]) + surplus * (ECONOMY.survivorCoins > 0 ? ECONOMY.survivorCoins : 0)));
+    const starRaw = ECONOMY.levelBonus(level) * (1 + ECONOMY.starBonus[stars]);
+    const survRaw = surplus * (ECONOMY.survivorCoins > 0 ? ECONOMY.survivorCoins : 0);
+    this._emitBonus(Math.round(starRaw + survRaw));
     this._settleCoins();
     // score (GDD §9.3): 10·Σ kill coins + 15·peak + 20·R + 200·flipped + 500 if nothing was lost to a red gate
     run.score = SCORE.kill * run.killCoins + SCORE.peak * run.peakSquad + SCORE.survivor * survivors
@@ -2351,16 +2796,23 @@ export class LevelRunner {
     }
     this._failStreak.delete(level);                       // QA LVL-21: a clear resets the fail-streak assist
     const b = run.breakdown;
+    // round 7 (r7, explain:7): the results show the level bonus as its two parts — the star reward and the survivor reward.
+    // Since duplicates / refunds count as pickups (ECONOMY.breakdownOf), b.bonus is exactly this bonus as credited (×0.6 on a
+    // replay, whole coins after the settle); the star part is its own rounding, the survivor part the rest, so the two
+    // always add up to b.bonus and the chips to the payout
+    const pay = run.replay ? ECONOMY.replayPayout : 1;
+    const bonusStars = clamp(Math.round(starRaw * pay), 0, b.bonus);
     // fresh data object (once per run) — ui may keep it
     this._resultData = {
       level, stars, coins: payout, survivors, eBoss, score: run.score, endless: false,
-      breakdown: { kills: b.kills, gates: b.gates, piles: b.piles, boss: b.boss, bonus: b.bonus },
+      breakdown: { kills: b.kills, gates: b.gates, piles: b.piles, boss: b.boss, bonus: b.bonus, bonusStars, bonusSurvivors: b.bonus - bonusStars },
     };
   }
 
   _presentWon() {
     const d = this._resultData;
     if (!d) return;
+    this._codexSeen('hud.stars', false);                 // r7 (teaching:5): the stars are met on the first results
     this.ctx.state.set('complete', d);
     P_COMPLETE.level = d.level;
     P_COMPLETE.stars = d.stars;
@@ -2473,6 +2925,7 @@ export class LevelRunner {
     if (typeof c.assistHint === 'function') {
       P_HINT.id = 'assist';
       P_HINT.text = c.assistHint(n);
+      P_HINT.hold = 0; P_HINT.until = null; P_HINT.priority = false; P_HINT.event = -1;   // r7: an unbound hint
       this.ctx.events.emit('hint:show', P_HINT);
     }
   }

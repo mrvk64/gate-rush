@@ -2513,6 +2513,11 @@ export class AudioSystem {
       resetOpts();
       this.play('ugh', withPos(p.x, p.z));
     });
+    // round 7 (r7 teaching:6): the medic's tick (fx shows its green "+n") is heard too — a soft heal chirp
+    on('squad:count', (p) => {
+      if (p.reason !== 'medic' || !(p.delta > 0)) return;
+      this.play('heal', resetOpts());
+    });
     // J11 brute swing: roar on the ring telegraph, thud on the bite; screech telegraph
     on('zombie:telegraph', (p) => {
       if (p.kind === 'ring') { resetOpts(); this.play('roar', withPos(p.x, p.z)); }
@@ -2624,8 +2629,15 @@ export class AudioSystem {
       o.volume = BOSS_ROAR_VOLUME;
       this.play('roar', o);
     });
-    on('boss:attack', (p) => {                 // the slam / stomp lands after its telegraph delay
-      if (p.kind !== 'slam' && p.kind !== 'stomp') return;
+    on('boss:attack', (p) => {
+      const kind = p.kind;
+      // round 7 (r7 teaching:3 item 5): the wind-up — every telegraphed attack (slam / charge / lane / car / stomp) sounds a
+      // rising warning the moment its telegraph starts, so it is heard before it lands (the spit / rain / chew have their own)
+      if (kind === 'slam' || kind === 'stomp' || kind === 'charge' || kind === 'lane' || kind === 'car') {
+        resetOpts();
+        this.play('warn', withPos(p.x, p.z));
+      }
+      if (kind !== 'slam' && kind !== 'stomp') return;   // the slam / stomp lands after its telegraph delay (kept)
       const o = resetOpts();
       o.delayMs = Math.max(0, num(p.delay, 0)) * 1000;
       o.pitch = BOSS_STOMP_PITCH;

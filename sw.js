@@ -41,9 +41,12 @@
 //   v5 → v6: release 1.2.1 (round 5d: endless numbers not HP, the mini-boss hold, pool-safe waves).
 //   v6 → v7: release 1.2.2, the round-6 build (owner playtest: stored weapons + the FIRE button, the Android Back guard, procedural
 //            textures that survive a GPU-process loss). v6 shipped in the 1.2.1 dist/, so this build needs its own cache.
+//   v7 → v8: release 1.3.0, the round-7 build (the no-GPU playtest: real-time play and render-scale rungs on slow machines,
+//            menus that answer at once, one wallet, the boss tutorial, lessons that wait for their gate, the FIELD GUIDE,
+//            the balance package, scrolling lists and fullscreen in SETTINGS). v7 shipped in the 1.2.2 dist/.
 'use strict';
 
-const VERSION = 'v7';
+const VERSION = 'v8';
 const APP_CACHE = 'gaterush-' + VERSION;          // §15.4 cache names gaterush-<VERSION> / gaterush-cdn-<VERSION>
 const CDN_CACHE = 'gaterush-cdn-' + VERSION;
 const CACHE_PREFIX = 'gaterush-';

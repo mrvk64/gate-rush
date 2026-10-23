@@ -618,8 +618,8 @@ export class Squad {
 
   /**
    * n > 0 losses from an attack at (x, z). Armour plates absorb GEAR.armor.absorbs reasons ('bite',
-   * 'spit'): a bite call consumes min(n, plates) plates (a brute swing is one call with n = 3 =
-   * GEAR.armor.costBrute); a spit splash consumes min(GEAR.armor.costSpit, plates) plates and absorbs the
+   * 'spit'): a bite call consumes min(n, plates) plates (a brute swing is one call with n = zombies._bruteKills(C) ≤ 3 =
+   * GEAR.armor.costBrute — round 7: fewer against a small squad); a spit splash consumes min(GEAR.armor.costSpit, plates) plates and absorbs the
    * whole splash (GDD §6.1/§8.2 "spit 1"). Boss attacks ('slam', 'charge', 'stomp', 'car', 'chew') ignore plates. The
    * soldier nearest the attacker topples away from it. Emits squad:loss per soldier, one squad:count,
    * squad:dead at 0. No losses while invulnerable (GDD §6.1). Never called with 'gate' (see applyGate).
@@ -636,7 +636,7 @@ export class Squad {
         a = GEAR.armor.costSpit < this._plates ? GEAR.armor.costSpit : this._plates;
         n = 0;
       } else {
-        a = n < this._plates ? n : this._plates;              // a brute swing is one call with n = 3 -> 3 plates
+        a = n < this._plates ? n : this._plates;              // a brute swing is one call with n = 1–3 -> that many plates (r7)
         n -= a;
       }
       this._plates -= a;
