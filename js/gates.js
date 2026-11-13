@@ -177,6 +177,12 @@ const P_PASS = { gate: null, op: '+', value: 0, before: 0, after: 0, x: -0, z: -
 const P_COIN = { amount: -0, x: -0, y: -0, z: -0, source: 'gate' };
 const LANES_BY_COUNT = [[], [null], [null, null], [null, null, null]];   // activeEvent.lanes arrays (no per-call allocation)
 const ACTIVE_EVENT = { id: 0, layout: 'pair', z: -0, lanes: LANES_BY_COUNT[0] };
+// 1.4.0: liveEvents rows, one per event slot, with their own lane arrays by count
+const LIVE_ROWS = [];
+for (let i = 0; i < GATE_RULES.eventPool; i++) {
+  const byCount = [[], [null], [null, null], [null, null, null]];
+  LIVE_ROWS.push({ id: 0, layout: 'pair', z: -0, lanes: byCount[0], _byCount: byCount });
+}
 const UV_OUT = { u0: -0, v0: -0, u1: -0, v1: -0, advance: -0 };
 const RGB_OUT = new Float32Array(3);
 const COLOR_A = new Color();
@@ -839,6 +845,31 @@ export class Gates {
     for (let l = 0; l < n; l++) lanes[l] = this._syncView(this._evGates[best * 3 + l]);
     ACTIVE_EVENT.lanes = lanes;
     return ACTIVE_EVENT;
+  }
+
+  /** 1.4.0 (ARCH §3): the unpassed events nearest first (out[0] = activeEvent's) as reused rows { id, layout, z, lanes } in
+   *  out[0 … n − 1], n ≤ max; returns n. Do not retain. */
+  liveEvents(out, max) {
+    let n = 0;
+    for (let i = 0; i < this._evLiveCount; i++) {
+      const e = this._evLiveSlots[i];
+      if (this._evResolved[e] || this._evDecorative[e]) continue;
+      const g0 = this._evGates[e * 3];
+      if (g0 < 0) continue;
+      const z = this._z[g0];
+      let j = n;                                                     // insertion by z descending
+      if (n < max) n++;
+      else if (!(max > 0) || out[max - 1].z >= z) continue;
+      else j = max - 1;
+      const row = LIVE_ROWS[i];
+      const lc = this._evLaneCount[e];
+      const lanes = row._byCount[lc];
+      for (let l = 0; l < lc; l++) lanes[l] = this._syncView(this._evGates[e * 3 + l]);
+      row.id = this._eventId(e); row.layout = LAYOUT_STR[this._evLayout[e]]; row.z = z; row.lanes = lanes;
+      for (; j > 0 && out[j - 1].z < z; j--) out[j] = out[j - 1];
+      out[j] = row;
+    }
+    return n;
   }
 
   /**

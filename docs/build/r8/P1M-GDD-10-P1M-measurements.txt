@@ -1,0 +1,58 @@
+GDD §10 DIFFICULTY CURVE — 1.4.0 MEASURED (draft by P1M; P10 folds it into docs/GDD.md §10 "Targets" and the assist
+paragraph, replacing P1's "minShare 0 until P1M measures it" and the "Open for P1M" note in build/P1/docs/GDD-10-curve.txt)
+=====================================================================================================================
+
+VALUES P1M CHANGED (js/data.js, values only)
+- LEAK_BANDS L46-60: 0.29-0.33 -> 0.28-0.32 (the pre-registered skilled-bot knob: 69 of 96 clears at the old band, under 70).
+  L61-120 keeps 0.29-0.33, so the band still steps up by 0.01 at L61.
+- LEVELS.curve.assist.minTravelM: 2 m -> 1 m. A gate event counts as a decision when the steering target travels at least 1 m
+  (or changes lane) while that event is the active one. At 2 m the counter credited only 74 % (decent) and 81 % (skilled) of
+  the failed runs of players who were steering; at 1 m 100 % and 99 %. A hands-off run still counts 0, a single swipe 1.
+- LEVELS.curve.assist.minShare: 0 -> 0.32. A failed run joins the REINFORCEMENTS streak only with counted decisions
+  >= max(3, ceil(0.32 x gate events reached)). 0.32 is half the decent bot's 10th-percentile share (0.643 at 1 m), per D48.
+  A player who swipes three times and then leaves the game running no longer qualifies once the run reaches 10 or more gate
+  events (it still does on shorter runs).
+Text for §10 F (assist): "A failed run joins the streak with at least max(3, 32 % of the gate events it reached) counted
+decisions; an event counts once, when the steering target moved at least 1 m or changed lane while that gate was the next
+one. Leaving the game running counts nothing and neither adds to nor resets the streak."
+
+MEASURED TARGETS (Chrome, synthetic clock, High; bots strongj = decent, human = skilled, idle / idleL / idleR = hands-off;
+tester ranks to L30, rank 10 after; pass counts fixed before the first run). All rows at the final values.
+
+| Row | Measured | Pass count |
+|---|---|---|
+| Hands-off, L6-8 (24 seeds) | 0 / 216 | <= 5 |
+| Hands-off, L10-20 | 1 / 216 (L10 idleR, seed 1710) | <= 5 |
+| Hands-off, L21-30 | 0 / 192 | <= 4 |
+| Hands-off, L31-45 | 0 / 288 | <= 8 |
+| Hands-off, L46-60 | 0 / 288 | <= 8 |
+| Hands-off, real 4-attempt sequence, L7-60 | no level with a clear | 0 per level |
+| Hands-off at rank 10, L10-30 | 1 / 408; no level over 1 / 24 | <= 12 |
+| Hands-off at rank 10, L6 / L8 (replays) | 3 / 24, 1 / 24 | <= 15 % (reported) |
+| 3 swipes then hands-off, rank 10, L10-30 | 0 / 136 | <= 2 |
+| Decent, L6-45 | 121 / 128, 2.16★, 3★ 31 % of clears | >= 116, 1.9-2.4★, <= 45 % |
+| Skilled, L3 + L5 x 8 and L6-45 | 141 / 144, 2.52★, 3★ 60 % of clears | >= 137, >= 2.4★, >= 60 % |
+| Skilled 3★ share, L10-60 | 49 % of clears | <= 80 % |
+| Decent, L46-60 (8 seeds) | 72 / 96 | 58-77 |
+| Skilled, L46-60 (8 seeds) | 75 / 96 | >= 77 (70-76: owner question Q-H46, default accept) |
+| Rank-10 replays L6-30, decent / skilled | 76 / 80, 79 / 80 | >= 70, >= 75 |
+| Upgrades still help (decent, L15-30, expected vs expected+2 ranks) | 50 vs 50 clears; survivors 466 -> 486 | clears >= -3, survivors not lower |
+| Shop L38-45, rank 10 / 6 / 3 | decent 100 / 42 / 0 %, skilled 100 / 67 / 0 % | rank 10 beats rank 3 by >= 40 pp |
+| Past L60, hands-off | 0 / 288 | 0 |
+| Past L60, decent: L61-80 / L90-120 / L150-300 | 19/40, 12/24, 8/32 | >= 16/40, >= 6/24, 3-20/32, no band +15 pp over the one before |
+| Past L60, skilled | 24/40, 16/24, 5/32 | same |
+| Assist: one swipe per attempt, 6 retries, 20 levels x 2 | 0 / 40 sequences cleared, never assisted | <= 2 |
+| Assist: three swipes per attempt | 1 / 40 (L10, first attempt, no assist) | <= 2 |
+| Assist: a real failing streak (decent, ranks 0, L20) | fails twice, +48 soldiers on attempt 3, clears | assisted on attempt 3 |
+| Counter: failed runs of steering players that count | decent 163 / 163, skilled 141 / 143 | >= 90 % |
+
+Owner path (rank 10, reported): L7 hands-off clears 3 of 24 attempts, 1 inside the real 4-attempt sequence (held right,
+seed 1207, 0.75·E_boss, 2★) — listed for Q-OP; L14, L17 and L38: 0.
+L3 / L5 (tester ranks, 8 seeds): L3 hands-off 10 of 24 (pure idle 3/8, held left 4/8, held right 3/8) — Q-L3; L5 hands-off
+12 of 24 (unchanged by P1M; P1's pre-registered L5 rule kept V0) — Q-L5.
+
+METHOD NOTE (for the balance appendix)
+- The built-in skilled bot of the frozen harness kept its boss-dodge state from one run into the next. After a run that
+  ended mid-dodge, the next run held the road centre for up to the whole level. P1M measured every skilled-bot row with that
+  state reset before each run (harness/p1m/botreset.js; a steward fix to harness.js is requested). F12's and P1's skilled
+  rows were measured with the leak, so their skilled numbers read low (L46-60: 63 vs 69 of 96 at the same values).

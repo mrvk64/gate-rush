@@ -1,0 +1,95 @@
+GDD.md HORDE — TUNING and the model (1.4.0 draft by P3; the release folds it into the Horde section)
+===================================================================================================
+(revised in P3 fix round 2; numbers from build/P3/fix2/c1y-items.txt — the shipped run phases, 'item.kit' / 'item.kit2' known
+to PICKUPS.items as P1T will add them — and build/P3/final/holdmatrix.txt — the same code with those items stripped, on r8/P3
+rebased on r8-140 fa5def9 = P0 + P2 + P1 + P1M + P4)
+
+PER-LEVEL CURVE (data.HORDE_GEN; js/holdgen.js builds it, tools/holdsim.js models it)
+- E_hold = round5(0.75·E_boss(L)) (data.eBossOf). The run phase ends there; the stars count survivors at the boss kill
+  against it (2★ ≥ ceil(0.5·E_hold), 3★ ≥ ceil(0.9·E_hold)).
+- Expected shop p_exp = fire × damage of data.expectedRanksOf(L); design DPS D = E_hold·2.0·p_exp·0.8.
+- Pressure rho(L): 0.505 at L4 → 0.73 at L30 → 0.865 at L60 → 0.955 at L120 (flat after). hz = rho·D·T_spawn / Σ N·baseHp
+  (baseHp walker 2, runner 1.5, crawler 1.5, brute 24, spitter 8; T_spawn = last surge start + 5.5 s); unit HP = max(1,
+  baseHp·hz) — at L4 the 1 HP floor binds for all fodder (walker 0.83, runner 0.62 at the expected shop), so L4's count is
+  set by the floored arrival instead: ns 1,820 = horde-v2's 2,000 × 0.651 / 0.717. The 1.4.0 L4 expected shop
+  (expectedRanksOf(4) = [2, 0, 1, 1, 0], p_exp 1.150) is weaker than horde-v2's (fire 1 / damage 1, p_exp 1.265); with every
+  fodder unit floored, the HP arrival does not shrink with the shop, so at 2,000 the debut hold was 10 % denser than horde-v2
+  tuned it (0.717 of the design DPS against 0.651). At 1,820 it is 0.652 / 0.702 / 0.712 on seeds 1004 / 1104 / 1704, equal to
+  horde-v2's per seed (fix2/effrho-final.txt); from L9 the floor does not bind and nothing changed.
+- The live shop p: HP × util.shopComp(p, p_exp, profileExp(L), 1.0) / p_exp^profileExp (D26) — unchanged at or below the
+  expected shop, the whole surplus answered above it.
+- Surges: 3; the first at 2 s, then 20 ± 3 s gaps (consecutive gaps never within 1.2 s); 3.0-5.5 s spawn windows; shares
+  1.20 / 1.25 / 1.30 of ns(L) (1,820 at L4; 2,250 at L5 → 2,400 at L30 → 2,700 at L60); trickle +12 %; doubles from L19
+  (40 %, 60 % from L35; 55 % / 45 % with a 4.0-6.5 s lag on the other flank); variants from L20.
+- Patterns: never the same pattern twice in a row; after the debut surge 1 is a flank, the pincer or (from L23) the runner rush
+  — never the centre, the one pattern a lane parked at the centre holds by itself (in the A4 rows 4 of the 5 idle-hold clears
+  opened with it); surge 2 is always a flank or the pincer; the centre surge stays in the bag for surge 3. A stampede / siege
+  variant ends on its runner rush / brute push (on L20-22 the stampede has no runner rush yet: it enters the bag at L23, as
+  in horde-v2). The L4 debut: centre, a flank, then a different bag pattern.
+- Live squad scaling at the dig-in (r = C / E_hold): r ≥ 1 → counts × min(2, r^0.75) and unit HP × r^0.25 — together the
+  crowd's HP grows as r^1.0, so a bigger squad meets a proportionally bigger crowd (with counts alone a 1.2× arrival met a
+  4.5 % thinner crowd per unit of its fire AND kept a 20 % bigger buffer against the breach bites, which the wall caps at
+  2 + 0.6/s up to 8/s per section whatever the crowd); r < 1 → unit HP × max(0.4, r)^0.75 and
+  the counts stay whole (A9: what is on screen never shrinks). Measured alternative: putting that relief on the surge spawn
+  windows instead (same units, same HP, more spread out) is far too weak — the decent bot fell to 1.3★ on L4 (fix1/v12.txt).
+- First meeting (D29): an eased surge (surge 1 after ≥ 3 counted run decisions; surge i ≥ 2 after a counted hold action in
+  the 3 s before it) spawns its units and the trickle after it with HP × 0.85 — never fewer units (A9).
+- Hold actions (D30): lane travel ≥ 2 m, a repair, or an opened supply crate, in the 3 s before a surge spawn or a wind-up.
+  Supply drops land 2.0-3.0 m left or right of centre, clear of a lane parked at the centre even counting the crate's own
+  0.4 m half-size, so a crate always takes a lane move and a hands-off hold never earns an ease from one.
+- Boss: a single boss walks in at x 0, the Twins at ±2.2 m. HP = 0.38·24·E_boss·factor (Hulk 1.0, Queen 1.0, Juggernaut
+  1.2, Colossus 0.95, Prime 0.95 × 1.25, Twins 1.0 split 55 / 55) × clamp(r^0.6 below E_hold, r^1.0 above it; 0.6, 2) ×
+  clamp(p^(0.9·min(1, r)), 1, 10) × bdExp^0.1·bossDamage^0.9 (p = fire × damage of the live shop, bdExp = the expected
+  shop's boss-damage multiplier). The squad's boss damage carries its boss-damage upgrade, so the last term keeps an
+  expected shop on horde-v2's tuned fight and lets a boss-damage surplus net (bossDamage / bdExp)^0.1, as the run's shop
+  scale. Above E_hold the boss grows with the squad (the A4 key at its top): a bigger arrival buys the surges, not a faster
+  boss.
+- The debut hold (L4): surge 1 centre, surge 2 a flank, no brutes or spitters, no boss attacks, enrage after 30 s, no supply
+  drops and no boss-phase brutes (the Hulk's runners and walkers stay).
+- Pre-registered P9 keys (A4): HORDE_GEN.boss.ratioExpAbove (1.0, at its top), HORDE_GEN.live.expAbove (0.75, counts) and
+  HORDE_GEN.live.hpExpAbove (0.25, unit HP × r^x above E_hold).
+- Why a steered run followed by a parked lane fails (A4): the parked lane covers the two centre sections and staggers a boss
+  that walks in at x 0, so what beats it is the flanks. Two things let it through before: a centre opener (the lane holds it
+  and the walls start surge 2 intact) and the bigger squad's bigger buffer. With no centre opener after the debut and the
+  crowd scaling as r^1.0 above E_hold, the A4 rows went from 2 / 3 / 2 / 4 of 96 (strongj-like and human-like, threat 1.0 and
+  first meeting, kit items known) to 0 / 0 / 1 / 1 (the one: L52 s1152, a swarm hold whose flank surges breach both ends while
+  the squad, 1.15·E_hold, outlasts the bites until the Queen dies). The owner case (rank 10, the real 4-attempt seeds, a
+  steered run × 1.12 / × 1.20, then the hold left alone) went from L19 s1219 and s1719 and L43 s1743 clearing to 0 of 32 on
+  L19 and L43 (fix2/owner-base.txt → owner-c1.txt); with play, the owner's big arrivals still clear: human and aimerR 6/6 at
+  1.0, 1.3 and 1.5·E_hold on L19 and L43, 2.7-3.0★.
+- Coins: kill coin = coinScale_v1(L)·N_v1(L) / N_v2 (the v1 kill total over the v2 crowd); LINE HELD +10·L; kit refund 10 c.
+
+RUN PHASE
+- 4 gate events at L4, 5 on L9-22, 6 from L23 (HORDE_GEN.run.gates); fixed lines ≤ 0.80·E_hold at the expected shop and at
+  rank 10 from L4, the long budget plus side repair at ≥ 0.84·E_hold; the L4 debut run has no ÷, two-red or lesser-evil events.
+
+THE MODEL (tools/holdsim.js; harness/p3/holdmatrix.mjs)
+Measured by P3 (node) on r8/P3 = r8-140 fa5def9 + P3: build/P3/fix2/c1y-items.txt (the kit items known, as the shipped run
+phases will be) and build/P3/final/holdmatrix.txt (the same code, items stripped until P1T); every row below is the same in
+both except the run phase, where both are given.
+- Matrix (12 Horde levels × 6 bots × 10 seeds, expected shop, C_RATIO arrivals): passive 0/120 (it loses 40-61 s into the
+  hold); aimerR 2.0-2.1★ on L4-29, 28/30 clears on L32-43 and 26/30 on L47-59; human 2.5-3.0★ on L4-29, 19/20 on L52-59,
+  3★ in 58 % of L9-59 runs, loss 6.2-11.3 % of E_hold; the wiper 0-0.6★ per level (2★ in 5.5 % of L9-59 runs); skilled
+  level length 125-136 s mean, max 145 s; aimerR kills per hold 7,907 on L4 (≥ 7,500) and 9,850-11,691 from L9; peak alive
+  ≤ 2,244; every surge peak of the non-passive bots ≥ 1,016 living units within 40 m.
+- L4 debut at 30 seeds (fix2/l4-ns1820-30.txt): passive 0/30, wiper 0/30, the never-repairing aimer 30/30 2.17★ (horde-v2
+  29/30 2.00★), aimerR 30/30 2.17★, human 30/30 2.73★, strong 3.0★; the 1.4.0 L4 at ns 2,000 had the aimer at 19/30 1.27★.
+- Against the horde-v2 reference (parity/hv2ref = horde-v2's own simulator and generator, matrix-v2's method): 63 of 72
+  cells within ±1 clear and ±0.2★ at 10 seeds, 68 of 72 at 30 seeds (fix2/ref30all-c1.txt; per 10 seeds = clears / 3).
+  Under the null (two samples of ONE star distribution per cell, P3's own) the rule misses 9.1 cells at 10 seeds and 5.1 at
+  30 (fix2/noise30.txt), so both counts sit at the comparison's noise floor. The four cells outside at 30 seeds are bots
+  that never repair: the aimer on L32 (20 vs 17 clears, +0.20★) and L43 (15 vs 11, +0.27★) and the wiper on L52 (1 vs 5)
+  and L59 (13 vs 9); every passive, decent, skilled and expert cell is within, and so is the L4 debut.
+- Run phase (96 scripts): 0 invalid (levelgen.validateLevel's E-trace band), 0 errors; expected-shop max 0.809 (96/96
+  ≤ 0.82) with the kit items, 0.827 (94/96 ≤ 0.82, 96/96 ≤ 0.86) without; rank-10 compensated max 1.212 (96/96 ≤ 1.25);
+  3.5-3.8 ms per level; generator steps ≤ 0.89 ms (minimum of 5 per step after a warm-up).
+- Model HORDE B2: 0/96 at the expected shop and at rank 10, at threat 1.0 and with surge 1 eased; 0 on the real-sequence
+  scripts.
+- A4 HORDE-STEER-IDLE (steered run at the greedy line × 1.12 / × 1.20, then a passive hold, expected shop; all four rows
+  gated ≤ 2/96): strongj-like 0/96 at threat 1.0 and 0/96 in the first-meeting state; human-like 1/96 and 1/96 (L52 s1152).
+- Model ASSIST-HORDE (rank 10, first meeting, k = 0..4): swipeOnce 0/120, never eligible, nothing eased; swipePerSurge 0/120,
+  eligible and surges 2-3 eased whenever the squad reaches surge 3 (115/120); steerRunIdleHold at 1.0·E_hold 0/120. The
+  all-eased minimal player (steered run + one swipe before each surge, never aims or repairs) 0/120 in all 8 rows.
+- Rank 10 on L4-29: aimerR 10/10 (2.0-2.2★), human 10/10 (2.4-3.0★) on every level. L43 first meeting (rank 10): passive
+  0/10 at 0.85 and 1.0 with every surge eased and D29-gated, aimerR 10/10 2.0★, human 10/10 2.6★; every eased surge peak
+  ≥ 1,236 living units within 40 m at 0.8 and 1.0·E_hold (A9 probe).

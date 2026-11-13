@@ -12,17 +12,22 @@
 // fresh record), the boss spec, the endless chunk array — never per frame.
 //
 // Writes (per the §3 ctx table): ctx.world.roadSpeed / roadSpeedBase / distance (plus the full
-// in-place overwrite of ctx.world that §6.16 assigns to start()), ctx.rng, ctx.rngFx, ctx.run.
+// in-place overwrite of ctx.world that §6.16 assigns to start()), ctx.rng, ctx.rngFx, ctx.rngShot, ctx.run.
+//
+// r8 (P1T, ARCH §5 / §6): a campaign level plays as data.levelTypeOf(L), its script cached per `L|seed|base`; a base with a
+// ModeSystem (MODE_OF) begins it at the script's finale event, forwards it the other unknown events, reads metric / fraction /
+// stat and ends through boss:dead, squad:dead or finish(won, cause). Menu starts and boot wait for ready(L) (prepareFor, D8).
 
-import { Rng, clamp, lerpExp, warnOnce, roundDesign } from './util.js';
+import { Rng, clamp, lerpExp, warnOnce, roundDesign, shopComp } from './util.js';
 import {
   WORLD, SQUAD, ZOMBIES, LEAK_MODEL, LEAK_BANDS, BOSSES, LEVELS, ECONOMY, SCORE,
   QUALITY_TIERS, RENDER, JUICE, HINTS, GATE_RULES, PICKUPS, WAVE_PATTERNS, STRINGS, FIRE,
-  DISTRICT_RULES, districtForLevel, districtForChunk,
+  DISTRICT_RULES, districtForLevel, districtForChunk, bossIdOf, isFinale, bossUnderT, enrageExtra, expectedRanksOf,
   starNeed,                                               // round 7 (r7, explain:0): the star thresholds the results print
   CODEX,                                                  // round 7 (r7, teaching:5): FIELD GUIDE entries met in play (_codexSeen)
+  LEVEL_TYPES, HORDE_GEN, levelTypeOf, starThreeOf,       // r8 (P1T): level types
 } from './data.js';
-import { generateLevel, levelGenerator, generateChunk, solveWaveHp, gateDefaults, endlessGateGuard, eventWorstCase, leakCalib, endlessPressure, endlessParams, endlessDesignMult, endlessHpCap, endlessPoolReserve } from './levelgen.js';
+import { generateLevel, levelGenerator, generateChunk, solveWaveHp, gateDefaults, endlessGateGuard, eventWorstCase, leakCalib, endlessPressure, endlessParams, endlessDesignMult, endlessHpCap, endlessPoolReserve, profileExpOf, shopOf } from './levelgen.js';
 
 // ---------------------------------------------------------------------------------------------
 // Contract constants (ARCHITECTURE literals that are structure, not tuning) and DATA-MISSING keys
@@ -30,6 +35,8 @@ import { generateLevel, levelGenerator, generateChunk, solveWaveHp, gateDefaults
 
 /** ctx.rngFx = ctx.rng.fork(7): cosmetic stream seeded `seed + 7` (ARCH §3 / §6.1). */
 const RNG_FX_OFFSET = 7;
+/** ctx.rngShot = ctx.rng.fork(13): shooter phases and spread (gameplay, D4). */
+const RNG_SHOT_OFFSET = 13;
 /** Stable handles are `(generation << 12) | slot` (ARCH D6): the slot is the low 12 bits. */
 const SLOT_MASK = 0xFFF;
 /** Slot tables for the hint / hit bookkeeping: gates has 12 gate slots and 8 event slots (ARCH §6.9); 16 leaves headroom. */
@@ -59,7 +66,7 @@ const COIN_BUCKETS = ['kills', 'gates', 'piles', 'boss', 'bonus'];
 /** QA LVL-20: coin sources that are not credited once the squad is dead (phase 'lost'); kill coins of bullets already
  *  in flight still land (GDD §7 / §10: no rewards after C = 0). */
 const LOST_BLOCKED_SOURCES = ['gate', 'max', 'crate', 'pile', 'duplicate', 'refund'];
-/** QA LVL-18: generated campaign scripts kept per `${curveL}|${seed}` (memo); bounded so a long session stays small.
+/** QA LVL-18: generated campaign scripts kept per `${level}|${seed}` (memo); bounded so a long session stays small.
  *  Round 5 integration: room for every campaign level at its default seed plus a few retry seeds (the levels screen
  *  prefetches every unlocked level; a script is 3–6 KB of JSON, the whole campaign ≈ 140 KB). */
 const SCRIPT_CACHE_MAX = LEVELS.count + 10;
@@ -75,6 +82,20 @@ const PREFETCH_SLICE_MS = 8;
 // in animation-frame slices of START_SLICE_MS of attempts (one at least) and starts the run when it is ready — L13 / L19 / L28
 // take 29–32 attempts, 100–130 ms unthrottled (≈ 0.5 s at 4×), and ran in one click handler before (a 55–130 ms frame).
 const START_SLICE_MS = 8;
+/** r8 (P1T, ARCH §5): the ModeSystem (a ctx member) of each base that has one; it begins at the script's finale event. */
+const MODE_OF = Object.freeze({ horde: 'hold' });
+/** r8 (D8, ARCH §6): the systems whose programs (programsReady / prepare()) a base needs before its run starts. */
+const PREP_OF = Object.freeze({ horde: ['crowd', 'hold'] });
+/** r8 (P8): rounds a menu start asks again for programs a prepare did not leave ready; start() then warns and plays. */
+const REQ_PREP_TRIES = 3;
+/** r8: endless's and the title's type (L1's: plain). */
+const STANDARD_TYPE = levelTypeOf(1);
+/** r8 (smoke --skip): debugSkip('run') jumps to this far before the finale event. */
+const DEBUG_SKIP_M = 20;
+/** r8v2: a slice starts no generation step unless the last step's cost + this still fits (4×: slice p95 9.3 → 7.6 ms). */
+const SLICE_HEADROOM_MS = 1.5;
+/** r8: the predicted step ≥ this share of the job's largest, job.max (may start unset; 4× slice p95: campaign 7.9 → 7.2, run phases 8.1 → 7.7 ms; +8 % slices). */
+const SLICE_JOB_SHARE = 0.3;
 // Round 5 integration (r5-perf-audio needsOtherGroup 1): _fireBoss's own helpers run once, silently, this many metres before
 // the boss event, so the boss hand-off frame is not their first call (≈ 4–5 s ahead at 8–12 m/s: a quiet stretch, after
 // the boss rehearsals of boss.js and before the run-up's last burst)
@@ -98,17 +119,32 @@ function perfNow() {
  *  `level.level` in endless: endless unlocks after L10 (LEVELS.endlessUnlock), so chunk D plays like level 10 + D. */
 function endlessEquivalentLevel(difficulty) { return LEVELS.endlessUnlock + difficulty; }
 
+/** r8 (D30 / A1): the lane of gates.activeEvent `ev` nearest x (ties to the left). */
+function nearestLane(ev, x) {
+  const lanes = ev.lanes;
+  let best = 0, bestD = Infinity;
+  for (let l = 0; l < lanes.length; l++) {
+    const d = lanes[l] ? Math.abs(lanes[l].x - x) : Infinity;
+    if (d < bestD) { bestD = d; best = l; }
+  }
+  return best;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Module-level reused payloads (listeners must not retain them — ARCH §5)
 // ---------------------------------------------------------------------------------------------
 
-const P_START = { level: 0, seed: 0, endless: false, script: null, district: '' };
+// r8 (P1T, ARCH §5): level:start / complete / failed carry the type fields (_typeData; counted: the fail joined the streak)
+const P_START = { level: 0, seed: 0, endless: false, script: null, district: '', typeKey: '', base: '', night: false, finale: '', eTarget: 0, stat: null, cause: '', firstMeet: false, retypeReward: false, assistK: 0 };
 /** DISTRICTS.md §8.5: district:change payload (reused); reason 'start' | 'rotate' | 'title'. */
-const P_DISTRICT = { id: '', name: '', index: 0, label: '', accent: 0, seconds: -0, reason: '', banner: false, first: false, step: 0, steps: 0 };
+const P_DISTRICT = { id: '', name: '', index: 0, label: '', accent: 0, seconds: -0, reason: '', banner: false, first: false, step: 0, steps: 0, modeKey: '', modeName: '', modeColor: 0 };
 const P_PROGRESS = { distance: -0, length: -0, fraction: -0 };
 const P_RUNUP = { secondsToBoss: -0 };
-const P_COMPLETE = { level: 0, stars: 0, survivors: 0, eBoss: 0, coins: 0, breakdown: null };
-const P_FAILED = { level: 0, fraction: -0, coinsKept: -0 };
+const P_COMPLETE = { level: 0, stars: 0, survivors: 0, eBoss: 0, coins: 0, breakdown: null, typeKey: '', base: '', night: false, finale: '', eTarget: 0, metric: 0, stat: null, cause: '', firstMeet: false, retypeReward: false, assistK: 0 };
+const P_FAILED = { level: 0, fraction: -0, coinsKept: -0, typeKey: '', base: '', night: false, finale: '', eTarget: 0, stat: null, cause: '', firstMeet: false, retypeReward: false, assistK: 0, counted: false };
+/** r8: mode.begin opts and the mode.stat report (reused). */
+const P_BEGIN = { threat: 1, assistK: 0, firstMeet: false, seed: 0, runDecisions: 0, event: null };
+const STAT = { holdActions: 0, holdSurgeWindows: 0, eased: [false, false, false], staggers: 0, lineHeld: false, kits: 0, kills: 0, total: 0, surgesCleared: 0 };
 const P_CHUNK = { index: 0, difficulty: -0 };
 const P_END = { distance: -0, score: 0, best: 0, coins: 0, chunks: 0, newBest: false };
 // round 7 (r7, teaching:0 B / teaching:3): hint:show also carries how the hint is bound — hold (theatre s it cannot be cut
@@ -135,7 +171,7 @@ const IDLE_GATE_EVENT = {
 };
 
 /** Order in which LevelRunner.start()/quitToTitle() reset the systems (ARCH §6 common shape; squad last). */
-const RESET_ORDER = ['fx', 'weapons', 'zombies', 'boss', 'gates', 'pickups', 'troops', 'squad'];
+const RESET_ORDER = ['fx', 'weapons', 'zombies', 'crowd', 'hold', 'boss', 'gates', 'pickups', 'troops', 'squad'];
 
 const TYPES = ZOMBIES.common.types;   // ['walker', 'runner', 'crawler', 'brute', 'spitter']
 /** Round 5d (GDD §10.1): the script events the endless mini-boss hold keeps back (the boss's own minions are boss.js's). */
@@ -319,6 +355,8 @@ function newRunStats(level, seed, endless, script, replay) {
     countAtBoss: 0,      // C when the boss event fired (debug histogram countAtBoss)
     bossHpScale: 0.5,    // QA LVL-14: count × shop scale applied to the boss table HP
     assist: 0,           // QA LVL-21: soldiers added by the fail-streak assist at level start
+    assistK: 0,          // r8 (D35): this attempt's REINFORCEMENTS steps
+    kits: 0,             // r8 (P1T): repair kits from the run's item:grant items, for the hold
     rubberEvents: 0,     // QA LVL-17: endless gate events rewritten by the rubber band
     redCapped: 0,        // r7: campaign gate events whose red lanes _capRedLanes capped at spawn (debug)
     bossTtkBand: 0,      // r7: 1 when _bossTtkBand raised the campaign boss HP to the fight floor (r7 fix round 3: or the weak floor), else 0 (debug)
@@ -381,6 +419,7 @@ export class LevelRunner {
     this._reqLevel = 0;
     this._reqSeed = 0;
     this._reqState = '';
+    this._reqTries = 0;
     this._reqHandle = 0;
     this._reqRaf = false;           // the handle came from requestAnimationFrame (else setTimeout)
     this._reqTick = () => this._runRequest();
@@ -389,7 +428,28 @@ export class LevelRunner {
     this._bossWarmEv = null;
     // QA LVL-21: consecutive failures per campaign level in this session (fail-streak assist)
     this._failStreak = new Map();
+    // r8 (D30 / A1): the counted failures (runs that played, _runCounted) the reinforcements assist reads
+    this._assistStreak = new Map();
     this._assistSoldiers = 0;
+    // r8 (P1T): the run's type, mode, cause, first meeting, re-type, assist steps; a pending start's type and programs
+    this._type = STANDARD_TYPE;
+    this._mode = null;
+    this._modeOn = false;
+    this._cause = '';
+    this._firstMeet = false;
+    this._retype = false;
+    this._assistK = 0;
+    this._reqType = STANDARD_TYPE;
+    this._reqParts = null;
+    // r8 (D30 / A1): this run's activity (read-only outside): gate events reached and decisions counted (_trackActivity, addActivity)
+    this.activity = { decisions: 0, eventsReached: 0 };
+    this._pExp = 0.5; this._pExp = 1; this._pExpLevel = -1;   // r8 (D26): the expected shop's fire × damage at _pExpLevel
+    this._actEv = -1;   // the watched activeEvent id, its target travel (m), last x, start lane, steered?, committed?
+    this._actTravel = 0.5; this._actTravel = 0;
+    this._actPrevX = 0.5; this._actPrevX = 0;
+    this._actLane = -1;
+    this._actMoved = false;
+    this._actDone = false;
 
     // cursor / timing
     this._cursor = 0;
@@ -468,8 +528,9 @@ export class LevelRunner {
     this._coinRaw = new Float64Array(COIN_BUCKETS.length);
     this._coinPaid = new Float64Array(COIN_BUCKETS.length);
 
-    // boss road slow-down tween (QA LVL-13: BOSSES.intro.roadLerp seconds, linear)
+    // boss road slow-down tween (QA LVL-13: BOSSES.intro.roadLerp seconds, linear; r8: or stopRoad's)
     this._roadTweenT = -0.5; this._roadTweenT = -1;
+    this._roadTweenDur = 0.5; this._roadTweenDur = 1;
     this._roadTweenFrom = 0.5; this._roadTweenFrom = 0;
     this._roadTweenTo = 0.5; this._roadTweenTo = 0;
 
@@ -505,6 +566,9 @@ export class LevelRunner {
     offs.push(ev.on('gate:flip', (p) => this._onGateFlip(p)));
     offs.push(ev.on('gate:pass', (p) => this._onGatePass(p)));
     offs.push(ev.on('gate:miss', (p) => this._onGateMiss(p)));
+    offs.push(ev.on('gate:commit', () => this._onGateCommit()));        // r8 (D30 / A1): gate decisions
+    offs.push(ev.on('crowd:kills', (p) => this._onCrowdKills(p)));      // r8 (P1T)
+    offs.push(ev.on('item:grant', (p) => this._onItemGrant(p)));
     offs.push(ev.on('boss:fight', (p) => this._onBossFight(p)));
     offs.push(ev.on('boss:attack', (p) => this._onBossAttack(p)));      // round-3 FTUE: the dodge lesson (r7: one per attack kind)
     offs.push(ev.on('item:pickup', (p) => this._onItemPickup(p)));      // round-3 FTUE: first-pickup hints
@@ -553,7 +617,7 @@ export class LevelRunner {
     if (!this._genWarmPending) return 0;
     this._genWarmPending = false;
     let L = 2;
-    while (LEVELS.authored[L] && L < LEVELS.curve.loopAfter) L++;
+    while (LEVELS.authored[L] && L < LEVELS.count) L++;   // r8v2: loopAfter retired
     try {
       levelGenerator(L, LEVELS.seedBase + L).step();
     } catch (err) {
@@ -630,6 +694,9 @@ export class LevelRunner {
   /** The visual district shown (a DISTRICTS entry; DISTRICTS.md §8.5). */
   get district() { return this._district; }
   get endless() { return this._endless; }
+  /** r8 (P1T): the run's type and first meeting (D34). */
+  get type() { return this._type; }
+  get firstMeet() { return this._firstMeet; }
   get script() { return this._script; }
   get phase() { return this._phase; }
   get run() { return this.ctx.run; }
@@ -722,19 +789,22 @@ export class LevelRunner {
 
   /**
    * Campaign level. script = LEVELS.authored[level] ?? generateLevel(L, seed ?? LEVELS.seedBase + level);
-   * beyond LEVELS.count the curve uses L = LEVELS.curve.loopAfter (30) with seed 1000 + level, so the campaign loops.
+   * r8v2: past LEVELS.count the curve keeps rising with the real level number (LEVELS.curve.post / post.late; seed 1000 + level).
    */
   start(level, seed) {
     this._cancelRequest();                                // round 5: a direct start wins over a pending menu request
     this._commitPending();                                // QA LVL-19: a won / lost run left during its theatre
     level = Math.max(1, Math.floor(Number(level) || 1));
-    const authored = LEVELS.authored[level];
-    const runSeed = (seed !== undefined && seed !== null && Number.isFinite(seed)) ? (seed >>> 0) : this._defaultSeed(level);
-    const script = authored || this._generatedScript(level, runSeed);
+    const type = this._typeOf(level);                     // r8 (P1T)
+    const authored = type.base === 'standard' ? LEVELS.authored[level] : null;
+    const runSeed = this._seedOf(level, seed);
+    if (!this._partsReady(type)) warnOnce('level.unprepared', 'level started before level.prepareFor');   // r8 (D8): tools may
+    const script = authored || this._generatedScript(level, runSeed, type.base);
     this._level = level;
+    this._type = type;
     this._endless = false;
     this._difficulty = 1;
-    this._bandMid = bandMidFor(Math.min(level, LEVELS.curve.loopAfter));
+    this._bandMid = bandMidFor(level);   // r8v2: the real level
     this._beginRun(script, runSeed);
     this._applyAssist();
   }
@@ -749,23 +819,128 @@ export class LevelRunner {
    */
   requestStart(level, seed) {
     const L = Math.max(1, Math.floor(Number(level) || 1));
-    const s = (seed !== undefined && seed !== null && Number.isFinite(seed)) ? (seed >>> 0) : this._defaultSeed(L);
+    const s = this._seedOf(L, seed);
+    const type = this._typeOf(L);
     this._cancelRequest();
-    const key = Math.min(L, LEVELS.curve.loopAfter) + '|' + s;
-    if (LEVELS.authored[L] || this._scriptCache.has(key)) { this.start(L, s); return true; }
-    let job = null;
-    for (let i = 0; i < this._prefetchQueue.length; i++) {
-      if (this._prefetchQueue[i].key === key) { job = this._prefetchQueue[i]; this._prefetchQueue.splice(i, 1); break; }
-    }
-    this._prefetchQueue.unshift(job || { key, level: L, seed: s, gen: null });   // keeps a partial idle generation's attempts
+    const key = L + '|' + s + '|' + type.base;            // r8 (P1T): the real level, its seed and base
+    const scripted = this._hasScript(L, key, type);
+    if (scripted && this._partsReady(type)) { this.start(L, s); return true; }
+    if (!scripted) this._jobFor(key, L, s, type.base, true);   // keeps a partial idle generation's attempts
     this._reqOn = true;
     this._reqKey = key;
     this._reqLevel = L;
     this._reqSeed = s;
+    this._reqType = type;
+    this._reqTries = 0;
     this._reqState = this.ctx.state ? this.ctx.state.current : '';
+    const parts = [];
+    this._reqParts = this._partsReady(type, parts) ? null : Promise.all(parts);   // r8 (D8): compiled meanwhile
     this._scheduleRequest();
     return false;
   }
+
+  /** r8 (P1T): level L's type (?type= only with ?debug=1). */
+  _typeOf(L) {
+    const cfg = this.ctx.config;
+    return levelTypeOf(L, cfg && cfg.debug && typeof cfg.type === 'string' ? cfg.type : null);
+  }
+
+  /** The seed start(level, seed) plays: `seed` when given, else _defaultSeed(level). */
+  _seedOf(L, seed) {
+    return (seed !== undefined && seed !== null && Number.isFinite(seed)) ? (seed >>> 0) : this._defaultSeed(L);
+  }
+
+  /** r8: the script of `key` (`L|seed|base`) is authored (a standard L1) or cached. */
+  _hasScript(L, key, type) {
+    return (type.base === 'standard' && !!LEVELS.authored[L]) || this._scriptCache.has(key);
+  }
+
+  /** The queued job of `key` (made when missing; `front`: moved to the head). */
+  _jobFor(key, L, s, base, front) {
+    let job = null;
+    for (let i = 0; i < this._prefetchQueue.length; i++) {
+      if (this._prefetchQueue[i].key === key) { job = this._prefetchQueue[i]; if (front) this._prefetchQueue.splice(i, 1); break; }
+    }
+    if (!job) { job = { key, level: L, seed: s, base, gen: null, max: 0, done: false }; if (!front) this._prefetchQueue.push(job); }
+    if (front) this._prefetchQueue.unshift(job);
+    return job;
+  }
+
+  /** One step of a queued job (job.done when cached or thrown); returns the next step's predicted ms. */
+  _stepJob(job, tag) {
+    try {
+      if (!job.gen) job.gen = levelGenerator(job.level, job.seed, job.base);   // r8v2: the real level; P1T: its base
+      const ts = perfNow();
+      const raw = job.gen.step();
+      const dt = perfNow() - ts;
+      if (!(job.max >= dt)) job.max = dt;
+      if (raw !== null) { job.done = true; this._cacheScript(job.key, freezeScript(raw)); }
+      return Math.max(dt, SLICE_JOB_SHARE * job.max);
+    } catch (err) {
+      job.done = true;
+      warnOnce('level.' + tag, 'level ' + tag + ' failed: ' + (err && err.message ? err.message : err));
+      return 0;
+    }
+  }
+
+  /** r8 (P1T, D8, ARCH §6): level L can start now — its script is authored or cached and its type's programs are compiled. */
+  ready(level, seed) {
+    const L = Math.max(1, Math.floor(Number(level) || 1));
+    const type = this._typeOf(L);
+    return this._hasScript(L, L + '|' + this._seedOf(L, seed) + '|' + type.base, type) && this._partsReady(type);
+  }
+
+  /** r8 (P1T, D8): a Promise of ready(L) once level L's script (timer slices) and programs are done — boot ?level=N awaits it. */
+  prepareFor(level, seed) {
+    const L = Math.max(1, Math.floor(Number(level) || 1));
+    const s = this._seedOf(L, seed);
+    const type = this._typeOf(L);
+    const key = L + '|' + s + '|' + type.base;
+    const parts = [];
+    if (!this._hasScript(L, key, type)) {
+      const job = this._jobFor(key, L, s, type.base, true);
+      parts.push(new Promise((resolve) => this._genSlices(job, resolve)));
+    }
+    this._partsReady(type, parts);
+    const done = () => this.ready(L, s);
+    return Promise.all(parts).then(done, done);
+  }
+
+  /** r8 (D8): steps `job` in START_SLICE_MS timer tasks until it is done, then resolve(). */
+  _genSlices(job, resolve) {
+    const timer = typeof setTimeout === 'function';
+    const tick = () => {
+      const t0 = perfNow();
+      let stepMs = 0;
+      while (!job.done && !this._scriptCache.has(job.key)) {
+        stepMs = this._stepJob(job, 'prepare');
+        if (timer && perfNow() - t0 + stepMs + SLICE_HEADROOM_MS >= START_SLICE_MS) break;
+      }
+      if (!job.done && !this._scriptCache.has(job.key)) { setTimeout(tick, 0); return; }
+      const i = this._prefetchQueue.indexOf(job);
+      if (i >= 0) this._prefetchQueue.splice(i, 1);
+      resolve();
+    };
+    tick();
+  }
+
+  /** r8 (D8): `type`'s programs (render's night variant, PREP_OF's systems) are compiled; `parts` gets the prepare() of the rest. */
+  _partsReady(type, parts) {
+    const ctx = this.ctx, r = ctx.render;
+    let ok = true;
+    if (r && typeof r.programsReady === 'function') {
+      const v = typeof r.variantForLevel === 'function' ? r.variantForLevel(type.night) : type.night;
+      if (!r.programsReady(v)) { ok = false; if (parts && typeof r.preparePrograms === 'function') parts.push(r.preparePrograms(v)); }
+    }
+    const sys = PREP_OF[type.base];
+    if (sys) for (let i = 0; i < sys.length; i++) {
+      const m = ctx[sys[i]];
+      if (m && !m.programsReady) { ok = false; if (parts && typeof m.prepare === 'function') parts.push(m.prepare()); }
+    }
+    return ok;
+  }
+
+
 
   /** True while a requestStart waits for its script. */
   get starting() { return this._reqOn; }
@@ -818,22 +993,30 @@ export class LevelRunner {
     if (hidden && typeof globalThis !== 'undefined' && typeof globalThis.requestAnimationFrame === 'function') { this._scheduleRequest(true); return; }
     const key = this._reqKey;
     const t0 = perfNow();
-    let ready = this._scriptCache.has(key);
+    let ready = this._hasScript(this._reqLevel, key, this._reqType);
+    let stepMs = 0;                                       // r8v2: the predicted step cost
     while (!ready) {
       const job = this._prefetchQueue.length > 0 ? this._prefetchQueue[0] : null;
       if (!job || job.key !== key) { ready = true; break; }   // an idle slot finished (or dropped) it: start() resolves the rest
-      try {
-        if (!job.gen) job.gen = levelGenerator(Math.min(job.level, LEVELS.curve.loopAfter), job.seed);
-        const raw = job.gen.step();
-        if (raw !== null) { this._prefetchQueue.shift(); this._cacheScript(key, freezeScript(raw)); ready = true; }
-      } catch (err) {
-        this._prefetchQueue.shift();
-        warnOnce('level.request', 'level generation failed: ' + (err && err.message ? err.message : err));
-        ready = true;                                     // start() generates synchronously and surfaces the error
-      }
-      if (!ready && perfNow() - t0 >= START_SLICE_MS) break;
+      stepMs = this._stepJob(job, 'request');
+      if (job.done) { this._prefetchQueue.shift(); ready = true; }   // a failure too: start() generates synchronously and surfaces it
+      if (!ready && perfNow() - t0 + stepMs + SLICE_HEADROOM_MS >= START_SLICE_MS) break;   // r8v2: a step = a modelled moment / validation stretch
     }
     if (!ready) { this._scheduleRequest(); return; }
+    if (this._reqParts) {                                 // r8 (D8): then waits once for the programs
+      const p = this._reqParts, again = () => { if (this._reqOn && this._reqKey === key) this._scheduleRequest(); };
+      this._reqParts = null;
+      p.then(again, again);
+      return;
+    }
+    // r8 (P8): a prepare can resolve with its programs missing (a context loss, a tier change, a dead run): never start on that
+    const parts = [];
+    if (this._reqTries < REQ_PREP_TRIES && !this._partsReady(this._reqType, parts)) {
+      this._reqTries++;
+      this._reqParts = Promise.all(parts);
+      this._scheduleRequest();
+      return;
+    }
     this._reqOn = false;
     this.start(this._reqLevel, this._reqSeed);
   }
@@ -858,9 +1041,8 @@ export class LevelRunner {
    * The generated (deep-frozen, read-only) script for campaign level `level` and seed `seed`: from the memo when
    * present, else generateLevel synchronously (a cache miss; its time lands in ctx.debug.levelGenMs).
    */
-  _generatedScript(level, seed) {
-    const curveL = Math.min(level, LEVELS.curve.loopAfter);
-    const key = curveL + '|' + seed;
+  _generatedScript(level, seed, base) {
+    const key = level + '|' + seed + '|' + base;   // r8v2: the real level; P1T: its base
     const hit = this._scriptCache.get(key);
     if (hit) { this._noteGen(0, true); return hit; }
     const t0 = perfNow();
@@ -870,7 +1052,7 @@ export class LevelRunner {
       if (this._prefetchQueue[i].key === key && this._prefetchQueue[i].gen) { gen = this._prefetchQueue[i].gen; this._prefetchQueue.splice(i, 1); break; }
     }
     let raw = null;
-    if (gen) { while (raw === null) raw = gen.step(); } else raw = generateLevel(curveL, seed);
+    if (gen) { while (raw === null) raw = gen.step(); } else raw = generateLevel(level, seed, base);
     const script = freezeScript(raw);
     this._noteGen(perfNow() - t0, false);
     this._cacheScript(key, script);
@@ -901,12 +1083,12 @@ export class LevelRunner {
    */
   prefetch(level, seed) {
     const L = Math.max(1, Math.floor(Number(level) || 0));
-    if (!L || LEVELS.authored[L]) return;
-    const s = (seed !== undefined && seed !== null && Number.isFinite(seed)) ? (seed >>> 0) : this._defaultSeed(L);
-    const key = Math.min(L, LEVELS.curve.loopAfter) + '|' + s;
-    if (this._scriptCache.has(key)) return;
-    for (let i = 0; i < this._prefetchQueue.length; i++) if (this._prefetchQueue[i].key === key) return;
-    this._prefetchQueue.push({ key, level: L, seed: s, gen: null });   // gen: levelGenerator once the first attempt ran
+    if (!L) return;
+    const type = this._typeOf(L);
+    const s = this._seedOf(L, seed);
+    const key = L + '|' + s + '|' + type.base;            // r8v2: the real level; P1T: its base
+    if (this._hasScript(L, key, type)) return;
+    this._jobFor(key, L, s, type.base, false);            // gen: levelGenerator once the first attempt ran
     this._schedulePrefetch();
   }
 
@@ -927,20 +1109,14 @@ export class LevelRunner {
     if (st && (st.is('playing') || st.is('paused'))) { this._prefetchQueue.length = 0; return; }
     const t0 = perfNow();
     const hasDeadline = !!(deadline && typeof deadline.timeRemaining === 'function');
-    let first = true;
+    let first = true, stepMs = 0;                       // r8v2: the last step's cost (see _runRequest)
     while (this._prefetchQueue.length > 0) {
       const job = this._prefetchQueue[0];
       if (this._scriptCache.has(job.key)) { this._prefetchQueue.shift(); continue; }
-      if (!first && (hasDeadline ? deadline.timeRemaining() < PREFETCH_MIN_LEFT_MS : perfNow() - t0 >= PREFETCH_SLICE_MS)) break;
+      if (!first && (hasDeadline ? deadline.timeRemaining() < Math.max(PREFETCH_MIN_LEFT_MS, stepMs + SLICE_HEADROOM_MS) : perfNow() - t0 + stepMs + SLICE_HEADROOM_MS >= PREFETCH_SLICE_MS)) break;
       first = false;
-      try {
-        if (!job.gen) job.gen = levelGenerator(Math.min(job.level, LEVELS.curve.loopAfter), job.seed);
-        const raw = job.gen.step();
-        if (raw !== null) { this._prefetchQueue.shift(); this._cacheScript(job.key, freezeScript(raw)); }
-      } catch (err) {
-        this._prefetchQueue.shift();
-        warnOnce('level.prefetch', 'level prefetch failed: ' + (err && err.message ? err.message : err));
-      }
+      stepMs = this._stepJob(job, 'prefetch');
+      if (job.done) this._prefetchQueue.shift();
     }
     this._schedulePrefetch();
   }
@@ -964,7 +1140,7 @@ export class LevelRunner {
         if (!this._endless && this._level > 0) this.prefetch(this._level);
         // round 5 integration: the levels screen also queues every other unlocked level, nearest the frontier first, so a
         // tile tap is a memo hit (requestStart generates a miss in frame slices anyway); skipped / deduplicated by prefetch()
-        if (p.to === 'levels') for (let L = Math.min(highest, LEVELS.count) - 1; L >= 2; L--) this.prefetch(L);
+        if (p.to === 'levels') for (let L = highest - 1, n = 0; L >= 2 && n < LEVELS.count; L--, n++) this.prefetch(L);   // r8v2: the real levels below the frontier (was capped at L29)
         break;
       default:
         break;
@@ -983,11 +1159,12 @@ export class LevelRunner {
     const script = newEndlessScript(runSeed);
     const first = generateChunk(1, runSeed, 0);
     for (let i = 0; i < first.length; i++) script.events.push(first[i]);
+    this._type = STANDARD_TYPE;                           // r8: endless is a plain run
     this._level = endlessEquivalentLevel(1);
     this._endless = true;
     this._difficulty = 1;
     this._chunkEnd = LEVELS.endless.chunk;
-    this._bandMid = bandMidFor(this._level);
+    this._bandMid = bandMidFor(Math.min(this._level, LEVELS.endless.bandMaxLevel || Infinity));   // r8v2: endless keeps its band
     this._beginRun(script, runSeed);
   }
 
@@ -1009,9 +1186,11 @@ export class LevelRunner {
     const save = ctx.save;
     this._district = districtForLevel(save && save.data ? Math.max(1, save.data.highestUnlocked | 0) : 1);
     this._undoRuntimeState(WORLD.idleRoadSpeed);
-    this._applyDistrict(0);
+    this._applyDistrict(0, false);                        // r8: the title is a day scene
     if (ctx.zombies) ctx.zombies.killAll('cleanup');
     this._resetSystems();
+    this._mode = null;
+    this._modeOn = false;
     this._setPhase('idle');
     this._finished = false;
     this._committed = false;
@@ -1036,10 +1215,12 @@ export class LevelRunner {
   // Visual districts (DISTRICTS.md §3, §8.5)
   // -------------------------------------------------------------------------------------------
 
-  /** render.setDistrict(this._district, seconds) — 0 snaps before the next draw; render forwards to the environment. */
-  _applyDistrict(seconds) {
+  /** render.setDistrict(this._district, seconds) — 0 snaps before the next draw; render forwards to the environment. r8 (P1T):
+   *  and render.setNight(night, seconds) once the renderer has night (P5). */
+  _applyDistrict(seconds, night) {
     const render = this.ctx.render;
     if (render && typeof render.setDistrict === 'function') render.setDistrict(this._district, seconds);
+    if (render && typeof render.setNight === 'function') render.setNight(!!night, seconds);
   }
 
   /** district:change { id, name, index, label, accent, seconds, reason, banner, first, step, steps } for the district shown
@@ -1060,6 +1241,10 @@ export class LevelRunner {
     P_DISTRICT.first = !!first;
     P_DISTRICT.step = this._endless || reason === 'title' ? 0 : ((Math.max(1, this._level) - 1) % per) + 1;
     P_DISTRICT.steps = per;
+    const key = reason === 'title' ? '' : this._type.key;   // r8 (P1T): the type (its name: STRINGS.modes, P7)
+    P_DISTRICT.modeKey = key;
+    P_DISTRICT.modeName = key && STRINGS.modes && typeof STRINGS.modes[key] === 'string' ? STRINGS.modes[key] : '';
+    P_DISTRICT.modeColor = key ? LEVEL_TYPES[key].color : 0;
     this.ctx.events.emit('district:change', P_DISTRICT);
   }
 
@@ -1103,7 +1288,7 @@ export class LevelRunner {
       }
     }
     this._district = target;
-    this._applyDistrict(R.fadeSeconds);
+    this._applyDistrict(R.fadeSeconds, false);
     this._emitDistrict(R.fadeSeconds, 'rotate', true, true);   // r7 (explain:4): an endless rotation gets the big card
   }
 
@@ -1174,6 +1359,8 @@ export class LevelRunner {
     const ctx = this.ctx;
     this._script = script;
     this._seed = seed;
+    this.activity.decisions = 0; this.activity.eventsReached = 0;   // r8 (D30 / A1)
+    this._actEv = -1; this._actTravel = 0; this._actLane = -1; this._actMoved = false; this._actDone = false;
     // DISTRICTS.md §3.1 / §8.5: the run's district snaps (seconds 0) after the undo list and before env.setLevel. Round 7
     // (r7, explain:4): the banner shows at EVERY run start, retries included (a small "NAME · k/5" tag); the big "NEW
     // DISTRICT" card only on a district's first level (and an endless start) when the previous run this session was not the
@@ -1192,15 +1379,31 @@ export class LevelRunner {
     this._runCards.length = 0;
     this._lastGatesAt = -1e9;
     this._undoRuntimeState(script.roadSpeed);
-    this._applyDistrict(0);
+    const type = this._type;
+    this._applyDistrict(0, type.night);
+    // r8 (P8): a run of another base stops an abandoned Horde tile's prepare (render.setNight does this for a night one): its
+    // programs must not compile in play on a slow phone; the next prepare() finishes them
+    if (!PREP_OF[type.base]) for (let i = 0; i < PREP_OF.horde.length; i++) { const m = ctx[PREP_OF.horde[i]]; if (m && typeof m.cancelPrepare === 'function') m.cancelPrepare(); }
 
     ctx.rng = new Rng(seed);
     ctx.rngFx = ctx.rng.fork(RNG_FX_OFFSET);
+    ctx.rngShot = ctx.rng.fork(RNG_SHOT_OFFSET);
 
+    // r8 (P1T): the type's mode, replay by type key (D21), the first meeting (D34: first played at a frontier ≥ debut + meetAfter,
+    // until its first clear) and this attempt's REINFORCEMENTS steps
+    const modeName = this._endless ? null : MODE_OF[type.base];
+    this._mode = modeName && ctx[modeName] ? ctx[modeName] : null;
+    this._modeOn = false;
+    this._cause = '';
     const save = ctx.save;
     const rec = (!this._endless && save && save.data && save.data.levels) ? save.data.levels[this._level] : null;
-    const replay = !!(rec && rec.clears > 0);
+    const replay = !!rec && save.isReplay(this._level, type.key);
+    this._retype = !!rec && rec.clears > 0 && !replay;
+    const met = this._endless || !save ? null : save.meetType(type.key);
+    this._firstMeet = !!met && met.clears === 0 && met.metAtFrontier >= LEVEL_TYPES[type.key].debut + LEVEL_TYPES.meetAfter;
+    this._assistK = this._assistSteps();
     ctx.run = newRunStats(this._level, seed, this._endless, script, replay);
+    ctx.run.assistK = this._assistK;
 
     if (ctx.render && ctx.render.env) ctx.render.env.setLevel(seed, this._propDensity());
     this._resetSystems();
@@ -1243,6 +1446,7 @@ export class LevelRunner {
     P_START.endless = this._endless;
     P_START.script = script;
     P_START.district = this._district.id;
+    this._typeData(P_START, null);
     ctx.events.emit('level:start', P_START);
     this._emitDistrict(0, 'start', true, firstOfDistrict);
     // r7 (teaching:5): the FIELD GUIDE's controls and the road bar are met at the first run
@@ -1250,9 +1454,10 @@ export class LevelRunner {
     if (!this._endless) this._codexSeen('hud.progress', false);
   }
 
+  /** `at` of the finale event (the boss; r8: script.finale), else the length. */
   _findBossAt(script) {
-    const evs = script.events;
-    for (let i = 0; i < evs.length; i++) if (evs[i].type === 'boss') return evs[i].at;
+    const evs = script.events, fin = script.finale || 'boss';
+    for (let i = 0; i < evs.length; i++) if (evs[i].type === fin) return evs[i].at;
     return script.length;
   }
 
@@ -1317,12 +1522,13 @@ export class LevelRunner {
     const run = ctx.run;
     const script = this._script;
     if (!script) return;
+    this._trackActivity();   // r8 (D30 / A1)
 
     // road speed + distance: the boss slow-down is a linear tween over BOSSES.intro.roadLerp s (GDD §7, QA LVL-13),
     // every other change eases exponentially
     if (this._roadTweenT >= 0) {
       this._roadTweenT += dt;
-      const dur = BOSSES.intro.roadLerp > 0 ? BOSSES.intro.roadLerp : 1e-6;
+      const dur = this._roadTweenDur;                    // r8: the boss's roadLerp or stopRoad / resumeRoad's
       const u = this._roadTweenT >= dur ? 1 : this._roadTweenT / dur;
       w.roadSpeed = this._roadTweenFrom + (this._roadTweenTo - this._roadTweenFrom) * u;
       if (u >= 1) this._roadTweenT = -1;
@@ -1356,7 +1562,7 @@ export class LevelRunner {
         // district and score bookkeeping go on above, the boss's own minions are boss.js's
         if (this._holdOn && HOLD_TYPES[ev.type] === true) break;
         this._cursor++;
-        if (w.distance - ev.at > stale && ev.type !== 'runup' && ev.type !== 'boss') continue;
+        if (w.distance - ev.at > stale && ev.type !== 'runup' && ev.type !== 'boss' && ev.type !== script.finale) continue;   // r8: nor a mode's finale
         this._fireEvent(ev);
       }
 
@@ -1434,7 +1640,7 @@ export class LevelRunner {
       this._difficulty = d;
       this._level = endlessEquivalentLevel(d);
       run.level = this._level;
-      this._bandMid = bandMidFor(this._level);
+      this._bandMid = bandMidFor(Math.min(this._level, LEVELS.endless.bandMaxLevel || Infinity));
       w.roadSpeedBase = endlessSpeed(d);
       run.roadSpeedBase = w.roadSpeedBase;
       this._script.roadSpeed = w.roadSpeedBase;
@@ -1618,8 +1824,58 @@ export class LevelRunner {
       case 'hint': this._fireHint(ev); break;
       case 'runup': this._fireRunup(ev); break;
       case 'boss': this._fireBoss(ev); break;
-      default: warnOnce('level.event.' + ev.type, 'unknown script event type ' + ev.type); break;
+      default:
+        // r8 (P1T): a mode level's finale begins it; its other events go to mode.fireEvent
+        if (this._mode && ev.type === this._script.finale) this._beginMode(ev);
+        else if (!(this._mode && this._mode.fireEvent(ev))) warnOnce('level.event.' + ev.type, 'unknown script event type ' + ev.type);
+        break;
     }
+  }
+
+  /** r8 (P1T, ARCH §5): the finale event (the dig-in) — mode.begin(script, { threat 1, assistK (the mode gives them, D35), firstMeet
+   *  (it eases from its own data), seed, runDecisions, event }). */
+  _beginMode(ev) {
+    this._modeOn = true;
+    this._bossReached = true;
+    this._runupActive = false;                           // r8 (P6): the run's run-up bursts end at the dig-in (no zombies.spawn in a mode)
+    this._setPhase(MODE_OF[this._type.base]);
+    P_BEGIN.assistK = this._assistK; P_BEGIN.firstMeet = this._firstMeet; P_BEGIN.seed = this._seed;
+    P_BEGIN.runDecisions = this.activity.decisions; P_BEGIN.event = ev;
+    this._mode.begin(this._script, P_BEGIN);
+    P_BEGIN.event = null;
+  }
+
+  /** r8 (P1T): a linear stop over `seconds`, or exactly at atDistance when it lies ahead; resumeRoad(seconds) undoes it. */
+  stopRoad(seconds, atDistance) {
+    const w = this.ctx.world;
+    const s = atDistance > w.distance && w.roadSpeed > 0 ? 2 * (atDistance - w.distance) / w.roadSpeed : seconds;
+    this._roadTarget = 0;
+    this._roadTween(0, s);
+  }
+
+  resumeRoad(seconds) {
+    this._roadTarget = this.ctx.world.roadSpeedBase;
+    this._roadTween(this._roadTarget, seconds);
+  }
+
+  /** A linear road-speed tween to `to` over `seconds` (step()). */
+  _roadTween(to, seconds) {
+    this._roadTweenFrom = this.ctx.world.roadSpeed;
+    this._roadTweenTo = to;
+    this._roadTweenDur = seconds > 0 ? seconds : 1e-6;
+    this._roadTweenT = 0;
+  }
+
+  /** r8 (P1T, smoke --skip): 'run' jumps to DEBUG_SKIP_M before the finale event, any other kind goes to the mode; true if skipped. */
+  debugSkip(kind) {
+    const k = kind || 'run';
+    const w = this.ctx.world;
+    if (k === 'run' && this._script && !this._endless && (this._phase === 'run' || this._phase === 'runup')) {
+      if (this._bossAt - DEBUG_SKIP_M <= w.distance) return false;
+      w.distance = this._bossAt - DEBUG_SKIP_M;
+      return true;
+    }
+    return !!(this._mode && this._modeOn && this._mode.debugSkip(k));
   }
 
   /** A script 'hint' row. Round 7 (r7, teaching:0 B): "GRAB THE CRATE" (L1) stays until a crate opens or an item is picked
@@ -1690,6 +1946,7 @@ export class LevelRunner {
     if (!cap || !squad || LEVELS.authored[this._level] || !ev.lanes) return ev;
     const frac = ev.layout === 'single' ? cap.single : cap.multi;
     if (!(frac > 0)) return ev;
+    if (cap.scope === 'single' && ev.layout !== 'single') return ev;   // r8: singles only
     const lim = Math.max(GATE_RULES.generation.minValue, roundDesign(frac * squad.count));
     let lanes = null;
     for (let i = 0; i < ev.lanes.length; i++) {
@@ -2016,13 +2273,14 @@ export class LevelRunner {
       this._roadTarget = w.roadSpeedBase * WORLD.bossRoadFactor;
       this._roadTweenFrom = w.roadSpeed;                 // linear 1 s slow-down (GDD §7 "lerps to 35 % over 1 s")
       this._roadTweenTo = this._roadTarget;
+      this._roadTweenDur = BOSSES.intro.roadLerp > 0 ? BOSSES.intro.roadLerp : 1e-6;
       this._roadTweenT = 0;
       this._bossReached = true;
     } else if (this._phase === 'run' || this._phase === 'runup') {
       this._setPhase('boss');          // no intro for a mini-boss (boss:fight may never fire)
     }
     if (!boss) return;
-    const archetype = ev.archetype || BOSSES.rotation[Math.min(this._level, LEVELS.curve.loopAfter) - 1];
+    const archetype = ev.archetype || bossIdOf(this._level);
     const phases = ev.phases || archetypePhases(archetype);
     const eBoss = this._endless ? endlessE(this._difficulty) : this._script.eBoss;
     const union = unionMinionUnits(phases);
@@ -2040,6 +2298,8 @@ export class LevelRunner {
     const hpScale = this._bossHpScale(eBoss);
     const sq = BOSSES.squadScale;
     hp = (sq && sq.minMult > 0 && sq.minMult < 1 && !this._endless) ? roundBossHp(hp * hpScale) : Math.max(hp, roundBossHp(hp * hpScale));
+    const tableHp = ev.hp > 0 ? ev.hp : roundBossHp(BOSSES.hpPerE * eBoss);
+    hp = this._bossUnderFloor(hp, tableHp, mini, eBoss);   // r8v2 (B1)
     const floored = this._bossTtkBand(hp, mini, eBoss);
     run.bossTtkBand = floored > hp ? 1 : 0;
     hp = floored;
@@ -2062,6 +2322,18 @@ export class LevelRunner {
     this._codexSeen('hud.bossbar', false);
     // fresh spec per boss event: the boss keeps minionHp for its bursts during the whole fight
     const spec = { id: ev.id || ('boss.' + archetype), archetype, hp, phases: bossPhases, minionHp, mini };
+    const vc = BOSSES.valve && BOSSES.valve.campaign;   // r8: the campaign enrage — earlier, and its chew scales with E_boss
+    if (vc && !mini) {
+      const ms = isFinale(this._level);   // r8v2: every 5th level
+      spec.enrageExtra = enrageExtra(vc, archetype, (this.ctx.squad ? this.ctx.squad.count : 0) / eBoss);   // r8v2: slow archetypes, on-curve squads
+      spec.valveAfter = (ms && vc.afterMilestone > 0 ? vc.afterMilestone : vc.after) + spec.enrageExtra;
+      spec.chew = Math.max(BOSSES.valve.perSec, Math.round((vc.perSecFrac || 0) * eBoss));
+      spec.chewRamp = vc.rampPerSec > 0 ? vc.rampPerSec : 0;
+    }
+    // r8 (P1 audit, D18): the sniper cap's base (boss.capHp) at the spawn — the boss HP before the floors, under the curve the HP at
+    // E_boss × C / E_boss; on the floor-raised max HP the cap grew with the floors and beat them for hands-off squads
+    const cr = (ctx.squad ? ctx.squad.count : 0) / eBoss;
+    if (!mini) spec.capHp = Math.max(1, tableHp * this._bossHpScale(eBoss, Math.max(1, cr)) * Math.min(1, cr));
     if (ev.x !== undefined) spec.x = ev.x;
     if (ev.z !== undefined) spec.z = ev.z;
     boss.spawn(spec);
@@ -2097,13 +2369,13 @@ export class LevelRunner {
     if (!ev || !this.ctx.boss) return;
     try {
       const w = this.ctx.world;
-      const archetype = ev.archetype || BOSSES.rotation[Math.min(this._level, LEVELS.curve.loopAfter) - 1];
+      const archetype = ev.archetype || bossIdOf(this._level);
       const phases = ev.phases || archetypePhases(archetype);
       const eBoss = this._endless ? endlessE(this._difficulty) : this._script.eBoss;
       const union = unionMinionUnits(phases);
       scaleHp(ev.minionHp || solveWaveHp(eBoss, w.roadSpeedBase, union, this._bandMid), this._endless ? this._miniMinionMult() : this._liveHpMult(eBoss) * this._lowSideMult(eBoss));
       const hp = ev.hp > 0 ? ev.hp : roundBossHp(BOSSES.hpPerE * eBoss);
-      this._bossTtkBand(roundBossHp(hp * this._bossHpScale(eBoss)), this._endless || !!ev.mini, eBoss);   // r7: pure, the result is discarded
+      this._bossTtkBand(this._bossUnderFloor(roundBossHp(hp * this._bossHpScale(eBoss)), hp, this._endless || !!ev.mini, eBoss), this._endless || !!ev.mini, eBoss);   // r7: pure, the result is discarded
       if (this._endless) pressurePhases(phases, 2);
     } catch (err) {
       warnOnce('level.bossWarm', 'boss warm-up failed: ' + (err && err.message ? err.message : err));
@@ -2119,21 +2391,40 @@ export class LevelRunner {
    * HP / C rise with C once C > E / (exp·ln m) (≈ 0.44·E at m = 12.5): measured flat, and on L28 at ranks 9·8·8·10·9 11.5 s at
    * 0.45·E against 15.1 s at E (docs/build/r5-balance-audit.md §4). r7 answers that pending decision: below E_boss the count
    * scale now falls to minMult, which outweighs the faded shop exponent (never-steering bot: TTK max 41 → 20 s).
+   * r8 (P1 audit): atRatio > 0 = the scale at C = atRatio·E (spec.capHp).
    */
-  _bossHpScale(E) {
+  _bossHpScale(E, atRatio) {
     const ctx = this.ctx;
     const sq = BOSSES.squadScale, sh = BOSSES.shopScale;
     let scale = 1;
-    const ratio = Math.max(0, ctx.squad ? ctx.squad.count : 0) / Math.max(1, E);
+    const ratio = atRatio > 0 ? atRatio : Math.max(0, ctx.squad ? ctx.squad.count : 0) / Math.max(1, E);
     if (sq) scale *= clamp(Math.pow(ratio, sq.exp), (sq.minMult > 0 && !this._endless) ? sq.minMult : 1, sq.maxMult);
     if (sh) {
       const pr = ctx.profile;
       const m = pr ? (pr.fireRate / FIRE.rateBase) * pr.damage * pr.bossDamage : 1;
       // a squad below the curve keeps most of its upgrades' edge: the exponent fades with C / E (the bad bot, 0.3·E_boss with
       // rank-2 upgrades, met 1.7× the table HP and was chewed by the safety valve on all five L7 attempts)
-      scale *= clamp(Math.pow(m > 0 ? m : 1, sh.exp * Math.min(1, ratio)), 1, sh.maxMult);
+      // r8: shopScale.fade false = the campaign boss meets the full m^exp at any C (endless keeps the fade)
+      scale *= clamp(Math.pow(m > 0 ? m : 1, sh.exp * (sh.fade === false && !this._endless ? 1 : Math.min(1, ratio))), 1, sh.maxMult);
     }
     return scale;
+  }
+
+  /** r8v2 (B1): a campaign squad under the curve meets ≥ t·mult·(E/C)^k s of fight (BOSSES.ttkBand.under). Pure (boss warm-up). */
+  _bossUnderFloor(hp, tableHp, mini, eBoss) {
+    const band = BOSSES.ttkBand;
+    const uf = band && band.under;
+    if (!uf || !(bossUnderT(this._level) > 0) || mini || this._endless) return hp;   // r8v2: from under.fromLevel (L3)
+    const pr = this.ctx.profile;
+    const c = this.ctx.squad ? this.ctx.squad.count : 0;
+    if (!pr || !(c > 0) || !(eBoss > 0) || c >= eBoss) return hp;
+    const r = Math.max(uf.minRatio > 0 ? uf.minRatio : 0.25, c / eBoss);
+    const mult = tableHp > 0 ? tableHp / (BOSSES.hpPerE * eBoss) : 1;
+    const dpsE = eBoss * pr.fireRate * pr.damage * pr.bossDamage * band.acc;
+    // r8 (D18 / A2): a run without its counted gate decisions meets the floor × under.effStatic, decided at the spawn only
+    const eff = uf.effStatic > 1 && !this._runCounted() ? uf.effStatic : 1;
+    const floor = roundBossHp(dpsE * bossUnderT(this._level) * mult * Math.pow(1 / r, (uf.k > 0 ? uf.k : 2) - 1) * eff);
+    return floor > hp ? floor : hp;
   }
 
   /**
@@ -2141,7 +2432,7 @@ export class LevelRunner {
    * BOSSES.ttkBand = { acc, min, milestoneMin, shopExp, fromRatio }: when C ≥ fromRatio·E_boss, HP ≥ round50(DPS · tMin) with
    * DPS = C · fireRate · damage · bossDamage · acc (GDD §3.3 squad DPS) and tMin = (milestone ? milestoneMin : min) · m^−shopExp,
    * m = (fireRate / FIRE.rateBase)·damage·bossDamage — a better shop still wins faster, at the r5 rate. Milestone = the curve level
-   * (min(L, loopAfter)) is in BOSSES.milestones. A regular boss at C = E_boss already lasts ≈ 12.5·m^−0.1 s, so the floor binds
+   * (r8v2: isFinale(L), every 5th level). A regular boss at C = E_boss already lasts ≈ 12.5·m^−0.1 s, so the floor binds
    * for big squads (C > ≈ 1.3·E_boss) and on milestones (the 393-soldier L15 Colossus died in 12 s). Mini-bosses, endless, a
    * missing key: HP unchanged (r7 fix round 3: a squad below fromRatio·E_boss meets the weak floor only). Pure (no write), so
    * the boss warm-up can run it.
@@ -2173,8 +2464,7 @@ export class LevelRunner {
       if (weak > base) base = weak;
     }
     if (c < band.fromRatio * eBoss) return base;
-    const curveL = Math.min(this._level, LEVELS.curve.loopAfter);
-    const tMin = (BOSSES.milestones.indexOf(curveL) !== -1 ? band.milestoneMin : band.min) * shop;
+    const tMin = (isFinale(this._level) ? band.milestoneMin : band.min) * shop;   // r8v2: finale = every 5th level
     const floor = roundBossHp(dps * tMin);
     if (!(floor > base)) return base;
     const fade = band.fadeWidth > 0 ? (c / eBoss - band.fromRatio) / band.fadeWidth : 1;
@@ -2214,11 +2504,17 @@ export class LevelRunner {
     let mult = 1;
     // round-3 QA LVL-17: endless has its own shop compensation (LEVELS.endless.profileExp) — the shop's fire rate × damage
     // is what carries a strong player deeper
-    const exp = this._endless && en.profileExp >= 0 ? en.profileExp : LEAK_MODEL.profileExp;
+    let exp = this._endless && en.profileExp >= 0 ? en.profileExp : LEAK_MODEL.profileExp;
+    if (!this._endless) exp = profileExpOf(this._level);   // r8: the campaign's shop compensation rises past L30
     const prof = ctx.profile;
     if (prof && exp > 0) {
       const p = (prof.fireRate / FIRE.rateBase) * prof.damage;
-      if (p > 0) mult *= Math.pow(p, exp);
+      // r8 (D26): the campaign answers a shop above the expected one with util.shopComp; endless keeps p^exp
+      if (p > 0 && this._endless) mult *= Math.pow(p, exp);
+      else if (p > 0) {
+        if (this._pExpLevel !== this._level) { this._pExpLevel = this._level; this._pExp = shopOf(expectedRanksOf(this._level)).p; }
+        mult *= shopComp(p, this._pExp, exp, LEAK_MODEL.surplusExp);
+      }
     }
     if (this._endless) {
       const eD = eSolved > 0 ? eSolved : endlessE(this._difficulty);
@@ -2431,6 +2727,22 @@ export class LevelRunner {
     this._addCoins(p.amount, p.source);
   }
 
+  /** r8 (P1T): crowd:kills { n, coins } — credited directly (fx answers crowd:kills; a coin:pickup would double its coin flights). */
+  _onCrowdKills(p) {
+    if (this._phase === 'idle' || this._finished || !p) return;
+    if (this._committed && !this._committing) return;
+    const run = this.ctx.run;
+    run.kills += p.n | 0;
+    if (p.coins > 0) { run.killCoins += p.coins; this._addCoins(p.coins, 'kill'); }
+  }
+
+  /** r8 (P1T): item:grant — a kind-'event' item's kits (PICKUPS.eventItems) go to run.kits, which the hold starts with. */
+  _onItemGrant(p) {
+    if (this._phase === 'idle' || !p) return;
+    const e = PICKUPS.eventItems[p.id];
+    if (e && e.kits > 0) this.ctx.run.kits += e.kits;
+  }
+
   /**
    * Unrounded credit n · (coinMult for 'kill' / 'boss') · (×0.6 on a replay or in endless) accumulates per breakdown
    * bucket; the bucket is credited floor(accumulated) − already credited whole coins (QA LVL-6: a 1-coin pickup worth
@@ -2502,8 +2814,8 @@ export class LevelRunner {
     run.bossStartTime = run.elapsed;
     // QA LVL-25 (GDD §1.1 / §7): the boss lesson when shooting starts to count (the intro is immune), campaign only. Round 7
     // (r7, teaching:3): "YOUR SQUAD SHOOTS THE BOSS — DODGE ITS ATTACKS", then — with a weapon waiting in the FIRE button —
-    // "FIRE YOUR STORED WEAPON AT THE BOSS!"
-    if (this._endless) return;
+    // "FIRE YOUR STORED WEAPON AT THE BOSS!" (r8: not in a mode, which teaches its own boss)
+    if (this._endless || this._modeOn) return;
     this.showHint('boss');
     if (this._storedCount() > 0) this.showHint('bossFire');
   }
@@ -2526,7 +2838,7 @@ export class LevelRunner {
    * the 0.8 s slam ring reads for ≈ 2.5 s). The safety-valve chew is a FIELD GUIDE entry, not a lesson.
    */
   _onBossAttack(p) {
-    if (this._phase === 'idle' || this._finished || !p) return;
+    if (this._phase === 'idle' || this._finished || !p || this._modeOn) return;   // r8: not in a mode
     if (p.kind === 'chew') { this._codexSeen('boss.valve', false); return; }
     this._attackLesson(LESSON_OF[p.kind], p.delay);
   }
@@ -2648,6 +2960,7 @@ export class LevelRunner {
     }
     if (this._phase === 'won' || this._phase === 'lost') return;
     this._setPhase('won');
+    if (!this._cause) this._cause = 'boss';              // r8 (P1T): the results' cause
     const squad = ctx.squad;
     run.survivors = squad ? squad.count : 0;
     if (squad) squad.setInvulnerable(Infinity);
@@ -2675,6 +2988,7 @@ export class LevelRunner {
     if (this._phase === 'won' || this._phase === 'lost') return;
     const ctx = this.ctx;
     this._setPhase('lost');
+    if (!this._cause) this._cause = 'squad';             // r8 (P1T)
     this._deathDistance = ctx.world.distance;            // results read this, not the 1.2 s run-on (QA LVL-10)
     if (ctx.fx) ctx.fx.slowmo(JUICE.slowmo.squadDead[0], JUICE.slowmo.squadDead[1]);
     this._finishAt = this._theatreNow() + GAMEOVER_RESULTS_MS;   // QA LVL-29: theatre clock
@@ -2703,9 +3017,16 @@ export class LevelRunner {
    * Level end: COMMIT (stars / coins / score, save.*) then PRESENT (state complete | gameover, level:complete |
    * level:failed | endless:end). QA LVL-19: the commit runs exactly once per run — here, or earlier when the player
    * quits / restarts during the death theatre (_commitPending); the 3 s collapse is presentation only (GDD §7 / §9.3).
+   * r8 (P1T): a mode ends a live run with finish(won, cause): the boss-kill or squad-loss theatre first, then this; the results get
+   * the cause ('boss', 'squad', a mode's).
    */
-  finish(won) {
+  finish(won, cause) {
     if (this._finished || this._finishing) return;
+    if (cause) this._cause = cause;
+    if (this._phase !== 'won' && this._phase !== 'lost' && this._phase !== 'idle') {
+      if (won) this._onBossDead(); else this._onSquadDead();
+      return;
+    }
     this._finishing = true;
     this._finishAt = 0;
     this._runupActive = false;
@@ -2745,7 +3066,31 @@ export class LevelRunner {
     } finally {
       this._committing = false;
       this._committed = true;
+      if (this._modeOn) this._mode.end();                // r8 (P1T): its scene stays until the next reset
     }
+  }
+
+  /** r8 (P1T): the mode's report, mode.stat(STAT) after the defaults. */
+  _modeStat() {
+    const s = STAT;
+    s.holdActions = 0; s.holdSurgeWindows = 0; s.staggers = 0; s.lineHeld = false; s.kits = 0; s.kills = 0; s.total = 0; s.surgesCleared = 0;
+    s.eased.fill(false);
+    this._mode.stat(s);
+    return s;
+  }
+
+  /** r8 (D45): the mode's score terms (LINE HELD on a clear, each stagger). */
+  _modeScore(s, won) {
+    return s ? (won && s.lineHeld ? SCORE.hold.lineHeld : 0) + SCORE.hold.stagger * (s.staggers | 0) : 0;
+  }
+
+  /** r8 (P1T): the run's type fields into `d` (a payload or the result data; stat copied, ui may keep it). */
+  _typeData(d, stat) {
+    const t = this._type, s = this._script;
+    d.typeKey = t.key; d.base = t.base; d.night = t.night; d.finale = s.finale || 'boss'; d.eTarget = s.eTarget > 0 ? s.eTarget : s.eBoss;
+    d.stat = stat ? Object.assign({}, stat, { eased: stat.eased.slice() }) : null;
+    d.cause = this._cause; d.firstMeet = this._firstMeet; d.retypeReward = this._retype; d.assistK = this._assistK;
+    return d;
   }
 
   _statsPartial(payout) {
@@ -2753,9 +3098,10 @@ export class LevelRunner {
     return { runs: 1, kills: run.kills, gatesPassed: run.gatesPassed, coinsEarned: payout, playSeconds: run.elapsed };
   }
 
-  /** Emits the level's own coin:pickup { source:'bonus' } (the only income path, D1) at the squad. */
-  _emitBonus(amount) {
+  /** Emits the level's own coin:pickup { source:'bonus' (r8: or `source`) } (the only income path, D1) at the squad. */
+  _emitBonus(amount, source) {
     const squad = this.ctx.squad;
+    P_BONUS.source = source || 'bonus';
     P_BONUS.amount = amount;
     P_BONUS.x = squad ? squad.x : 0;
     P_BONUS.y = SQUAD.label.y;
@@ -2769,32 +3115,43 @@ export class LevelRunner {
     const save = ctx.save;
     const level = this._level;
     const eBoss = this._script.eBoss;
+    const type = this._type;
+    // r8 (P1T, D16): the mode's metric (else survivors) against eTarget (a Horde's E_hold) with the type's 3★ fraction
+    const eTarget = this._script.eTarget > 0 ? this._script.eTarget : eBoss;
     const survivors = run.survivors;
+    const stat = this._modeOn ? this._modeStat() : null;
+    const metric = this._modeOn ? Math.round(this._mode.metric()) : survivors;
     // GDD §9.3: 1★ boss killed, 2★ R ≥ STARS.two·E_boss, 3★ R ≥ STARS.three·E_boss — round 7 (r7, explain:0): through
     // data.starNeed, the same helper the results line prints its thresholds with (identical stars for every reachable pair)
     let stars = 1;
-    if (survivors >= starNeed(eBoss, 2)) stars = 2;
-    if (survivors >= starNeed(eBoss, 3)) stars = 3;
+    if (metric >= starNeed(eTarget, 2, level)) stars = 2;
+    if (metric >= starNeed(eTarget, 3, level, starThreeOf(level, type.key))) stars = 3;   // r8v2: the 3★ fraction depends on the level
     run.stars = stars;
-    // level bonus (ECONOMY.starBonus by stars) plus the survivor bonus (round-3 QA LVL-23: ECONOMY.survivorCoins per soldier
-    // alive at the kill beyond ECONOMY.survivorFrom·E_boss — the squad a better run brings home pays), credited through the
-    // only income path: no coinMult, replay ×0.6 applies
-    const surplus = Math.max(0, survivors - (ECONOMY.survivorFrom > 0 ? ECONOMY.survivorFrom : 0) * eBoss);
-    const starRaw = ECONOMY.levelBonus(level) * (1 + ECONOMY.starBonus[stars]);
+    // level bonus (ECONOMY.starBonus by stars; r8: × bonusMult) plus the survivor bonus (round-3 QA LVL-23: ECONOMY.survivorCoins
+    // per soldier alive at the kill beyond ECONOMY.survivorFrom·eTarget — the squad a better run brings home pays), credited
+    // through the only income path: no coinMult, replay ×0.6 applies
+    const surplus = Math.max(0, survivors - (ECONOMY.survivorFrom > 0 ? ECONOMY.survivorFrom : 0) * eTarget);
+    const starRaw = ECONOMY.levelBonus(level) * (1 + ECONOMY.starBonus[stars]) * LEVEL_TYPES[type.key].bonusMult;
     const survRaw = surplus * (ECONOMY.survivorCoins > 0 ? ECONOMY.survivorCoins : 0);
     this._emitBonus(Math.round(starRaw + survRaw));
+    // r8 (HORDE_GEN.coins): LINE HELD (no section ever broke) and a refund per kit left
+    const modeRaw = stat && stat.lineHeld ? HORDE_GEN.coins.lineHeldPerL * level : 0;
+    if (modeRaw > 0) this._emitBonus(Math.round(modeRaw));
+    if (stat && stat.kits > 0) this._emitBonus(Math.round(stat.kits * HORDE_GEN.coins.kitRefund), 'refund');
     this._settleCoins();
-    // score (GDD §9.3): 10·Σ kill coins + 15·peak + 20·R + 200·flipped + 500 if nothing was lost to a red gate
+    // score (GDD §9.3): 10·Σ kill coins + 15·peak + 20·R + 200·flipped + 500 if nothing was lost to a red gate (r8: + the mode's)
     run.score = SCORE.kill * run.killCoins + SCORE.peak * run.peakSquad + SCORE.survivor * survivors
-      + SCORE.flipped * run.gatesFlipped + (run.lostToRed === 0 ? SCORE.noRedLoss : 0);
+      + SCORE.flipped * run.gatesFlipped + (run.lostToRed === 0 ? SCORE.noRedLoss : 0) + this._modeScore(stat, true);
     const payout = run.coins;
     if (save) {
       save.addCoins(payout);
-      save.recordLevel(level, { stars, survivors, score: run.score, coins: payout });
+      save.recordLevel(level, { stars, survivors, score: run.score, coins: payout, typeKey: type.key, metric });
+      save.recordModeRun(type.key, run.kills);
       save.setLastIncome(payout);
       save.addStats(this._statsPartial(payout));
     }
     this._failStreak.delete(level);                       // QA LVL-21: a clear resets the fail-streak assist
+    this._assistStreak.delete(level);
     const b = run.breakdown;
     // round 7 (r7, explain:7): the results show the level bonus as its two parts — the star reward and the survivor reward.
     // Since duplicates / refunds count as pickups (ECONOMY.breakdownOf), b.bonus is exactly this bonus as credited (×0.6 on a
@@ -2802,11 +3159,12 @@ export class LevelRunner {
     // always add up to b.bonus and the chips to the payout
     const pay = run.replay ? ECONOMY.replayPayout : 1;
     const bonusStars = clamp(Math.round(starRaw * pay), 0, b.bonus);
+    const bonusMode = clamp(Math.round(modeRaw * pay), 0, b.bonus - bonusStars);   // r8: LINE HELD (0 on a plain run)
     // fresh data object (once per run) — ui may keep it
-    this._resultData = {
-      level, stars, coins: payout, survivors, eBoss, score: run.score, endless: false,
-      breakdown: { kills: b.kills, gates: b.gates, piles: b.piles, boss: b.boss, bonus: b.bonus, bonusStars, bonusSurvivors: b.bonus - bonusStars },
-    };
+    this._resultData = this._typeData({
+      level, stars, coins: payout, survivors, eBoss, score: run.score, endless: false, metric,
+      breakdown: { kills: b.kills, gates: b.gates, piles: b.piles, boss: b.boss, bonus: b.bonus, bonusStars, bonusSurvivors: b.bonus - bonusStars - bonusMode, bonusMode },
+    }, stat);
   }
 
   _presentWon() {
@@ -2814,12 +3172,7 @@ export class LevelRunner {
     if (!d) return;
     this._codexSeen('hud.stars', false);                 // r7 (teaching:5): the stars are met on the first results
     this.ctx.state.set('complete', d);
-    P_COMPLETE.level = d.level;
-    P_COMPLETE.stars = d.stars;
-    P_COMPLETE.survivors = d.survivors;
-    P_COMPLETE.eBoss = d.eBoss;
-    P_COMPLETE.coins = d.coins;
-    P_COMPLETE.breakdown = d.breakdown;
+    Object.assign(P_COMPLETE, d);                        // level, stars, survivors, eBoss, coins, breakdown (r8: + the type fields)
     this.ctx.events.emit('level:complete', P_COMPLETE);
   }
 
@@ -2834,34 +3187,42 @@ export class LevelRunner {
     const save = ctx.save;
     const script = this._script;
     const level = this._level;
+    const type = this._type;
     this._settleCoins();
     const dist = this._deathDistance >= 0 ? this._deathDistance : ctx.world.distance;   // where the squad was lost
-    const fraction = script.length > 0 ? clamp(dist / script.length, 0, 1) : 0;
+    const runFrac = script.length > 0 ? clamp(dist / script.length, 0, 1) : 0;
+    // r8 (P1T): a mode level's fraction is runShare × its run, once the mode began runShare + the rest × the mode's progress
+    const share = LEVEL_TYPES[type.key].runShare > 0 ? LEVEL_TYPES[type.key].runShare : 1;
+    const fraction = !this._mode ? runFrac : (this._modeOn ? share + (1 - share) * clamp(this._mode.fraction(), 0, 1) : share * runFrac);
+    const stat = this._modeOn ? this._modeStat() : null;
     const kept = Math.round(run.coins * ECONOMY.gameOverKeep);
     const before = run.coins;
-    const consolation = Math.round(ECONOMY.levelBonus(level) * ECONOMY.failBonusFrac * fraction);
+    const consolation = Math.round(ECONOMY.levelBonus(level) * ECONOMY.failBonusFrac * fraction * LEVEL_TYPES[type.key].bonusMult);
     if (consolation > 0) {
       this._emitBonus(consolation);
       this._settleCoins();
     }
     const payout = kept + (run.coins - before);
     run.score = SCORE.kill * run.killCoins + SCORE.peak * run.peakSquad + SCORE.flipped * run.gatesFlipped
-      + (run.lostToRed === 0 ? SCORE.noRedLoss : 0);
+      + (run.lostToRed === 0 ? SCORE.noRedLoss : 0) + this._modeScore(stat, false);
     if (save) {
       save.addCoins(payout);
+      save.recordModeRun(type.key, run.kills);
       save.addStats(this._statsPartial(payout));
     }
+    // r8 (D30 / A1): only a run that played joins the reinforcements streak (a run left alone neither adds nor resets);
+    // _failStreak counts every fail (RETRY's fresh layout)
     this._failStreak.set(level, (this._failStreak.get(level) | 0) + 1);
-    this._resultData = { level, fraction, coinsKept: payout, endless: false };
+    const counted = this._runCounted();
+    if (counted) this._assistStreak.set(level, (this._assistStreak.get(level) | 0) + 1);
+    this._resultData = this._typeData({ level, fraction, coinsKept: payout, endless: false, counted }, stat);
   }
 
   _presentLost() {
     const d = this._resultData;
     if (!d) return;
     this.ctx.state.set('gameover', d);
-    P_FAILED.level = d.level;
-    P_FAILED.fraction = d.fraction;
-    P_FAILED.coinsKept = d.coinsKept;
+    Object.assign(P_FAILED, d);                          // level, fraction, coinsKept (r8: + the type fields)
     this.ctx.events.emit('level:failed', P_FAILED);
   }
 
@@ -2901,19 +3262,76 @@ export class LevelRunner {
   }
 
   /**
+   * r8 (D30 / A1), per fixed step before gates.step: follows gates.activeEvent — from its activation to its gate:commit the
+   * steering target's travel ≥ LEVELS.curve.assist.minTravelM, or a change of its nearest lane, marks it decided. No allocation.
+   */
+  _trackActivity() {
+    const ctx = this.ctx;
+    const gates = ctx.gates, inp = ctx.input;
+    if (!gates || !inp) return;
+    const tx = inp.targetX || 0;
+    const ev = gates.activeEvent;
+    if (!ev) { this._actEv = -1; this._actPrevX = tx; return; }
+    if (ev.id !== this._actEv) {
+      this._actEv = ev.id; this._actTravel = 0; this._actMoved = false; this._actDone = false;
+      this._actLane = nearestLane(ev, tx); this._actPrevX = tx;
+      return;
+    }
+    if (this._actDone || this._actMoved) { this._actPrevX = tx; return; }
+    this._actTravel += Math.abs(tx - this._actPrevX);
+    this._actPrevX = tx;
+    const as = LEVELS.curve.assist;
+    if (this._actTravel >= (as && as.minTravelM > 0 ? as.minTravelM : 2) || nearestLane(ev, tx) !== this._actLane) this._actMoved = true;
+  }
+
+  /** gate:commit — the watched event is reached, and a decision when it was steered before it. */
+  _onGateCommit() {
+    if (this._actDone || this._actEv < 0) return;
+    this._actDone = true;
+    this.activity.eventsReached++;
+    if (this._actMoved) this.activity.decisions++;
+  }
+
+  /** r8: a later mode's own decisions / reached events (RUN and the Horde run phase count their gates themselves). */
+  addActivity(decisions, events) {
+    if (decisions > 0) this.activity.decisions += decisions;
+    if (events > 0) this.activity.eventsReached += events;
+  }
+
+  /** r8 (D30 / A1 / A7, P1T): a failed run joins the streak with counted gate decisions ≥ max(minDecisions, minShare·events
+   *  reached), or (once a mode began) counted actions ≥ holdActions over ≥ holdSurges surge windows (mode.stat). */
+  _runCounted() {
+    const as = LEVELS.curve.assist;
+    if (!as) return true;
+    const a = this.activity;
+    if (a.decisions >= Math.max(as.minDecisions | 0, Math.ceil((as.minShare > 0 ? as.minShare : 0) * a.eventsReached - 1e-9))) return true;
+    const s = this._modeOn ? this._modeStat() : null;
+    return !!s && s.holdActions >= Math.max(1, as.holdActions | 0) && s.holdSurgeWindows >= Math.max(1, as.holdSurges | 0);
+  }
+
+  /** r8 (D30 / D35): REINFORCEMENTS steps — one per counted fail from assistAfterFails, to the type's cap ('kits': HORDE_GEN's). */
+  _assistSteps() {
+    if (this._endless) return 0;
+    const c = LEVELS.curve;
+    const fails = this._assistStreak.get(this._level) | 0;   // r8 (D30 / A1): counted fails only
+    if (!(c.assistAfterFails > 0) || fails < c.assistAfterFails) return 0;
+    const cap = LEVEL_TYPES[this._type.key].assist === 'kits' ? HORDE_GEN.assist.maxSteps : c.assistMaxSteps;
+    return Math.min(cap > 0 ? cap : 1, fails - c.assistAfterFails + 1);
+  }
+
+  /**
    * QA LVL-21 fail-streak assist: after LEVELS.curve.assistAfterFails consecutive failures of this campaign level in
    * the session, the attempt starts with + ceil(assistStartFrac·E_boss·k) soldiers, k = 1, 2, 3, 4 for each further
-   * consecutive failure (the normal count roll-up shows it).
+   * consecutive failure (the normal count roll-up shows it). r8 (D30 / A1): counted failures (_assistStreak); r8 (P1T, D35):
+   * 'soldiers' types only (a 'kits' type hands its steps to the mode).
    */
   _applyAssist() {
     this._assistSoldiers = 0;
-    if (this._endless) return;
-    const fails = this._failStreak.get(this._level) | 0;
     const c = LEVELS.curve;
-    if (!(c.assistAfterFails > 0) || fails < c.assistAfterFails) return;
     // escalates with every further failure: the 1st assisted attempt gets frac·E_boss, the next 2·frac·E_boss, … (capped at
     // LEVELS.curve.assistMaxSteps steps), so each retry starts stronger than the last
-    const steps = Math.min(c.assistMaxSteps > 0 ? c.assistMaxSteps : 1, fails - c.assistAfterFails + 1);
+    const steps = this._assistK;
+    if (!(steps > 0) || LEVEL_TYPES[this._type.key].assist !== 'soldiers') return;
     const n = Math.ceil(c.assistStartFrac * this._script.eBoss * steps);
     const squad = this.ctx.squad;
     if (!squad || !(n > 0)) return;

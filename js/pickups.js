@@ -11,7 +11,8 @@
 // FIRE; a full slot pays PICKUPS.replaceRefund as coin:pickup { source:'refund' } — weapons emits it — and the pickup
 // reports duplicate), 'gear.*' → weapons.startGear, 'troop.*' → troops.add
 // (a duplicate troop pays PICKUPS.duplicateCoins as coin:pickup { source:'duplicate' }), 'coins' →
-// coin:pickup { amount: PICKUPS.crateCoins, source:'crate' }; it always emits item:pickup { item, x, z, duplicate }.
+// coin:pickup { amount: PICKUPS.crateCoins, source:'crate' }, r8 a kind-'event' 'item.*' → item:grant { id, x, z }; it always
+// emits item:pickup { item, x, z, duplicate }.
 // An opened crate pops its lid (J12), then shrinks away and frees its slot; the J12 icon flight is fx's.
 // Ids are stable handles: (generation << 12) | slot (ARCH D6). step() is not called in the title idle scene.
 //
@@ -68,6 +69,7 @@ const CST_IDLE = 1, CST_PULLED = 2;             // coin states
 // Module-level reused payloads (listeners never retain them — ARCH §5)
 const P_OPEN = { item: null, x: -0, z: -0 };
 const P_ITEM = { item: null, x: -0, z: -0, duplicate: false };
+const P_GRANT = { id: '', x: -0, z: -0 };        // r8
 const P_COIN = { amount: -0, x: -0, y: -0, z: -0, source: 'pile' };
 const COLOR_A = new Color();
 const SEG_IN = new Float64Array(4);   // hitTestSegment → hitTestSeg (x0, z0, x1, z1)
@@ -474,6 +476,8 @@ export class Pickups {
         }
         if (typeof weapons.startGear === 'function') weapons.startGear(item);
       }
+    } else if (item.startsWith('item.') && PICKUPS.eventItems[item] && PICKUPS.eventItems[item].kind === 'event') {
+      if (events) { P_GRANT.id = item; P_GRANT.x = x; P_GRANT.z = z; events.emit('item:grant', P_GRANT); }   // r8: no system call
     } else if (item.startsWith('troop.')) {
       const troops = ctx.troops;
       let added = false;

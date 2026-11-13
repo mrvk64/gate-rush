@@ -18,8 +18,8 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const JS = path.join(ROOT, 'js');
 const files = fs.readdirSync(JS).filter((f) => f.endsWith('.js'));
-const SYSTEMS = ['fx', 'render', 'models', 'ui', 'audio', 'weapons', 'gates', 'pickups', 'save', 'squad', 'zombies', 'boss', 'troops', 'level', 'engine', 'events', 'state', 'input', 'world', 'time', 'quality', 'run', 'profile', 'config', 'debug', 'rng', 'rngFx'];
-const OWNER = { fx: 'fx.js', render: 'render.js', models: 'models.js', ui: 'ui.js', audio: 'audio.js', weapons: 'weapons.js', gates: 'gates.js', pickups: 'pickups.js', save: 'save.js', squad: 'squad.js', zombies: 'zombies.js', boss: 'boss.js', troops: 'troops.js', level: 'level.js', engine: 'engine.js' };
+const SYSTEMS = ['fx', 'render', 'models', 'ui', 'audio', 'weapons', 'gates', 'pickups', 'save', 'squad', 'zombies', 'crowd', 'boss', 'troops', 'hold', 'level', 'engine', 'events', 'state', 'input', 'world', 'time', 'quality', 'run', 'profile', 'config', 'debug', 'rng', 'rngFx', 'rngShot'];
+const OWNER = { fx: 'fx.js', render: 'render.js', models: 'models.js', ui: 'ui.js', audio: 'audio.js', weapons: 'weapons.js', gates: 'gates.js', pickups: 'pickups.js', save: 'save.js', squad: 'squad.js', zombies: 'zombies.js', crowd: 'crowd.js', boss: 'boss.js', troops: 'troops.js', hold: 'hold.js', level: 'level.js', engine: 'engine.js' };   // 1.4.0: crowd, hold
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const uses = {};

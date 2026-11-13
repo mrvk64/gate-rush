@@ -1,0 +1,30 @@
+ARCHITECTURE.md §1 "File manifest and ownership" — 1.4.0 draft by P0 (the release folds this into the .md)
+=====================================================================================================
+
+NEW TABLE ROWS (insert after js/levelgen.js / js/level.js as noted)
+
+| `js/holdgen.js` | P3 (skeleton P0) | Pure (no THREE, no DOM; imports only `util.js` and `data.js`) Horde generator imported ONLY by `levelgen.js`: `holdSpec(L, seed, opts)` → `{ run, hold, eTarget }` (the run-phase options generateRunSteps takes: gate events 4 / 5 / 6, `eEnd` = E_hold = round5(0.75·E_boss), fixed-line limits lim 0.80 / win 0.84) and `generateHoldScript(runScript, spec)` (appends `{ type: 'hold', at, spec }`). holdgen never imports levelgen: the dispatch calls `levelgen.generateRunSteps` with `holdSpec(L, seed).run`, then `generateHoldScript`. | 1.4.0 |
+| `js/crowd.js` | P4 (skeleton P0) | `CrowdSystem` = `ctx.crowd`: the Horde crowd engine (SoA pool, one 30 Hz cadence and one pool on every tier, weapons target provider, batched `crowd:kills`). Imports three, three/addons, util, data, render, models. Booted after zombies; `active` false (step / render return at once) until a hold asks for it; `prepare()` compiles behind the Horde spinner, `programsReady` feeds level.ready. | 1.4.0 |
+| `js/hold.js` | P6 (skeleton P0) | `HoldSystem` = `ctx.hold`: the Horde hold, a ModeSystem (§5 of the 1.4.0 plan: init / reset / dispose / active / prepare / programsReady / begin(script, { threat, assistK, firstMeet, seed, runDecisions }) / fireEvent / step / render / metric / fraction / stat / debugSkip / end / botView). Same imports as crowd.js. Booted before level. | 1.4.0 |
+| `js/night.js` | P5 (skeleton P0) | Night lighting, owned by and imported ONLY by `render.js` (render re-exports `NIGHT_UNIFORM` and `EYE_FRAG`): `installNightChunks()` (two NEW chunk keys, no global splice; render.init calls it before any program compiles), `applyVariant(material, v)` (a per-material onBeforeCompile wrapper per program variant, `VARIANT` day 0 / full 1 / lite 2 / min 3), `NIGHT_UNIFORM` (grNight, 18 vec4 shared by reference). Imports three, util, data. Never draws a ctx RNG stream. | 1.4.0 |
+| `tools/lib/chrome-lock.js` | P0 | Node: the machine-wide Chrome lock (GR_CHROME_LOCK) and the two node slots (GR_HEAVY_LOCK) of the build machine; JSON { pid, owner, t }, stale when the PID is dead or the file is unparseable and > 60 s old; no-ops when the variables are unset (the repo hard-codes no machine path). smoke.js and validate-levels.js (--to > 60) use it. | — |
+
+CHANGED ROWS
+- `js/main.js`: + ctx fields `rngShot`, `crowd`, `hold` (declared null in the literal); SYSTEMS gains crowd (after zombies) and hold (before level).
+- `js/squad.js`: + the logical formation (D5): every tier plays on the first L = min(C, slotCapacity) slots; the drawn soldiers are a subset of them (see §6.5 draft below).
+- `js/level.js`: + `ctx.rngShot = ctx.rng.fork(13)` in _beginRun; RESET_ORDER gains crowd and hold.
+- `js/weapons.js`: shooter phases and shot spread draw `ctx.rngShot` (was rngFx).
+- `js/render.js`: imports night.js (installNightChunks at init), re-exports NIGHT_UNIFORM / EYE_FRAG.
+- `js/levelgen.js`: imports holdgen.js.
+- `js/data.js`: the r8 TYPE REGIONS block before AUDIO_CUES (one exported deepFrozen const per region, one owner each, ≥ 3 comment lines apart: LEVEL_TYPES + LEVEL_ROTATION (P1T), TYPES_TEXT (P7), HORDE_GEN (P3), CROWD (P4), HORDE / HORDE_TEXT / HORDE_AUDIO (P6), NIGHT / NIGHT_DISTRICTS / NIGHT_TEXT / NIGHT_AUDIO (P5)); `TEXT_REGIONS` / `AUDIO_REGIONS` list the text / audio regions, and one spread line per merged table (HINTS, CODEX sections / unlock / legacy / cards, STRINGS.codex titles / entries, STRINGS, AUDIO_CUES) merges them — a base key of the same name wins, tools/check-codex.js reports any shadowed region key.
+- `css/game.css`: r8 REGION comments TYPES-UI (P7), HORDE (P6), NIGHT (P5) before section 15.
+- `sw.js`: PRECACHE + the four new modules (VERSION stays until the release); `index.html`: modulepreload + the four; `artifact.html` regenerated.
+- `tools/smoke.js`, `tools/check-imports.js`, `tools/package.js`, `tools/build-artifact.js`, `tools/callsites.js`, `tools/validate-levels.js`, `tools/check-codex.js`: see the §15.3 / §13 notes in ARCH-15-tools.txt.
+
+MODULE DEPENDENCY RULE (replace the paragraph under the table)
+Acyclic: `util` ← `data` ← `levelgen` ← everything else; `holdgen` (pure: util + data) is imported only by `levelgen`;
+`night` only by `render`. Gameplay modules import only `three`, `three/addons/*`, `util.js`, `data.js`, `render.js` and
+`models.js`; they talk to other modules through `ctx` (read) and `ctx.events` (write). `ui.js`, `audio.js`, `fx.js`,
+`engine.js`, `save.js` and `level.js` are consumers / orchestrators and never imported by gameplay modules. A js/ import
+that resolves outside js/ (anything but three and three/addons) is an ERROR in tools/check-imports.js, so runtime code
+can never reach tools/ (tools/holdsim.js is node-only). 26 js modules in 1.4.0.

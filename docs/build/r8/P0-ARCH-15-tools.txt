@@ -1,0 +1,42 @@
+ARCHITECTURE.md §13 / §15.3 tools — 1.4.0 draft by P0 (optional fold-in; the release decides)
+=============================================================================================
+
+tools/smoke.js (new flags)
+- --idle: truly hands-off — no input-path drag, no bot steering, no FIRE press (implies --nobot). --nobot alone still
+  makes the 120 px drag that exercises the input path, which holds the squad at +2.1 m (= harness idleR). Every
+  hands-off row uses '--nobot --idle' (A5).
+- --events a,b,c: report.events [{ t: run seconds on the sim clock, name, p: the payload's scalar fields }] (≤ 500).
+- --expect (repeatable): 'name>=n' | 'name<=n' | 'name==n' counts, or 'name@ref+lo..hi' — the FIRST name at or after
+  the first ref must come lo..hi s after it (stricter than D41's "a name within lo..hi" when name repeats: an early one
+  fails; identical for one-shot events such as boss:enrage); a miss is a harness check failure (verdict CHECK FAILED).
+  Expected names are logged even when --events omits them.
+- --type t (?type=t, with the ?debug=1 smoke always sets), --skip [kind] (level.debugSkip(kind) after the start; a build
+  without it is a check failure), --digest (sha256 of the run's gameplay trail: start, gate passes, boss, end),
+  --quality low | med | high (medium / mid alias med; anything else exits 2).
+- With GR_HEAVY_LOCK / GR_CHROME_LOCK set (E:/Temp/claude/r8build/env.sh) it takes a node slot, then the Chrome lock
+  (tools/lib/chrome-lock.js; a waiter logs '[chrome.lock] waiting'); the Chrome profile is a fresh folder in
+  os.tmpdir(), deleted at the end — on every exit path: an exit hook ends its own Chrome (if still running) and removes
+  the profile after a crash or Ctrl+C too — and only its own Chrome is ever killed.
+
+tools/package.js --lint (A12, D46): NO build. Checks that sw.js PRECACHE and index.html's modulepreload list name exactly
+the js/*.js files and prints js/ raw bytes and gzip bytes (zlib level 9 summed per file; the concatenated gzip beside
+it). --size-log <file> [--label <text>] appends one row. --vs <size log> (read only) or --size-log print the change
+against the log's newest row (every merge appends one, so that is the r8-140 head); --allow <KB> (1 KB = 1000 B) makes a
+larger js/ raw growth a FAIL (D46 per-package allowances). It never writes dist/ or artifact.html.
+
+tools/build-artifact.js: also fails when index.html's modulepreload list misses a js/*.js file (a stale preload warns).
+
+tools/check-imports.js (§10 of the 1.4.0 plan): render.js may import ./night.js, levelgen.js ./holdgen.js; holdgen.js is
+pure and imports only ./util.js and ./data.js; a js/ import resolving outside js/ is an ERROR.
+
+tools/check-codex.js: (e) the TYPE REGIONS spread merge — every key a *_TEXT / *_AUDIO region contributes must reach
+its merged table unchanged (a base entry or another region with the same key would silently win).
+
+tools/validate-levels.js: --to N (campaign L1..N; default LEVELS.count); a level past the curve's loop point is generated
+as level.js does; --to > 60 takes a node slot when GR_HEAVY_LOCK is set.
+
+tools/callsites.js: OWNER rows for crowd.js and hold.js; ctx.rngShot is tracked.
+
+Frozen balance harness (outside the repo): E:/Temp/claude/r8build/harness, git, tag harness-v1 — see its README.txt.
+mx configures every bot (built-in or plug-in, harness/bots/*.mjs) right before EVERY run — each seed and each --seq
+attempt — so a plug-in's closure state never carries over; detcheck checks this (run-order check, bots/p0-selftest.mjs).

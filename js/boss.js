@@ -17,6 +17,12 @@
 // boot slices after the rig builds (initStep) and again, one archetype per frame, shortly after every level start (step), so the
 // code is compiled and its inline caches are warm when the real boss arrives. Nothing is drawn, emitted or randomised.
 //
+// 1.4.0 (P6, PLAN horde §9): setHoldMode(o) puts the next spawn in HOLD MODE — no intro, letterbox, slow-down or input lock; the
+// boss (both Twins) walks in from HORDE.boss.spawnZ through the crowd (o.pushCrowd), fights the barricade from o.holdZ with
+// section attacks (a wind-up → o.onWindup; enough damage during it staggers it; the attack → o.segmentAttack on the section
+// o.pickSection names), its phase minions go to o.spawnBurst (never zombies.spawnWave), and o.enrageS s after it arrives it
+// charges, breaks its section (o.breakSection) and chews the squad. reset() (every level start) leaves hold mode.
+//
 // Cross-module calls (read ctx, call public methods, emit events): squad.removeSoldiers /
 // setInvulnerable / intersectsCircle / count / x / centerZ / invulnerable, troops.apcAbsorb /
 // apcIntersects, zombies.spawnWave, weapons.pauseTimers, engine.lockInput / freezeQuality,
@@ -27,7 +33,7 @@ import {
   MeshStandardMaterial, MeshBasicMaterial, Vector3, Quaternion, Matrix4, Color, DynamicDrawUsage,
 } from 'three';
 import { clamp, lerp, lerpExp, ease, warnOnce } from './util.js';
-import { WORLD, ZOMBIES, BOSSES, ECONOMY, RENDER, PALETTE, JUICE, GATE_RULES } from './data.js';
+import { WORLD, ZOMBIES, BOSSES, ECONOMY, RENDER, PALETTE, JUICE, GATE_RULES, HORDE } from './data.js';
 
 // ---------------------------------------------------------------------------------------------
 // Tuning (ARCH §1: tuning lives in data.js — BOSSES.*; module-level aliases only)
@@ -69,6 +75,10 @@ const BOSS_R = BOSSES.radius;
 // Spitter Queen sac glow gain on top of the pulse (QA ENE-14): peak ≈ the authored #C7E84B, below the bloom threshold.
 const SAC_GAIN = ANIM.sacGain;
 const LIGHT_OFFSET_Z = ANIM.lightOffsetZ;             // QA ENE-18: core light offset along the facing (negative: just inside the torso)
+// 1.4.0 hold mode (HORDE.boss): the attack kinds of a hold and the boss:attack kind each reports (audio, the harness)
+const HB = HORDE.boss, HF = HORDE.field;
+const H_SLAM = 'slam', H_ACID = 'acid', H_CHARGE = 'charge';
+const H_REPORT = Object.freeze({ slam: 'slam', acid: 'spit3', charge: 'charge' });
 
 // Attack kinds (string constants — also the boss:attack `kind` vocabulary of ARCH §5.1).
 const K_SLAM = 'slam', K_CHARGE = 'charge', K_SPIT3 = 'spit3', K_RAIN = 'rain', K_STOMP = 'stomp',
@@ -90,9 +100,11 @@ const POSE_ARMS = 0, POSE_LEAN = 1, POSE_JAW = 2, POSE_CROUCH = 3, POSE_STOMP = 
 // ---------------------------------------------------------------------------------------------
 // Module-level reused payloads (listeners never retain them, ARCH §5) and scratch
 // ---------------------------------------------------------------------------------------------
-const P_SPAWN = { id: '', name: '', hp: -0, maxHp: -0, archetype: 'hulk', twins: false, mini: false };
+const P_SPAWN = { id: '', name: '', hp: -0, maxHp: -0, archetype: 'hulk', twins: false, mini: false, hold: false };   // 1.4.0: hold mode (no letterbox)
+const P_STAGGER = { id: '', x: -0, z: -0, twin: 0 };   // 1.4.0 'boss:stagger' (hold mode: a wind-up cancelled by damage)
 const P_INTRO = { id: '', name: '', duration: -0 };
-const P_FIGHT = { id: '' };
+const P_FIGHT = { id: '', enrageAt: -0 };   // r8: enrageAt = s from boss:fight to the enrage (HUD countdown)
+const P_ENRAGE = { id: '', after: -0, extra: -0 };   // r8 'boss:enrage' (after = s from boss:fight, extra = the archetype's part)
 const P_HP = { hp: -0, maxHp: -0, fraction: 0.5 };   // fraction seeded as a Double (round-2 cross-group); written before every emit
 const P_PHASE = { phase: 1, fraction: 0.5 };   // fraction seeded as a Double (round-2 cross-group); written before every emit
 const P_ATTACK = { kind: K_SLAM, x: -0, z: -0, radius: -0, delay: -0, lane: -1 };
@@ -202,6 +214,8 @@ export class BossSystem {
     this._id = ''; this._name = ''; this._archKey = 'hulk'; this._arch = null; this._phases = null; this._twins = false;
     this._L = 1; this._t = 0.5; this._t = 0; this._fightTime = 0.5; this._fightTime = 0; this._fightAt = 0.5; this._fightAt = 0; this._introAt = 0.5; this._introAt = 0;
     this._maxHpTotal = 0.5; this._maxHpTotal = 0; this._reportedPhase = 0; this._hordeDone = false; this._burstTimer = 0.5; this._burstTimer = 0;
+    this._capFrac = 0.5; this._capFrac = 1;   // r8: capHp / maxHp; campaign enrage (per spawn)
+    this._valveAfter = 0.5; this._valveAfter = 0; this._enrageExtra = 0.5; this._enrageExtra = 0; this._chewRamp = 0.5; this._chewRamp = 0; this._chewKills = 0; this._chewN = 0;
     this._valve = false; this._chewAcc = 0.5; this._chewAcc = 0; this._hpEmitAcc = 0; this._hpDirty = false;
     this._mirrorX = 0.5; this._mirrorX = 0; this._mirrorZ = 0.5; this._mirrorZ = 0; this._mirrorUnit = null;
     this._minionHp = { walker: 0, runner: 0, crawler: 0, brute: 0, spitter: 0 };
@@ -222,6 +236,8 @@ export class BossSystem {
     // round 5 dress rehearsal: archetype keys to rehearse (init), the next one, and a countdown (fixed steps) before step() re-runs
     // the list after a reset (−1: idle); _warmingRig marks the silent pass (spawn keeps its detached sinks, reset queues nothing)
     this._warmKeys = null; this._warmAt = 0; this._warmBoot = 0; this._warmCountdown = -1; this._warmingRig = false;
+    // 1.4.0 hold mode (setHoldMode): its options (null in a RUN), the first arrival at the hold line (−1 before), the enrage
+    this._hold = null; this._holdArriveAt = -0.5; this._holdArriveAt = -1; this._holdEnraged = false;
   }
 
   // -------------------------------------------------------------------------------------------
@@ -300,12 +316,12 @@ export class BossSystem {
     if (this._spawned || this._disposed || !this._archetypes[key]) return;
     const ctx = this.ctx, world = ctx.world, light = this._light;
     const sEvents = this._events, sEngine = this._engine, sSquad = this._squad, sWeapons = this._weapons, sRender = this._render;
-    const sFx = this._fx, sZombies = this._zombies, sTroops = this._troops, sLevel = this._level;
+    const sFx = this._fx, sZombies = this._zombies, sTroops = this._troops, sLevel = this._level, sHold = this._hold;
     const wActive = world ? world.bossActive : false, wX = world ? world.bossX : 0, wZ = world ? world.bossZ : 0;
     let lI = 0;
     if (light) { lI = light.intensity; WARM_POS.copy(light.position); WARM_COLOR.copy(light.color); }
     this._events = null; this._engine = null; this._squad = null; this._weapons = null; this._render = null;
-    this._fx = null; this._zombies = null; this._troops = null; this._level = null;
+    this._fx = null; this._zombies = null; this._troops = null; this._level = null; this._hold = null;
     this._warmingRig = true;
     try {
       WARM_SPEC.archetype = key;
@@ -327,7 +343,7 @@ export class BossSystem {
       this.reset();
       this._warmingRig = false;
       this._events = sEvents; this._engine = sEngine; this._squad = sSquad; this._weapons = sWeapons; this._render = sRender;
-      this._fx = sFx; this._zombies = sZombies; this._troops = sTroops; this._level = sLevel;
+      this._fx = sFx; this._zombies = sZombies; this._troops = sTroops; this._level = sLevel; this._hold = sHold;
       if (world) { world.bossActive = wActive; world.bossX = wX; world.bossZ = wZ; }
       if (light) { light.intensity = lI; light.position.copy(WARM_POS); light.color.copy(WARM_COLOR); }
     }
@@ -351,10 +367,12 @@ export class BossSystem {
     this._shield.upAt = 0; this._shield.tokens = 0; this._introSparkT = -10;
     this._spawned = false; this._dead = false; this._inIntro = false; this._mini = false;
     this._t = 0; this._fightTime = 0; this._fightAt = 0; this._introAt = 0;
-    this._maxHpTotal = 0; this._reportedPhase = 0; this._hordeDone = false; this._burstTimer = 0;
+    this._maxHpTotal = 0; this._reportedPhase = 0; this._hordeDone = false; this._burstTimer = 0; this._capFrac = 1;
     this._valve = false; this._chewAcc = 0; this._hpEmitAcc = 0; this._hpDirty = false;
     this._mirrorX = 0; this._mirrorZ = 0; this._mirrorUnit = null;
     this._platesOffGoverned = false;
+    if (!this._warmingRig) this._hold = null;                              // 1.4.0: a level start leaves hold mode
+    this._holdArriveAt = -1; this._holdEnraged = false;
     if (this._light) this._light.intensity = 0;
     if (ctx.world) { ctx.world.bossActive = false; ctx.world.bossX = 0; ctx.world.bossZ = 0; }
     // round 5: re-rehearse every archetype shortly after a level start (one per step), so the boss code is still compiled and its
@@ -395,10 +413,15 @@ export class BossSystem {
       dmgMult: 0.5, hitT: 0.5, deathAt: 0.5, walkPhase: 0.5, gait: 0.5, chewT: 0.5,
       atk: { state: A_IDLE, kind: K_SLAM, params: null, timer: 0.5, dur: 0.5, exec: 0.5, ax: 0.5, az: 0.5, radius: 0.5, laneX: 0.5, lane: -1, decal: -1, speed: 0.5, launched: 0, total: 0 },
       pose: new Float32Array(POSE_COUNT), cur: new Float32Array(POSE_COUNT),
+      // 1.4.0 hold mode: attack cool-down, wind-up left (−1 idle) and its length, damage taken during it, kind, target section,
+      // stagger left, the next attack's index, the telegraph decal, the enrage's break / chew state
+      hcool: 0.5, hwind: -0.5, hwindLen: 0.5, hwindDmg: 0.5, hkind: H_SLAM, htarget: 0, hstag: 0.5, hcyc: 0, hdecal: -1,
+      hbroken: false, hchewAcc: 0.5, hchewAt: -0.5, hchewSec: -1, hpose: 0.5,
     };
     u.hp = 0; u.maxHp = 0; u.x = 0; u.z = BOSSES.approachZ; u.vz = 0; u.homeX = 0; u.zOff = 0;
     u.targetZ = BOSSES.holdZ[0]; u.yaw = 0; u.cool = 0; u.dmgMult = 1; u.hitT = -10; u.deathAt = 0;
     u.walkPhase = 0; u.gait = 0; u.chewT = -10;
+    u.hcool = 0; u.hwind = -1; u.hwindLen = 0; u.hwindDmg = 0; u.hstag = 0; u.hchewAcc = 0; u.hchewAt = -1; u.hpose = 0;
     const a = u.atk; a.timer = 0; a.dur = 0; a.exec = 0; a.ax = 0; a.az = 0; a.radius = 0; a.laneX = 0; a.speed = 0;
     return u;
   }
@@ -620,6 +643,10 @@ export class BossSystem {
     this._phases = (spec.phases && spec.phases.length) ? spec.phases : arch.phases;
     this._twins = !!arch.twins;
     this._mini = !!spec.mini;
+    this._valveAfter = spec.valveAfter > 0 ? spec.valveAfter : 0;   // r8: campaign enrage time / chew
+    this._chewKills = spec.chew > 0 ? spec.chew : 0;
+    this._chewRamp = spec.chewRamp > 0 ? spec.chewRamp : 0; this._chewN = 0;
+    this._enrageExtra = spec.enrageExtra > 0 ? spec.enrageExtra : 0;   // r8: the archetype part of valveAfter
     this._id = spec.id || ('boss.' + this._archKey);
     this._name = arch.name;
     this._L = Math.max(1, ((this._level && this._level.level) | 0));
@@ -634,23 +661,31 @@ export class BossSystem {
     if (!spec.minionHp) warnOnce('boss.minionHp', 'boss.spawn without minionHp — minions use base HP');
 
     const total = Math.max(1, +spec.hp || 1);
+    // r8 (P1 audit, D18): spec.capHp (level._fireBoss) is what percentage-of-HP hits are capped against (capHp)
+    this._capFrac = spec.capHp > 0 ? Math.min(1, spec.capHp / total) : 1;
     const unitHp = this._twins ? total * (arch.hpSplit || 0.5) : total;
     const n = this._twins ? 2 : 1;
     while (this.initSteps > 0) this.initStep();     // rigs still queued (boot slicing never ran): build them now
     const rigs = this._rigs[arch.root] || this._rigs.hulk;
-    const z0 = (typeof spec.z === 'number') ? spec.z : BOSSES.approachZ;
+    const hold = this._hold;                                               // 1.4.0: hold mode (setHoldMode)
+    const z0 = (typeof spec.z === 'number') ? spec.z : (hold ? HB.spawnZ : BOSSES.approachZ);
     const x0 = (typeof spec.x === 'number') ? spec.x : 0;
     this._maxHpTotal = 0;
     const twinMaxX = WORLD.roadWidth / 2 - BOSSES.radius * 0.5;          // twins stay on the road
+    const twinX = hold ? HB.twinX : BOSSES.twinOffsetX, twinZ = hold ? HB.twinBack : BOSSES.twinStaggerZ;
     for (let u = 0; u < n; u++) {
       const unit = this._units[u];
       const rig = rigs[Math.min(u, rigs.length - 1)];
       unit.state = U_ALIVE; unit.hp = unitHp; unit.maxHp = unitHp; unit.phaseIdx = 0;
-      unit.homeX = this._twins ? clamp(x0 + (u === 0 ? -BOSSES.twinOffsetX : BOSSES.twinOffsetX), -twinMaxX, twinMaxX) : x0;
-      unit.zOff = (this._twins && u === 1) ? -BOSSES.twinStaggerZ : 0;   // the second twin holds a little farther back
-      unit.x = unit.homeX; unit.z = z0 + unit.zOff; unit.vz = 0; unit.targetZ = BOSSES.holdZ[0] + unit.zOff; unit.arrived = false; unit.yaw = 0;
+      unit.homeX = this._twins ? clamp(x0 + (u === 0 ? -twinX : twinX), -twinMaxX, twinMaxX) : x0;
+      unit.zOff = (this._twins && u === 1) ? -twinZ : 0;                 // the second twin holds a little farther back
+      unit.x = unit.homeX; unit.z = z0 + unit.zOff; unit.vz = 0; unit.arrived = false; unit.yaw = 0;
+      unit.targetZ = (hold ? hold.holdZ : BOSSES.holdZ[0]) + unit.zOff;
       unit.cool = FIRST_ATTACK_DELAY; unit.pendingAttack = null; unit.cycleIdx = 0; unit.dmgMult = 1; unit.hitT = -10; unit.deathAt = 0;
       unit.walkPhase = 0; unit.gait = 0;
+      // hold mode: the first wind-up firstWindup s after arriving (the second twin twinOffset s later)
+      unit.hcool = HB.firstWindup + (this._twins ? u * HB.twinOffset : 0); unit.hwind = -1; unit.hwindDmg = 0; unit.hstag = 0;
+      unit.hcyc = 0; unit.hdecal = -1; unit.hbroken = false; unit.hchewAcc = 0; unit.hchewAt = -1; unit.hchewSec = -1; unit.hpose = 0;
       unit.pose.fill(0); unit.cur.fill(0);
       this._resetAttack(unit);
       unit.rig = rig; rig.inUse = true;
@@ -678,13 +713,22 @@ export class BossSystem {
 
     // boss:spawn (one emit for the pair; hp/maxHp are sums)
     P_SPAWN.id = this._id; P_SPAWN.name = this._name; P_SPAWN.hp = this._maxHpTotal; P_SPAWN.maxHp = this._maxHpTotal;
-    P_SPAWN.archetype = this._archKey; P_SPAWN.twins = this._twins; P_SPAWN.mini = this._mini;
+    P_SPAWN.archetype = this._archKey; P_SPAWN.twins = this._twins; P_SPAWN.mini = this._mini; P_SPAWN.hold = !!hold;
     this._emit('boss:spawn', P_SPAWN);
 
     // theatre deadlines (ARCH §2.2): real time that spans slow-mo but not pauses (QA ENE-17, CORE-7 clock)
     const now = theatreNow(ctx.time);
     this._introAt = now;
-    if (!this._mini) {
+    if (hold) {
+      // 1.4.0 hold mode: no slow-down, letterbox, dolly, input lock or invulnerability; the fight (and its HUD enrage countdown,
+      // walk-in + enrage) starts at the spawn: the boss takes the squad's share from rifle range on its walk-in
+      this._holdArriveAt = -1; this._holdEnraged = false;
+      P_INTRO.id = this._id; P_INTRO.name = this._name; P_INTRO.duration = 0;
+      this._emit('boss:intro', P_INTRO);
+      this._inIntro = true;
+      this._fightAt = now;
+      this._beginFight();
+    } else if (!this._mini) {
       const intro = BOSSES.intro;
       this._inIntro = true;
       this._fightAt = now + intro.fightAfter * 1000;                         // theatre-clock deadline (ARCH §2.2)
@@ -724,6 +768,8 @@ export class BossSystem {
     }
     for (let u = 0; u < this._unitCount; u++) { this._units[u].pose[POSE_JAW] = 0; this._units[u].pose[POSE_ARMS] = 0; }
     P_FIGHT.id = this._id;
+    const h = this._hold;   // 1.4.0 hold mode: the enrage comes enrageS s after the walk-in to the hold line
+    P_FIGHT.enrageAt = h ? Math.max(0, h.holdZ - HB.spawnZ) / HB.walk + h.enrageS : (this._valveAfter > 0 ? this._valveAfter : BOSSES.valve.after);
     this._emit('boss:fight', P_FIGHT);
   }
 
@@ -760,6 +806,8 @@ export class BossSystem {
     return s;
   }
   get maxHp() { return this._maxHpTotal; }
+  /** r8 (P1 audit): the HP a percentage-of-HP hit (the sniper's) is capped against: maxHp · spec.capHp / spec.hp, else maxHp. */
+  get capHp() { return this._maxHpTotal * this._capFrac; }
   /** 1-based phase of the furthest-advanced twin (0 before a spawn). */
   get phase() { return this._spawned ? this._reportedPhase : 0; }
   get x() { return this._mirrorX; }
@@ -774,9 +822,10 @@ export class BossSystem {
 
   /**
    * hitTestSegment() reading the segment from a Float64Array(4) [x0, z0, x1, z1] (QA ENE-16 / WPN-8): same semantics
-   * and `out` shape, nothing boxed. The hit test is XZ only; the reported impact point is cosmetic (QA ENE-13): the
-   * capsule-entry z, x jittered by up to ±0.3·radius inside the capsule and y spread over the torso / core band
-   * (BOSSES.hitYRange · coreY), so sparks and damage numbers land on the body instead of one point at its feet.
+   * and `out` shape, nothing boxed. The hit test is XZ only; the reported impact point (QA ENE-13) is the capsule-entry
+   * z, x jittered by up to ±0.3·radius inside the capsule and y spread over the torso / core band (BOSSES.hitYRange ·
+   * coreY), so sparks and damage numbers land on the body instead of one point at its feet. 1.4.0: it also centres
+   * rocket blasts and picks the struck twin, so it draws ctx.rngShot (gameplay).
    */
   hitTestSeg(seg, radius, out) {
     if (!this._spawned || this._dead) return false;
@@ -798,7 +847,7 @@ export class BossSystem {
       if (px * px + pz * pz <= R * R && t < bestT) { bestT = t; bestX = ux; }
     }
     if (bestT > 1) return false;
-    const rf = this.ctx.rngFx;
+    const rf = this.ctx.rngShot;
     const ry = rf ? rf.next() : 0.5, rx = rf ? rf.next() : 0.5;
     let hx = x0 + dx * bestT + (rx * 2 - 1) * HIT_X_SPREAD;
     if (hx < bestX - BOSS_R) hx = bestX - BOSS_R; else if (hx > bestX + BOSS_R) hx = bestX + BOSS_R;
@@ -876,6 +925,7 @@ export class BossSystem {
     if (!(dmg > 0)) return false;
     if (dmg > unit.hp) dmg = unit.hp;
     unit.hp -= dmg;
+    if (unit.hwind >= 0) unit.hwindDmg += dmg;                            // 1.4.0 hold mode: damage dealt during a wind-up (stagger)
     if (this._t - unit.hitT >= FLASH_RETRIGGER) unit.hitT = this._t;   // a blink per ≈0.2 s under sustained fire, never a white rig
     P_HIT.damage = dmg; P_HIT.x = x; P_HIT.y = y; P_HIT.z = z; P_HIT.crit = !!crit;
     this._emit('boss:hit', P_HIT);
@@ -951,7 +1001,8 @@ export class BossSystem {
   _enterPhase(unit, idx) {
     unit.phaseIdx = idx;
     const phase = this._phases[idx];
-    unit.targetZ = BOSSES.holdZ[Math.min(idx, BOSSES.holdZ.length - 1)] + unit.zOff;   // only the hold moves
+    const hold = this._hold !== null;                                     // 1.4.0 hold mode: the hold line never moves, no attack actions
+    if (!hold) unit.targetZ = BOSSES.holdZ[Math.min(idx, BOSSES.holdZ.length - 1)] + unit.zOff;   // only the hold moves
     unit.cool = Math.min(unit.cool, PHASE_ENTRY_COOL);                    // the phase's basic attack follows within 1 s
     unit.pose[POSE_JAW] = 1;                                              // roar on every phase change
     // generic phase-2 beat: 4 armour plates fly off (unless a platesOff action governs them)
@@ -967,7 +1018,7 @@ export class BossSystem {
       for (let k = 0; k < acts.length; k++) {
         const a = acts[k];
         if (a.spawn) this._spawnUnits(unit, a.spawn);
-        else if (a.attack) unit.pendingAttack = a;                      // runs as soon as the unit is idle
+        else if (a.attack) { if (!hold) unit.pendingAttack = a; }       // runs as soon as the unit is idle (a hold has its own cycle)
         else if (typeof a.shield === 'number') this._raiseShield(unit, a.shield);
         else if (a.platesOff) { unit.dmgMult = a.damageMult || 1; this._detachPlates(unit); }
       }
@@ -982,6 +1033,7 @@ export class BossSystem {
 
   /** zombies.spawnWave({ pattern:'horde', units }, spec.minionHp) — the boss never computes HP (ARCH D8). */
   _spawnUnits(unit, counts) {
+    if (this._hold !== null) { for (let i = 0; i < TYPES.length; i++) this._holdBurst(unit, TYPES[i], counts[TYPES[i]] | 0); return; }
     if (!this._zombies || !this._zombies.spawnWave) return;
     for (let i = 0; i < TYPES.length; i++) WAVE.units[TYPES[i]] = counts[TYPES[i]] | 0;
     WAVE.x = unit.x;
@@ -991,6 +1043,7 @@ export class BossSystem {
   }
 
   _spawnMinions(unit, type, count) {
+    if (this._hold !== null) { this._holdBurst(unit, type, count); return; }
     if (!this._zombies || !this._zombies.spawnWave) return;
     for (let i = 0; i < TYPES.length; i++) WAVE.units[TYPES[i]] = 0;
     WAVE.units[type] = count | 0;
@@ -1119,13 +1172,20 @@ export class BossSystem {
       return;
     }
     this._t += dt;
+    if (this._hold !== null) { this._holdStep(dt); return; }              // 1.4.0: the hold mode's own fight
     if (this._inIntro && theatreNow(ctx.time) >= this._fightAt) this._beginFight();
     const fighting = !this._inIntro && !this._dead;
     const roadSpeed = world ? world.roadSpeed : 0;
 
     if (fighting) {
       this._fightTime += dt;
-      if (!this._valve && this._fightTime >= BOSSES.valve.after) this._valve = true;
+      if (!this._valve && this._fightTime >= (this._valveAfter > 0 ? this._valveAfter : BOSSES.valve.after)) {
+        this._valve = true;
+        if (this._valveAfter > 0) {   // r8: the campaign enrage
+          P_ENRAGE.id = this._id; P_ENRAGE.after = this._valveAfter; P_ENRAGE.extra = this._enrageExtra;
+          this._emit('boss:enrage', P_ENRAGE);
+        }
+      }
       // phase-1 minion bursts: BOSSES.minionBurst.count walkers every BOSSES.minionBurst.every s
       if (this._reportedPhase <= 1) {
         this._burstTimer += dt;
@@ -1429,10 +1489,12 @@ export class BossSystem {
     atk.state = A_RECOVER; atk.timer = 0;
   }
 
-  /** kills_total = (killsPct ? max(min, round(killsPct·C)) : kills) + floor(L · killsPerLevel) — ARCH §8.7. */
+  /** kills_total = (killsPct ? max(min, round(killsPct·C)) : kills) + floor(L · killsPerLevel) — ARCH §8.7. r8: campaignKillsPct
+   *  is a killsPct that only the campaign boss uses (an endless / mini-boss keeps the flat kills). */
   _killsFor(params) {
     const C = this._squad ? this._squad.count : (this.ctx.world ? this.ctx.world.squadCount : 0);
-    let k = params.killsPct ? Math.max(params.min | 0, Math.round(params.killsPct * C)) : (params.kills | 0);
+    const pct = params.killsPct || (!this._mini && params.campaignKillsPct) || 0;
+    let k = pct ? Math.max(params.min | 0, Math.round(pct * C)) : (params.kills | 0);
     k += Math.floor(this._L * (params.killsPerLevel || 0));
     return k;
   }
@@ -1441,7 +1503,11 @@ export class BossSystem {
   _spitKills(params) {
     const base = (params.kills != null) ? params.kills : ZOMBIES.spitter.spit.kills;
     const from = (params.kills2FromLevel != null) ? params.kills2FromLevel : ZOMBIES.spitter.spit.kills2FromLevel;
-    return this._L >= from ? base + 1 : base;
+    const k = this._L >= from ? base + 1 : base;
+    const pct = this._mini ? 0 : params.campaignKillsPct;   // r8: a campaign boss glob that lands takes a share of the squad (min the flat kills)
+    if (!(pct > 0)) return k;
+    const C = this._squad ? this._squad.count : 0;
+    return Math.max(k, Math.round(pct * C));
   }
 
   /** Kill resolution: the APC absorbs what it intersects first; plates never absorb boss attacks (squad decides
@@ -1494,6 +1560,8 @@ export class BossSystem {
   _cancelAttack(unit) {
     const atk = unit.atk;
     this._removeDecal(atk);
+    if (unit.hdecal >= 0 && this._fx && this._fx.removeDecal) this._fx.removeDecal(unit.hdecal);   // 1.4.0 hold mode's telegraph
+    unit.hdecal = -1; unit.hwind = -1;
     if (this._car && this._car.state === 1 && this._car.unit === unit) this._hideCar();
     this._resetAttack(unit);
     unit.pose[POSE_ARMS] = 0; unit.pose[POSE_LEAN] = 0; unit.pose[POSE_STOMP] = 0; unit.pose[POSE_CROUCH] = 0;
@@ -1515,7 +1583,8 @@ export class BossSystem {
   _chew(unit) {
     unit.chewT = this._t;
     this._emitAttack(K_CHEW, unit.x, unit.z, 0, 0, -1);
-    this._applyKills(unit, BOSSES.valve.perSec, K_CHEW, unit.x, unit.z, BOSSES.radius);
+    const ramp = this._chewKills > 0 ? 1 + (this._chewRamp || 0) * (this._chewN++ | 0) : 1;   // r8: the campaign enrage escalates every second
+    this._applyKills(unit, this._chewKills > 0 ? Math.round(this._chewKills * ramp) : BOSSES.valve.perSec, K_CHEW, unit.x, unit.z, BOSSES.radius);
     if (this._fx && this._fx.vignette) this._fx.vignette(PALETTE.flash.red, JUICE.flashes.chewVignette);
   }
 
@@ -1645,6 +1714,212 @@ export class BossSystem {
     if (!car) return;
     car.state = 0; car.unit = null;
     car.mesh.visible = false;
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 1.4.0 hold mode (P6, PLAN horde §9; HORDE.boss) — allocation-free
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * Hold mode for the next spawn (o), or the RUN fight (null; reset() also clears it). o is kept by reference (hold.js reuses one
+   * object): holdZ (the hold line), enrageS (s after the first arrival there), attacks (false: the debut's walk-in only), debut
+   * (no boss-phase brutes), chew (soldiers per s when the enrage chews, × (1 + n) in second n), and the hooks
+   *   pickSection(kind, x) → section       the wind-up's target (the weakest; acid: one near the boss's x)
+   *   onWindup(kind, section, seconds)     a wind-up starts (a hold-action window, D30)
+   *   segmentAttack(kind, section, x, z)   it ran out: the section damage and the kills
+   *   onStagger(x, z)                      it was cancelled by damage (≥ stagger × max HP during it)
+   *   breakSection(section, dt) → true     the enrage breaks its section (true once it is down: then it chews)
+   *   spawnBurst(type, n, x, z)            phase minions into the crowd
+   *   pushCrowd(x, z, r)                   the boss's footprint, every step
+   */
+  setHoldMode(o) { this._hold = o || null; }
+
+  /** True while the next / current boss fights a hold. */
+  get holdMode() { return this._hold !== null; }
+
+  /** The Colossus shield is up (botView). */
+  get shieldUp() { return this._shield.up; }
+
+  /** Hold mode: enraged (charging, breaking, chewing). */
+  get holdEnraged() { return this._holdEnraged; }
+
+  /** Hold mode: a living twin's wind-up (−1 none) — botView reads unit u's seconds left. */
+  holdWindup(u) { const unit = this._units[u]; return unit && unit.state === U_ALIVE && unit.hwind >= 0 ? unit.hwind : -1; }
+
+  /** Hold mode: unit u alive (0 / 1), and its x / z / HP (botView). */
+  unitAlive(u) { return u < this._unitCount && this._units[u].state === U_ALIVE; }
+  unitX(u) { return this._units[u].x; }
+  unitZ(u) { return this._units[u].z; }
+  unitHp(u) { return this._units[u].hp; }
+
+  /** The hold fight: walk-in, wind-ups / staggers / section attacks, the enrage, the shield, globs, the world mirror. */
+  _holdStep(dt) {
+    const world = this.ctx.world, h = this._hold;
+    if (!this._dead) {
+      this._fightTime += dt;
+      const sh = this._shield;                                             // the Colossus shield, as in a run
+      if (sh.up) {
+        sh.tokens += SHIELD_RATE * dt;
+        if (sh.tokens > SHIELD_BURST) sh.tokens = SHIELD_BURST;
+        this._tryDropShield();
+      }
+      if (sh.up && sh.pool > 0 && sh.unit && sh.unit.state === U_ALIVE) {
+        let heal = sh.regenPerSec * dt;
+        if (heal > sh.pool) heal = sh.pool;
+        const room = sh.unit.maxHp - sh.unit.hp;
+        if (heal > room) heal = room;
+        if (heal > 0) { sh.unit.hp += heal; sh.pool -= heal; this._hpDirty = true; }
+      }
+      for (let u = 0; u < this._unitCount; u++) if (this._units[u].state === U_ALIVE) this._holdUnit(this._units[u], dt, h);
+      if (this._holdArriveAt >= 0 && !this._holdEnraged && this._t - this._holdArriveAt >= h.enrageS) this._holdEnrage(h);
+    }
+    this._globStep(dt);
+    if (this._hpDirty) {
+      this._hpEmitAcc += dt;
+      if (this._hpEmitAcc >= 1 / HP_EMIT_HZ) { this._hpEmitAcc = 0; this._emitHp(); }
+    }
+    const near = this._nearestAlive(0, 0);
+    if (near) { this._mirrorUnit = near; this._mirrorX = near.x; this._mirrorZ = near.z; }
+    if (world) { world.bossActive = this._spawned && !this._dead; world.bossX = this._mirrorX; world.bossZ = this._mirrorZ; }
+  }
+
+  /** One living twin: walk to the hold line; there the wind-up cycle (stagger / attack); enraged: charge, break, chew. */
+  _holdUnit(unit, dt, h) {
+    const z0 = unit.z;
+    if (this._holdEnraged) {
+      const stopZ = HF.wallZ - HB.enrageStop;
+      if (unit.z < stopZ) unit.z = Math.min(stopZ, unit.z + HB.enrageWalk * dt);
+      else if (h.breakSection(this._holdSection(unit.x), dt) === true) this._holdChew(unit, dt, h);
+      else { unit.pose[POSE_ARMS] = 1; unit.pose[POSE_CROUCH] = 0.5; }
+    } else if (unit.z < unit.targetZ) {
+      unit.z = Math.min(unit.targetZ, unit.z + HB.walk * dt);
+    } else {
+      if (this._holdArriveAt < 0) this._holdArriveAt = this._t;
+      if (unit.hstag > 0) unit.hstag -= dt;
+      else if (unit.hwind < 0) {
+        unit.hcool -= dt;
+        if (unit.hcool <= 0 && h.attacks) this._holdWindup(unit, h);
+      } else {
+        unit.hwind -= dt;
+        if (unit.hdecal >= 0 && this._fx && this._fx.decalProgress) this._fx.decalProgress(unit.hdecal, clamp(1 - unit.hwind / unit.hwindLen, 0, 1));
+        const need = (this._archKey === 'juggernaut' ? HB.staggerJug : HB.stagger) * unit.maxHp;
+        if (unit.hwindDmg >= need) this._holdStagger(unit, h);
+        else if (unit.hwind < 0) this._holdAttack(unit, h);
+      }
+    }
+    if (unit.hpose > 0 && (unit.hpose -= dt) <= 0) {                       // the attack's follow-through pose eases back
+      unit.pose[POSE_ARMS] = 0; unit.pose[POSE_LEAN] = 0; unit.pose[POSE_CROUCH] = 0; unit.pose[POSE_JAW] = 0;
+    }
+    // gait from its own walking speed (the road is stopped), facing the wall; the crowd parts around it
+    const vz = (unit.z - z0) / dt;
+    unit.vz = vz;
+    unit.gait = lerpExp(unit.gait, clamp(Math.abs(vz) / GAIT_REF_MS, 0, 1.5), ANIM.gaitRate, dt);
+    unit.walkPhase += Math.min(Math.abs(vz), GAIT_REF_MS * 1.5) * ANIM.walkHzPerMs * Math.PI * 2 * dt;
+    unit.yaw = lerpExp(unit.yaw, Math.atan2(-unit.x, HF.frontZ - unit.z), ANIM.yawRate, dt);
+    if (h.pushCrowd) h.pushCrowd(unit.x, unit.z, HB.push);
+  }
+
+  /** The wall section a boss at x stands in front of. */
+  _holdSection(x) {
+    const s = Math.floor((x + HF.wallHalf) / HF.segW);
+    return s < 0 ? 0 : (s >= HF.sections ? HF.sections - 1 : s);
+  }
+
+  /** A wind-up: the archetype's next attack on the section the hold names; telegraph ring(s), pose, boss:attack, onWindup. */
+  _holdWindup(unit, h) {
+    const cyc = HB.archetypes[this._archKey] || HB.archetypes.hulk;
+    const kind = cyc.attacks[unit.hcyc++ % cyc.attacks.length];
+    const sec = h.pickSection(kind, unit.x) | 0;
+    unit.hkind = kind; unit.htarget = sec; unit.hwind = unit.hwindLen = HB.windup[kind]; unit.hwindDmg = 0;
+    // the charge hits the target and its neighbour: one ring over both
+    const two = kind === H_CHARGE, sec2 = sec < HF.sections - 1 ? sec + 1 : sec - 1;
+    const cx = -HF.wallHalf + HF.segW * ((two ? (sec + sec2) * 0.5 : sec) + 0.5), size = HF.segW * (two ? 2.1 : 1.1);
+    if (unit.hdecal >= 0 && this._fx && this._fx.removeDecal) this._fx.removeDecal(unit.hdecal);
+    unit.hdecal = this._decal('ring', cx, HF.wallZ - HF.depth * 0.5, size, unit.hwind, kind === H_ACID ? PALETTE.fx.acid : PALETTE.boss.rage, true);
+    if (kind === H_SLAM) { unit.pose[POSE_ARMS] = 1; unit.pose[POSE_CROUCH] = 0; }
+    else if (kind === H_CHARGE) { unit.pose[POSE_LEAN] = 1; unit.pose[POSE_CROUCH] = 1; }
+    else {
+      unit.pose[POSE_JAW] = 1; unit.pose[POSE_ARMS] = 0.5;
+      for (let g = 0; g < HB.acidGlobs; g++) this._launchGlob(unit, cx + (g - 1) * HF.segW * 0.3, HF.wallZ + 0.6, 0, unit.hwind);   // cosmetic: the hold applies the kills
+    }
+    unit.hpose = 0;
+    this._emitAttack(H_REPORT[kind], cx, HF.wallZ, size * 0.5, unit.hwind, sec);
+    if (h.onWindup) h.onWindup(kind, sec, unit.hwind);
+  }
+
+  /** Enough damage landed during the wind-up: the attack is cancelled and the boss reels for staggerS s. */
+  _holdStagger(unit, h) {
+    const cyc = HB.archetypes[this._archKey] || HB.archetypes.hulk;
+    if (unit.hkind === H_ACID) this._clearGlobs();                         // the volley in the air is the cancelled attack
+    unit.hwind = -1; unit.hstag = HB.staggerS; unit.hcool = cyc.interval[Math.min(unit.phaseIdx, cyc.interval.length - 1)];
+    if (unit.hdecal >= 0 && this._fx && this._fx.removeDecal) this._fx.removeDecal(unit.hdecal);
+    unit.hdecal = -1;
+    unit.pose[POSE_ARMS] = 0; unit.pose[POSE_LEAN] = -0.6; unit.pose[POSE_CROUCH] = 0; unit.pose[POSE_JAW] = 1; unit.hpose = HB.staggerS;
+    unit.hitT = this._t;
+    if (this._fx) {
+      if (this._fx.emit) this._fx.emit('spark', unit.x, BOSSES.coreY, unit.z, JUICE.bursts.flip);
+      if (this._fx.addTrauma) this._fx.addTrauma(JUICE.trauma.bossSlam * 0.5);
+    }
+    P_STAGGER.id = this._id; P_STAGGER.x = unit.x; P_STAGGER.z = unit.z; P_STAGGER.twin = unit.idx;
+    this._emit('boss:stagger', P_STAGGER);
+    if (h.onStagger) h.onStagger(unit.x, unit.z);
+  }
+
+  /** The wind-up ran out: the hold applies the attack to its section(s); impact juice there. */
+  _holdAttack(unit, h) {
+    const cyc = HB.archetypes[this._archKey] || HB.archetypes.hulk;
+    const kind = unit.hkind, sec = unit.htarget;
+    unit.hcool = cyc.interval[Math.min(unit.phaseIdx, cyc.interval.length - 1)];
+    if (unit.hdecal >= 0 && this._fx && this._fx.removeDecal) this._fx.removeDecal(unit.hdecal);
+    unit.hdecal = -1;
+    const cx = -HF.wallHalf + HF.segW * (sec + 0.5);
+    h.segmentAttack(kind, sec, unit.x, unit.z);
+    this._impactJuice(cx, HF.wallZ, kind === H_ACID ? JUICE.bursts.splat : JUICE.bursts.rocket);
+    if (kind === H_SLAM) { unit.pose[POSE_ARMS] = 0; unit.pose[POSE_CROUCH] = 1; }
+    else if (kind === H_CHARGE) { unit.pose[POSE_LEAN] = 0.4; unit.pose[POSE_CROUCH] = 0; unit.pose[POSE_JAW] = 1; }
+    else unit.pose[POSE_JAW] = 0.3;
+    unit.hpose = RECOVER_SECONDS;
+  }
+
+  /** HOLD ENRAGE: every living twin drops its wind-up and charges the wall (boss:enrage, the HUD's ENRAGED). */
+  _holdEnrage(h) {
+    this._holdEnraged = true;
+    for (let u = 0; u < this._unitCount; u++) {
+      const unit = this._units[u];
+      if (unit.state !== U_ALIVE) continue;
+      if (unit.hdecal >= 0 && this._fx && this._fx.removeDecal) this._fx.removeDecal(unit.hdecal);
+      unit.hdecal = -1; unit.hwind = -1; unit.hstag = 0;
+      unit.pose[POSE_LEAN] = 1; unit.pose[POSE_JAW] = 1; unit.pose[POSE_ARMS] = 0; unit.hpose = 0;
+    }
+    if (this._light && !this._shield.up) this._light.color.copy(_rageColor);
+    P_ENRAGE.id = this._id; P_ENRAGE.after = h.enrageS; P_ENRAGE.extra = 0;
+    this._emit('boss:enrage', P_ENRAGE);
+  }
+
+  /** The enrage's chew once its section is down: h.chew·(1 + n) soldiers per s in second n (boss:attack 'chew' each second). */
+  _holdChew(unit, dt, h) {
+    if (unit.hchewAt < 0) { unit.hchewAt = this._t; unit.hchewSec = -1; }
+    const n = Math.floor(this._t - unit.hchewAt);
+    unit.hchewAcc += dt * h.chew * (1 + n);
+    if (n !== unit.hchewSec) {                                             // the jaw snaps and the cue plays once a second
+      unit.hchewSec = n; unit.chewT = this._t;
+      this._emitAttack(K_CHEW, unit.x, unit.z, 0, 0, -1);
+      if (this._fx && this._fx.vignette) this._fx.vignette(PALETTE.flash.red, JUICE.flashes.chewVignette);
+    }
+    if (unit.hchewAcc >= 1) {
+      const k = Math.floor(unit.hchewAcc);
+      unit.hchewAcc -= k;
+      this._applyKills(unit, k, K_CHEW, unit.x, unit.z, BOSSES.radius);
+    }
+  }
+
+  /** Phase minions in a hold: × minionScale (brutes × bruteMinionScale; none on the debut) into the crowd behind the boss. */
+  _holdBurst(unit, type, count) {
+    const h = this._hold;
+    if (!(count > 0) || !h.spawnBurst) return;
+    const brute = type === 'brute';
+    if (brute && h.debut) return;
+    h.spawnBurst(type, count * (brute ? HB.bruteMinionScale : HB.minionScale), unit.x, unit.z - HB.minionBack);
   }
 
   // -------------------------------------------------------------------------------------------

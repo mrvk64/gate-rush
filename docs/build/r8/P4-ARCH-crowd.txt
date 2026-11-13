@@ -1,0 +1,171 @@
+ARCHITECTURE.md — js/crowd.js, the Horde crowd engine (1.4.0, P4). Draft for P10 to fold into §6 (module contracts), §5 (events),
+§8 (data) and §9 (rendering). Everything here is implemented in r8/P4; P6 (hold.js) builds on it.
+==========================================================================================================================
+
+§6.x crowd.js — ctx.crowd (CrowdSystem; SYSTEMS weight 10, after zombies; imports three, util, data only)
+
+LIFECYCLE
+- init(): allocates the SoA pool (CROWD.slots 3,072), the 1 m grid (24 × 82 cells), the spawn queue (CROWD.queueCap 16,384:
+  a whole hold, ≤ 13,500 units) with spawnSurge's batch scratch, and the data texture's CPU side (1024 × 4 RGBA32F = 64 KB)
+  once. No GPU work, nothing in the scene.
+- prepare() → Promise: builds the meshes once (a hidden Group 'crowd' under render.scene: LOD0, LOD1, LOD2, carpet, pierce
+  streaks, gore ring; LOD0's customDepthMaterial), registers them with render.addWarmable and resolves when every program of
+  the committed tier is compiled and drawn once: 7 programs on shadow-map tiers (High, Medium: the LOD0 depth program; casters only on High), 6 on Low / software GL (measured: 58 → 65 at High and Medium).
+  programsReady is false until then. Being scene members, the meshes are part of every later tier change (_prepareTier) and
+  context-restore warm-up, so nothing compiles during play. Without a renderer (node) it resolves at once.
+- begin(o { seed, coin, rules, priority }): starts a hold — reset(), both RNG streams reseeded from seed (gameplay and looks),
+  coin = coins per paying kill (crowd:kills), rules = setRules(rules), the governor reference taken (median frame interval of
+  the last CROWD.governor.refS s while a level played, never below engine.frameTargetMs = max(refresh, 16.67 ms)), the Group shown, and the crowd registered as a weapons target
+  (weapons.addTarget(this, priority)). Call it at the dig-in: weapons.reset (every level start, RESTART, QUIT) drops providers.
+  If prepare() never ran, begin() builds the meshes synchronously (programs then compile on the first draw).
+- flee(): the hold is won — every living unit turns (mode FLEE: walks away at CROWD.field.fleeK × its speed, released past
+  fleeZ), the queue is dropped, the carpet fades over CROWD.carpet.fade s. Until the next begin(): every provider query misses
+  (no round, blast or troop is spent on the crowd; the target stays registered and alive stays the living count), a kill of a
+  fleeing unit pays nothing and counts nowhere (crowd.kills, crowd.bites, crowd:kills), and queue / spawnSurge / spawnBurst
+  refuse (false / 0).
+- reset() (RESET_ORDER, level start / quit) and end(): inactive, pool and queue cleared, the gore ring and the pierce streaks
+  emptied (no blood of the last attempt at the next dig-in), Group hidden, weapons target removed, engine.scalerGuard back to
+  { 0, true }, the debug demo's level patch removed. Cheap when already idle.
+- dispose(): also removes the Group and the warmable and frees every GPU object.
+- active false: step() returns at once; render() only samples frame intervals while a level plays (the governor reference).
+
+SIMULATION (identical on every tier: the tier only changes what is drawn)
+- Cadence: step(dt) at 60 Hz alternates phase A and phase B (each tick = 2 steps, 30 Hz):
+  A: release finished deaths (CROWD.render.deathS on the crowd clock), the feed, the counting sort, separation.
+  B: the rules' begin(dt), every listed living unit nearest-first (rows from the wall backward): mode motion, clamps, rule
+     callbacks, the per-column front cache, view culling, the drawn order; dying bodies merged by depth; the pack; the carpet;
+     rules.end(dt); crowd:kills.
+- The crowd clock crowd.t (s since begin) drives the queue and deaths; deathT / hitT for the shaders use ctx.time.elapsed.
+- Feed: due queue entries FIFO (the queue is kept in time order: tail insertion for queue(), one backward merge for a surge). A burst entry (explicit z) is placed there
+  while alive < feedCap + reserve; any other at a random z of the band CROWD.field.feedZ, x = its x (then ±3 m tries, ≤ feedTries)
+  where the 1 m cell holds < feedDens (last tick's counts, like holdsim). No room or alive ≥ feedCap: it WAITS (the head
+  blocks; ctx.debug.dropped['crowd.wait'] counts each waiting unit once). ≤ feedPerTick spawns per tick.
+- Motion (WALK / WALL / PASS / FLEE): x steers toward tx with the zone gain (street / funnel / wall), sideways diffusion into
+  thinner cells, forward at the unit's speed (type speed × (1 ± speedJitter)), crawlers lunge (lunge[1] m/s) in the last
+  lunge[0] m; crowd pressure: the cell ahead above densCap slows the unit to the cell's mean speed + 0.3, above 2 × densCap
+  stops it. 1.4.0 change vs horde-v6 / holdsim2: within 1 m of its barrier line a unit's OWN cell counts as the cell ahead, and
+  a cell above 2 × densCap pushes its units back at relief m/s per extra unit — without that the wall row stacked up to 290
+  units per 1 m cell in a 30 s peak (tools/zdist.mjs; holdsim2 has the same stacking). Now ≤ 10-11 per cell and the pile
+  queues back up the funnel. Velocity eases at accel; separation displacement × sep.k; the funnel clamps x (|x| ≤ halfAt(z) − r,
+  ≤ wallHalf − r past the wall and in PASS); WALK / WALL units are clamped at wallZ(x) − r.
+- Separation: every unit against the next sep.max units of its own cell, the first sep.max of its right neighbour and
+  3 × sep.max of the next row's cells, skipping a neighbour cell when the unit is farther than 2r from it (exact: the lists
+  are built in the same phase). Linear in a crowded cell, so stacks always come apart.
+- Determinism: node tools/parity.mjs and hordeperf4 --mode life: same seed + same fire → identical checksum on high / med /
+  low / sw, with and without rules.
+
+MODES (crowd.MODE; crowd.mode[i], written by rules)
+  WALK 0 steering / pressure / clamps · WALL 1 the same, the rule's 'at the wall' marker · CLIMB 2 z += field.climbSpeed per
+  s, no clamps, reachZ → onReach · PASS 3 through a breach: x ≤ wallHalf − r, no wall clamp, reachZ → onReach · HOLD 4 no
+  motion (spitter holding, brute at the line) · FLEE 5 (flee()).
+
+RULES HOOK — setRules(r) or begin({ rules }); every member optional, called inside phase B with direct SoA access
+  begin(dt) / end(dt)   once per tick (dt = 2 steps), before / after the unit pass
+  wallZ(x)              the barrier line at x (default CROWD.field.wallZ −3.9); asked for units within 3 m of the default line
+  onWall(i)             a WALK / WALL unit was clamped at its line this tick (z = wallZ − r, vz 0): claw slots, piles, climbs,
+                        breach tokens (set mode CLIMB / PASS; for PASS nudge z past the line)
+  onClimb(i)            a CLIMB unit after it moved;  onBreach(i) a PASS unit after it moved
+  onReach(i)            a CLIMB / PASS unit at or past r.reachZ (default CROWD.field.reachZ −2.57): bite (kill(i, 'bite')) or
+                        hold (mode HOLD); without the function the unit bites and dies ('bite', no coins)
+  spitHold(i)           a WALK spitter at or past r.spitZ (default CROWD.field.spitZ −19.6), every tick until its mode changes
+  onHold(i)             a HOLD unit, every tick (lob timers, brute swings)
+  r.reachZ, r.spitZ     numbers read each tick
+  SoA (Float32 unless noted; index = slot i): x, z, vx, vz, spd, hp, tx (target x), tm, aw (free for the rules), type (Uint8,
+  ZOMBIES.common.types order), mode (Uint8), state (Uint8: 0 free, 1 alive, 2 dying), live (Int32 list) / nLive.
+  Calls: kill(i, cause) (crumple; 'bite' | 'cleanup' | 'flee' and a FLEE unit pay nothing, 'bite' counts crowd.bites), remove(i) (no body),
+  idOf(i) / slotOf(id). Pile counts read inside the same pass are one tick old by construction (as holdsim).
+
+SPAWNING
+- queue(t, type, x, tx, hp, z?) → bool: one unit due at crowd time t (type = index or name); z given = a burst at (x, z). It
+  goes after the queued units due at the same time (times compared as stored, float32); O(1) in time order, O(later entries)
+  otherwise. False when the type is unknown, the queue is full (warnOnce) or after flee().
+- spawnSurge(d) → queued: d { t0 (s from now), window, n, type or mix [5 weights], hp (number or [5]), x0, x1 (spawn x at the
+  window start), x0e, x1e (at its end: sweeps), tx0, tx1, pA + ta0, ta1 (chance of a second target range) }; stratified times,
+  so the batch is time-ordered and merges into the queue in one backward pass (O(queued + n); the same order and draws as n
+  queue() calls; a full queue keeps the first entries, the draws go on). Measured: 3,000 among a 1,200-entry trickle 0.3-1.2 ms.
+- spawnBurst(x, z, n, type, hp, spread) → placed now: boss minions within spread m around / behind (x, z) on the reserve;
+  overflow waits as burst entries.
+- pushCircle(x, z, r): units inside r + their radius pushed out radially (the boss footprint, per tick).
+- Counters: alive (living), aliveOfType(t), queued (all entries), waiting (due entries still waiting), kills, bites.
+
+TARGET PROVIDER (weapons ARCH §3 contract)
+- alive (getter; 0 skips the provider everywhere). After flee() every query below misses (applyHit returns the damage).
+- hitTestSeg(seg, radius, out { id, x, y, z, t }): nearest hittable unit whose capsule (CROWD.units[t].hitR) meets the swept
+  segment; a per-column front cache (max z of the living per 1 m column, built in phase B) rejects segments in front of
+  every unit at once; y = min(FIRE.bullet.y, unit height).
+- applyHit(id, damage, pierceMax, x, y, z, cause) → leftover: the unit takes min(damage, hp); a kill carries the leftover to
+  the next hittable unit BEHIND it in the same 1 m grid column (≤ pierceMax units, never past CROWD.field.rangeZ −44.3);
+  a pierce draws a streak from the first to the last unit hit. Rounds into an empty column are the caller's (wasted).
+- damageInCircle(x, z, r, amount, cause), damageInLine(x, z0, halfWidth, amount, cause, maxTargets, zMin) (nearest first when
+  maxTargets is finite), damageInCone(x, z, dirX, dirZ, halfAngle, range, amount, cause) → kills.
+- nearest(x, z, out), nearestOfType(typeName, x, z, out) → bool, out { id, x, y, z }; highestHp(out) (+ out.hp; z < 0);
+  densestCell(x0, x1, z0, z1, out { x, z, n }) (the last sort's counts; ties to the wall).
+- Crawlers below CROWD.units.crawler.hitZ (−14) are skipped by every bullet-height query (hitTestSeg, pierce, lines).
+- Hit flash at most once per CROWD.render.flashCool s, never on the killing hit.
+
+RENDERING
+- Data texture 1024 × 4 RGBA32F, 2 texels per drawn instance slot (x, z, vx, vz | phase, look, deathT, hitT), written by the
+  phase-B pack and uploaded whole (65,536 B) on ticks that draw; look packs variant | gait << 2 | bright << 6 | type << 10 |
+  fade << 13. The shaders texelFetch (gl_InstanceID · K + aCopy) and extrapolate x / z with the velocity between ticks
+  (uSince ≤ 0.1 s; pause: uSince frozen, no drift).
+- Drawn set: living units in the view (horizontal frustum + 1 m), nearest first, up to floor(governorCap × (1 − dyingReserve));
+  dying bodies in view, nearest 1 m row first (a counting sort, like the living), take what remains of the cap, merged into the
+  order by depth (so a kill at the wall stays LOD0). LOD0 = the first ≤ tier.lod0 units nearer than lod0Z; the cross-fade band = its last min(xfade, n0 / 2) slots, which
+  LOD1 draws from the same texels (fade q in LOD0 = coverage q / 15, in LOD1 = 1 − q / 15; complementary 4×4 Bayer: no pixel
+  in both); LOD1 to lod1Z; LOD2 beyond. High: the nearest min(n0, shadows) LOD0 units cast through the customDepthMaterial.
+- Every LOD draws the walker body (LOD0 = models.geo.walker + a ground disc; LOD1 = a 68-tri body in the same −Z-facing model
+  space): per type scale / crawler pitch about the hip / limb swing and arm rest / gait range / palette from scalar uniforms
+  with a select (no uniform arrays). Arms rise while a unit is blocked (speed → 0). Units face their velocity biased toward the
+  wall (yaw = atan(vx, vz + 0.6) + π), dying ones face the camera.
+- Shading: sun + hemisphere (× 1/π like three's standard materials) + view fill (fill[0] × sun + fill[1] × sky toward the
+  camera), copied from render.lights EVERY frame (so lightsVersion changes are covered too). Body colour ≤ render.bodyMax 0.9
+  linear; eyes = eye.color × hdr, full only for z > eye.nearZ, × eye.band (0.56: under the bloom threshold) by bandZ, × far by
+  farZ; carpet eyes × carpet; spitter torso glows (render.sac) on the same ramp. Measured (float target, crowd alone): max 0.84
+  outside the eye band, 1.5 inside.
+- The ground disc (part 9) draws under every unit that casts no shadow: on High the first min(n0, shadows) LOD0 instances (the
+  casters, while the sun casts) drop it, and so do their LOD1 copies in the cross-fade band (uNoDisc per material: LOD0 = casters,
+  LOD1 = casters − xf0); LOD0 beyond the casters, LOD1 and every unit on Medium / Low / software keep it. The depth material
+  never draws it.
+- Software GL (fixed per session): LOD0 / LOD1 are built without the dither discard (no cross-fade band, no dither-out; the
+  crumple sinks the body instead) — the discard cost SwiftShader its early depth test, ≈ 9 ms a frame at 1024×594.
+- Carpet: tier.carpetRows instanced rows of fragment-drawn silhouettes from its front to carpet.back; density
+  clamp((queued + undrawn + d0) / d1, d2, 1) × the fade-in / fade-out weight (0 before the first unit, after flee()); front =
+  carpet.front, or while the cap binds clamp(z of the farthest drawn living unit − 1, front, nearest), eased at carpet.ease.
+- Gore ring (tier.gore of 256 allocated) at kills nearer than gore.maxZ (rngFx); pierce streaks (tracers.cap) additive.
+- Draws while active: LOD0, LOD1, LOD2, carpet, streaks, gore = 6 main (+1 shadow on High); measured main 27-28 in the demo
+  hold vs 32 RUN at High, shadow 9 vs 9-11.
+- Tier change (quality:change): the tier row (caps, LOD bands, casters, carpet rows, gore ring) and the governor restart at the
+  tier's cap (logged as 'crowd:governor' during a hold);
+  no reallocation (same texture, buffers and geometries), programs prepared by render's tier compile (min == max measured).
+
+GOVERNOR AND THE AUTO-SCALER (render(), per frame, while active; never on software GL, whose cap is fixed)
+- Reference: the median frame interval of the run phase's last refS s (the engine's sustained interval before 10 samples), never
+  below engine.frameTargetMs = max(refresh, 16.67 ms) — as the auto-scaler: a 90 / 120 Hz panel holding 60 fps is on target
+  (without the floor a 120 Hz phone at 87 fps stepped 2,048 → 1,024).
+- EMA of the frame interval (governor.ema; hitches > hitchMs ignored). Above up × reference for upS s: cap × down (≥ tier
+  floor); at ≤ raise × reference for raiseS s: cap × (1 + step) (≤ tier cap). Each step emits 'crowd:governor'
+  { cap, living = floor(cap × (1 − dyingReserve)), floor, ref } — the on-screen probe compares LIVING drawn with 0.95 × living.
+- engine.scalerGuard.exemptMs = the crowd's step ms of the frame; dropOk = the cap has sat at the floor ≥ dropOkS s (software GL:
+  its fixed cap counts as the floor). reset() restores { 0, true }.
+
+DEBUG API (?debug=1; D46 fallback 2 may move it to js/debugtools.js)
+- debugDemo({ alive, queued, seed }) → bool: a synthetic hold on the running level for measurement — the level's step is parked
+  (an own-property shadow, removed by reset()), road stopped, invulnerable, run zombies / gates / crates cleared, the wall
+  formation, rig 'hold', a lane-sweeping fire policy (90 rounds/s, out-of-lane × 0.25, pierce 4) at the crowd; `alive` walkers
+  / runners inside 40 m (denser toward the wall, ≤ 4 per cell) and `queued` in the band, topped up every tick.
+- stats() → { tier, alive, waiting, queued, kills, bites, drawn [LOD0, LOD1-only, LOD2], drawnTotal, drawn40 (living within
+  40 m), drawnDying, culled, undrawn, carpetFront, governorCap, livingCap, floor, reference, dropOk, shadowCasters, tickA, tickB,
+  stepMean, stepP95, stepMax, renderMs, uploads, uploadBytes } (allocates). debugReset() zeroes the perf window.
+- debugGovernor(dir) → cap: one forced governor step (logged like a real one). debugMeshes → { lod0, lod1, lod2, carpet, depth,
+  tracers, gore, tex }. crowd.perf: the raw counters and the 4,096-step ring of step ms.
+
+§5 events
+| crowd:kills | { n, coins, x, z } — n paying kills since the last batch, coins = n × coin, x / z their mean (≤ CROWD.killsHz) | crowd | fx (coalesced), level / hold (coins), audio cues |
+| crowd:governor | { cap, living, floor, ref } on every governor step (real or debugGovernor) and at a tier change during a hold | crowd | probes, debug |
+
+§8 data — CROWD (js/data.js region 'CROWD (P4)'): slots, feedCap, reserve, queueCap, grid, field (wallZ, wallHalf, throatZ,
+funnelZ, streetHalf, feedZ, feedDens, feedX, feedTries, feedPerTick, reachZ, spitZ, rangeZ, climbSpeed, fleeK, fleeZ), radius,
+steer (street, funnel, wall, max, diffuse, accel, densCap, relief), sep (max, k, zMin), speedJitter, units (per type: speed,
+hitR, height, gait, leg, arm, armRest, bob, scale, crawler pitch / lift / hitZ / lunge), tiers (high / med / low / sw: cap,
+lod0, lod0Z, lod1Z, shadows, carpetRows, gore, floor), dyingReserve 0.1 (A13(b)), xfade, near40, governor, render, eye,
+palette, carpet, gore, tracers, killsHz. Values only for P9; the unit speeds live here (the hold's runtime keys are P6's).

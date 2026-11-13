@@ -1,0 +1,27 @@
+ARCHITECTURE.md §9 "Rendering architecture" and §8 data tables — 1.4.0 additions by P2
+=========================================================================================
+
+§9.5 Resize, DPR, context loss — add: render.warmables (addWarmable) are scene members, so a restore's warmup() and a tier
+change's _prepareTier compile and draw them like any hidden content; a mode that keeps meshes OUT of the scene must re-add /
+re-warm them itself. Context loss → the icon atlas (both rows) is re-drawn from its recipe (restoreAll) like every canvas.
+§9.6 Procedural textures — the icon atlas is 512 × 128: order in cell row 0, row2 in cell row 2, rows 1 and 3 transparent.
+§2.1 camera — rigs (render.setRig) sit after the count dolly and the framing constraint in _updateCamera; they replace the
+follow pose and FOV (blend rt), and the fog moves with them.
+Lights — render.lightsVersion counts light changes (district apply / fade frames, title swing); copied light uniforms must
+refresh on a change (night-v2 M10: a stale moon light gave black crowd bodies for 1.2-5 s on software GL).
+
+§8 data (P2 owns SQUAD, RENDER, MUSIC, JUICE)
+- SQUAD.steer.tapMaxPx 10, tapMaxMs 300 (the tap classifier).
+- SQUAD.formations.wall { cols 21, spacing 0.34, rowPitch 0.34, frontZ −2.3, stepY 0.45, stepBackZ −1.0, easeS 1.5, label [0, 0.4, 0] }.
+- SQUAD.aim { range 3.4, k 6.8, follow 18, maxSpeed 14, keySpeed 12, dragTop 0.35 } (setInputMode('aim') defaults).
+- RENDER.rigs.hold { portrait { pos [0, 10.8, 10.3], look [0, 0, −11], wallZ −3.5, wallFrac 0.715 }, landscape { pos [0, 9.7, 15.9],
+  look [0, 0, −12], hFovDeg 50, fovClamp [30, 50] }, fog { near 58, far 100 }, tween 1.5 }.
+- RENDER.textures.icons [512, 128]; RENDER.icons.row2 ['kit', 'kit2', 'airstrike', 'flare', 'supply']; ofItem + 'item.kit', 'item.kit2'.
+- MUSIC.instruments.brass { sawtooth, voices 2, detuneCents 8, octave −12, low-pass 650 Hz q 0.9, gain 0.2, attack 180 / release
+  450 ms, swell 1.8, swellMs 1200 }; MUSIC.modes.hold { drums full, bass −12, brass 1, pad 0.35 }.
+- JUICE.kinds { burst: kill / climb / wallHit / breach / repair / blast presets, decal: { ring, arc, arrow: 'lane' } };
+  JUICE.crowdKills { flushHz 10, perKill 3, cap 24, coinEvery 0.5 }.
+- AUDIO_CUES vocabulary (§8.8 / §11): + `on: 'event' | ['event', …]` (HORDE_AUDIO / NIGHT_AUDIO cues use it). The comment line
+  is NOT in the P2 branch (AUDIO_CUES is outside P2's data regions; fix round 2 removed it, audio.js's header documents the key):
+  the release adds this line to the cue-schema comment block in data.js, after `noTimeScale`:
+  //   on:         'event' | ['event', …]       1.4.0: played on that event (at its x / z); any cue can also loop ('audio:loop')

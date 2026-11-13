@@ -1,0 +1,15 @@
+ARCHITECTURE.md §5.1 "Complete event list" — 1.4.0 rows by P2 (hooks; emitters are the 1.4.0 modes, listeners ship now)
+=========================================================================================================================
+
+| event | payload | emitted by | listened by |
+|---|---|---|---|
+| `pause` | `{}` or the data passed to engine.pause(data) (e.g. `{ brief }`) | engine | ui, audio (unchanged); state:change carries the same data |
+| `fx:burst` | `{ kind, x, y, z, n?, color? }` — kind = a JUICE.kinds.burst preset (kill, climb, wallHit, breach, repair, blast) or a particle kind name; n overrides the count; color = an sRGB hex (nearest FX colour) | modes (hold, crowd) | fx |
+| `fx:decal` | `{ kind, x, z, size, seconds, color?, top?, id }` — kind = ring / arc / arrow (JUICE.kinds.decal; arrow = the flowing-chevron stripe pointing at the squad) or any DECAL_KIND name; fx writes the decal id back into `p.id` (−1 refused) for fx.moveDecal / decalProgress / removeDecal | modes | fx |
+| `crowd:kills` | `{ n, coins, x, z }` (≤ 30 Hz) | crowd (P4) | fx (coalesced, JUICE.crowdKills: one blood burst per flush at flushHz, perKill particles per kill ≤ cap; one coin flight every coinEvery s), level (coins, P1T/P6), audio through AUDIO_CUES[id].on |
+| `audio:loop` | `{ id, on, gain }` — id = any AUDIO_CUES cue | modes | audio: while on and the state is 'playing', update() re-plays the cue every cue.repeatMs (else its longest layer) at volume gain (silent while paused or in a menu, re-played at once on resume); on: false stops it; level start / complete / failed stop every loop |
+| `music:mode` | `{ mode, restart?, swell? }` — mode = a MUSIC.modes key ('hold': drums + bass −1 octave + low brass + soft pad); swell: the next bar's brass chord swells | modes | audio |
+| (any) | AUDIO_CUES[id].on = 'event' or ['event', …] | — | audio plays cue id on each such event, at the payload's x / z when it has a numeric x |
+
+Payload objects stay reused by their emitters; fx writes `id` into the fx:decal payload it was handed (the emitter reads it
+right after the emit).

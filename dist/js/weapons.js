@@ -10,7 +10,7 @@
 // key for are declared below with a DATA-MISSING comment naming the intended path.
 //
 // Fire model (GDD §3.3): shooters S = min(C, FIRE.shooters); every shooter k has its own phase timer
-// (random start from ctx.rngFx) advanced by f·fireRateMult·weaponRateMult per second; the squad's target
+// (random start from ctx.rngShot) advanced by f·fireRateMult·weaponRateMult per second; the squad's target
 // rate targetRate = S·perShooter·pellets is capped at FIRE.spawnRateCap and the excess is folded into the
 // bullet weight w = max(1, C/FIRE.weightDiv)·targetRate/spawnRate. A bullet deals w·d·damageMult·kindMult
 // to a zombie / boss and adds w·gateHits to a gate (no damageMult on gates, GDD §8.2).
@@ -32,7 +32,7 @@
 //         setFireVisual, setArmor), ctx.zombies (hitTestSeg | hitTestSegment, nearest, damage, damageInCircle,
 //         damageInLine), ctx.boss (hitTestSeg | hitTestSegment, damage, aimPoint), ctx.gates (hitTestSeg |
 //         hitTestSegment, applyHit, activeEvent), ctx.pickups (hitTestSeg | hitTestSegment, hit, setMagnet),
-//         ctx.world (roadSpeed, bossActive, squadHalfWidth), ctx.quality (params.tracers), ctx.rngFx, ctx.fx (emit,
+//         ctx.world (roadSpeed, bossActive, squadHalfWidth), ctx.quality (params.tracers), ctx.rngShot, ctx.rngFx, ctx.fx (emit,
 //         addTrauma, fovKick, flash), ctx.render (scene, camera, materials, textures.muzzle, lights.laser),
 //         ctx.models.geo (tracer, muzzle, rocket), ctx.state, ctx.debug, ctx.level (phase: the stored-weapon refund at level end).
 //
@@ -43,6 +43,9 @@
 // is active. Stored weapons survive the boss intro / fight and are refunded at level end (_stepStored).
 // Writes: nothing on ctx except ctx.debug.dropped counters and ctx.debug.shotsPerSec / beamsPerSec (overlay, WPN-7);
 //         emits the events listed above.
+//
+// 1.4.0 hooks (ARCH §3; the RUN paths while none is set): setPolicy (rate, shot, weaponFrame, pierce, tracerY) and
+// addTarget / removeTarget (target providers, swept after the zombies; alive 0 = skipped); reset() clears both.
 import {
   InstancedMesh, InstancedBufferAttribute, Mesh, BoxGeometry, CylinderGeometry, ConeGeometry, PlaneGeometry,
   MeshBasicMaterial, MeshStandardMaterial, AdditiveBlending, DynamicDrawUsage, Color,
@@ -160,7 +163,7 @@ const SHOT_LABEL = ['rifle', WEAPONS.shotgun.id, WEAPONS.minigun.id];   // shot.
 
 const ID_ARMOR = GEAR.armor.id, ID_MAGNET = GEAR.magnet.id, ID_CHIP = GEAR.chip.id, ID_BOOSTER = GEAR.booster.id;
 
-const H_NONE = 0, H_ZOMBIE = 1, H_BOSS = 2, H_GATE = 3, H_CRATE = 4;
+const H_NONE = 0, H_ZOMBIE = 1, H_BOSS = 2, H_GATE = 3, H_CRATE = 4, H_PROV = 5;
 
 // A double zero for the constructor (WPN-8). V8 gives a field initialised with a small integer the Smi representation;
 // the first fractional store (e.g. _wLeft −= dt at the first weapon pickup) then generalises the field to Double,
@@ -180,6 +183,14 @@ const OUT_C = { id: -1, x: -0, y: -0, z: -0, t: -0 };            // crate candid
 const OUT_L = { gate: null, x: -0, y: -0, z: -0, t: -0 };        // piercing-line gate walk
 const OUT_LB = { x: -0, y: -0, z: -0, t: -0 };                   // piercing-line boss test
 const OUT_N = { id: -1, x: D0, y: D0, z: D0 };               // zombies.nearest() for the boss re-aim yield (WPN-7; D0: Double fields)
+const OUT_P = { id: -1, x: D0, y: D0, z: D0, t: D0 };         // 1.4.0: a provider's hitTestSeg out,
+const OUT_PW = { id: -1, x: D0, y: D0, z: D0 };               // the sweep's winning provider hit
+// 1.4.0 policy outs, reset before each call. SHOT: muzzle, direction, weight (× the folded weight), tracerY (height at the end
+// of its range; cosmetic), spread (rad), bossOnly (tests the boss capsule only), lane (in: a weaponAdd round). FRAME: the lane
+// x ± halfWidth from z0 to z1 (rail, laser beams, shotgun fan, minigun rounds), the rocket's target (tx, tz; NaN = down the
+// lane), splash (0 = data)
+const SHOT = { ox: D0, oy: D0, oz: D0, dirX: D0, dirZ: D0, weight: D0, tracerY: D0, spread: D0, bossOnly: false, lane: false };
+const FRAME = { x: D0, halfWidth: D0, z0: D0, z1: D0, tx: D0, tz: D0, radius: D0 };
 const V_POS = { x: -0, y: -0, z: -0, set(x, y, z) { this.x = x; this.y = y; this.z = z; return this; } };   // Vector3-compatible out for squad.shooterPosition
 const V_AIM = { x: -0, y: -0, z: -0, set(x, y, z) { this.x = x; this.y = y; this.z = z; return this; } };   // … and boss.aimPoint
 const COL = new Color();
@@ -193,8 +204,10 @@ const SEG = new Float64Array(4);
 const SEGL = new Float64Array(4);          // the same for the piercing-line queries (rail, laser, rocket blast, gate walk)
 const SEGT = [0.5, 0.5, 0.5, 0.5, null];   // PACKED_ELEMENTS (tagged) on purpose — never let it become a double array
 // _spawn() inputs (x, y, z, dirX, dirZ, speed, life, weight, vy) — same reason: the per-bullet insert stays allocation-free.
-const SP = new Float64Array(9);
+const SP = new Float64Array(10);
 const SP_VY = 8;                           // vertical tracer velocity (m/s; cosmetic: drone descent, boss-aim climb)
+const SP_BOSS = 9;                         // 1.4.0: bossOnly flag (_shoot sets it for its pellets only)
+const RAD = new Float64Array(1);           // 1.4.0: _detonate's splash radius (0 = WEAPONS.rocket.splash)
 const SEGW = new Float64Array(4);          // _gatesAlongLine's walking sub-segment
 const GW = new Float64Array(1);            // _gatesAlongLine's weight (written by the caller, not passed as a double)
 const ROCKET_SPLASH = WEAPONS.rocket.splash;   // 2.5 m blast radius (module const: passed tagged, WPN-8)
@@ -373,6 +386,7 @@ export class Weapons {
     this._bx = null; this._by = null; this._bz = null; this._bpx = null; this._bpz = null;
     this._bdx = null; this._bdz = null; this._bvy = null; this._bspd = null; this._blife = null;
     this._bw = null; this._bage = null; this._bkind = null;
+    this._bboss = null;            // 1.4.0: bossOnly per bullet
 
     this._phase = null;            // per-shooter phase timers (fraction of a shot interval left)
 
@@ -422,6 +436,12 @@ export class Weapons {
     this._rn = 0;
     this._rx = null; this._ry = null; this._rz = null; this._rpx = null; this._rpz = null;
     this._rdx = null; this._rdz = null; this._rdist = null; this._rsmoke = null; this._rroll = null;
+    this._rreach = null; this._rrad = null; this._rfly = null;   // 1.4.0: detonation distance, splash (0 = data), 1 = overflies to it
+
+    // 1.4.0: fire policy; providers by ascending priority; last H_PROV index; shotgun fan bound; minigun lane (x, half-width, far z)
+    this._policy = null; this._polFrame = false; this._pierce = 1; this._polAdd = 0; this._addAcc = 0; this._addK = 0; this._addOn = false;
+    this._prov = []; this._provPrio = []; this._provN = 0; this._hitProv = 0; this._polSpread = D0;
+    this._laneX = D0; this._laneHW = D0; this._laneZ = D0;
 
     // muzzle flashes (ring)
     this._mx = null; this._my = null; this._mz = null; this._mBirth = null; this._mScale = null; this._mRoll = null;
@@ -468,6 +488,7 @@ export class Weapons {
     this._bspd = new Float32Array(POOL); this._blife = new Float32Array(POOL);
     this._bw = new Float32Array(POOL); this._bage = new Float32Array(POOL);
     this._bkind = new Uint8Array(POOL);
+    this._bboss = new Uint8Array(POOL);
     this._phase = new Float32Array(SHOOTERS);
 
     // --- rockets / muzzles / rail / laser state ------------------------------------------------
@@ -475,6 +496,7 @@ export class Weapons {
     this._rpx = new Float32Array(ROCKET_POOL); this._rpz = new Float32Array(ROCKET_POOL);
     this._rdx = new Float32Array(ROCKET_POOL); this._rdz = new Float32Array(ROCKET_POOL);
     this._rdist = new Float32Array(ROCKET_POOL); this._rsmoke = new Float32Array(ROCKET_POOL); this._rroll = new Float32Array(ROCKET_POOL);
+    this._rreach = new Float32Array(ROCKET_POOL); this._rrad = new Float32Array(ROCKET_POOL); this._rfly = new Uint8Array(ROCKET_POOL);
     this._mx = new Float32Array(MUZZLE_POOL); this._my = new Float32Array(MUZZLE_POOL); this._mz = new Float32Array(MUZZLE_POOL);
     this._mBirth = new Float32Array(MUZZLE_POOL).fill(-1e9);
     this._mScale = new Float32Array(MUZZLE_POOL); this._mRoll = new Float32Array(MUZZLE_POOL);
@@ -645,6 +667,9 @@ export class Weapons {
     this._n = 0;
     this._rn = 0;
     this._paused = false;
+    this._addAcc = 0; this._addK = 0;           // 1.4.0: a stored weapon's rounds owed on the fold never reach the next run
+    this.setPolicy(null);                       // 1.4.0: a level starts on the RUN fire model, with no providers
+    this._prov.length = 0; this._provPrio.length = 0; this._provN = 0;
     this._spin = 0;
     this._rocketTimer = 0;
     this._railTimer = 0;
@@ -665,7 +690,7 @@ export class Weapons {
     this._setLaserLight(false);
 
     // random per-shooter phases (GDD §3.3 "each shooter has a random phase")
-    const rng = this.ctx.rngFx;
+    const rng = this.ctx.rngShot;
     for (let k = 0; k < SHOOTERS; k++) this._phase[k] = rng ? rng.next() : (k + 0.5) / SHOOTERS;
 
     for (let i = 0; i < this._meshes.length; i++) {
@@ -764,6 +789,45 @@ export class Weapons {
     SP[5] = speed > 0 ? speed : FIRE.bullet.speed; SP[6] = life > 0 ? life : FIRE.bullet.life; SP[7] = weight > 0 ? weight : 1;
     SP[SP_VY] = 0;
     return this._spawn(k);
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 1.4.0 hooks: fire policy and target providers (ARCH §3)
+  // -------------------------------------------------------------------------------------------
+  /** A mode's fire policy, or null for the RUN fire model. */
+  setPolicy(p) {
+    this._policy = p && typeof p.shot === 'function' ? p : null;
+    this._polFrame = this._policy !== null && typeof p.weaponFrame === 'function';
+    this._pierce = this._policy !== null && p.pierce >= 1 ? p.pierce : 1;
+    this._polAdd = this._policy !== null && p.weaponAdd > 0 ? p.weaponAdd : 0;
+  }
+
+  get policy() { return this._policy; }
+
+  /** Registers (or re-prioritises) a target provider; providers sweep by ascending priority. Event time. */
+  addTarget(provider, priority) {
+    if (!provider || typeof provider.hitTestSeg !== 'function' || typeof provider.applyHit !== 'function') return;
+    this.removeTarget(provider);
+    const pr = Number.isFinite(priority) ? priority : 0;
+    let i = this._provN;
+    while (i > 0 && this._provPrio[i - 1] > pr) i--;
+    this._prov.splice(i, 0, provider); this._provPrio.splice(i, 0, pr);
+    this._provN = this._prov.length;
+  }
+
+  removeTarget(provider) {
+    const i = this._prov.indexOf(provider);
+    if (i >= 0) { this._prov.splice(i, 1); this._provPrio.splice(i, 1); this._provN = this._prov.length; }
+  }
+
+  get targetCount() { return this._provN; }
+  targetAt(i) { return i >= 0 && i < this._provN ? this._prov[i] : null; }
+
+  /** policy.weaponFrame(id, FRAME), FRAME reset first; true when the policy framed the weapon. */
+  _frame(id) {
+    if (!this._polFrame) return false;
+    FRAME.x = 0; FRAME.halfWidth = 0; FRAME.z0 = FIRE.muzzleOffset[2]; FRAME.z1 = WORLD.spawnZ; FRAME.tx = NaN; FRAME.tz = NaN; FRAME.radius = 0;
+    return this._policy.weaponFrame(id, FRAME) !== false;
   }
 
   // -------------------------------------------------------------------------------------------
@@ -992,8 +1056,10 @@ export class Weapons {
     this._aimOn = this._computeAim(squad);
 
     if (C > 0 && squad !== null) {
-      if (this._w === W_LASER) this._stepLaser(dt, C, squad);
-      else {
+      if (this._w === W_LASER) {
+        this._stepLaser(dt, C, squad);
+        if (this._polAdd > 0) this._fireRifles(dt, C, squad);        // 1.4.0: policy.weaponAdd keeps the rifle fold
+      } else {
         this._beams = 0;
         this._fireRifles(dt, C, squad);
         if (this._w === W_ROCKET) this._stepRocketLauncher(dt, squad);
@@ -1133,7 +1199,7 @@ export class Weapons {
    * pellets, kind, spread, life, folded weight and the spawn scale (spawnRate / targetRate ≤ 1).
    */
   _fireConfig(C) {
-    const w = this._w;
+    const w = this._polAdd > 0 ? W_NONE : this._w;                      // 1.4.0: policy.weaponAdd keeps the rifle fold (_fireAdd)
     let rateMult = 1, pellets = 1, kind = K_RIFLE, spread = FIRE.bullet.spreadDeg, life = FIRE.bullet.life;
     if (w === W_SHOTGUN) {
       rateMult = WEAPONS.shotgun.rateMult;
@@ -1202,6 +1268,7 @@ export class Weapons {
   _fireRifles(dt, C, squad) {
     this._fireConfig(C);
     if (this._aimBad || !this._cfgValid()) this._baseRifleConfig(C);
+    if (this._policy !== null) this._policyConfig(C);
     const S = this._cfgS;
     const adv = this._cfgPer * this._cfgScale * dt;      // fraction of a shot interval consumed this step
     if (!(adv > 0)) return;
@@ -1216,16 +1283,65 @@ export class Weapons {
       }
       phase[k] = ph > 0 ? ph : 1;
     }
+    if (this._polAdd > 0 && (this._w === W_SHOTGUN || this._w === W_MINIGUN)) this._fireAdd(dt, squad);
   }
 
-  /** One shot from shooter k: bullet(s) along −Z (or at the boss) with spread, recoil, muzzle flash. */
+  /** 1.4.0 (policy.weaponAdd): a shotgun's or minigun's rounds on top of the rifle fold just fired: weaponAdd × its rounds/s, worth
+   *  weaponAdd × its output (the minigun's after the spin-up), down the lane. */
+  _fireAdd(dt, squad) {
+    const sg = this._w === W_SHOTGUN, kind = sg ? K_SHOTGUN : K_MINIGUN, spinUp = WEAPONS.minigun.spinUp;
+    const pellets = sg ? WEAPONS.shotgun.pellets : 1, u = sg || !(spinUp > 0) ? 1 : clamp(this._spin / spinUp, 0, 1);
+    const S = this._cfgS, rate = S * this._cfgPer * this._cfgScale * this._polAdd * u / pellets;
+    this._cfgKind = kind; this._cfgPellets = pellets; this._cfgWeight /= KIND_DMG[kind];
+    if (sg) this._cfgLife = WEAPONS.shotgun.range / FIRE.bullet.speed;
+    this._addOn = true;
+    for (this._addAcc += rate * dt; this._addAcc >= 1; this._addAcc -= 1) {
+      this._shoot(this._addK, squad);
+      this._addK = this._addK + 1 < S ? this._addK + 1 : 0;
+    }
+    this._addOn = false;
+  }
+
+  /** 1.4.0: the fold at policy.rate(C) rounds/s (≤ FIRE.spawnRateCap; the RUN weighted output is kept), the shotgun fan bound,
+   *  the minigun lane. */
+  _policyConfig(C) {
+    const p = this._policy;
+    const target = this._cfgS * this._cfgPer * this._cfgPellets;
+    let spawn = typeof p.rate === 'function' ? p.rate(C) : 0;
+    if (!(spawn > 0)) spawn = target < FIRE.spawnRateCap ? target : FIRE.spawnRateCap;
+    if (spawn > FIRE.spawnRateCap) spawn = FIRE.spawnRateCap;
+    const base = C / FIRE.weightDiv > 1 ? C / FIRE.weightDiv : 1;
+    if (target > 0) { this._cfgScale = spawn / target; this._cfgWeight = base * (target / spawn); }
+    this._polSpread = 0; this._laneHW = 0;
+    if (this._w === W_SHOTGUN && this._frame(WEAPONS.shotgun.id) && FRAME.halfWidth > 0) this._polSpread = Math.atan(FRAME.halfWidth / WEAPONS.shotgun.range);
+    else if (this._w === W_MINIGUN && this._frame(WEAPONS.minigun.id) && FRAME.halfWidth > 0) { this._laneX = FRAME.x; this._laneHW = FRAME.halfWidth; this._laneZ = FRAME.z1; }
+  }
+
+  /** One shot from shooter k: bullet(s) along −Z (or at the boss; 1.4.0: as the policy aims it, SHOT) with spread, recoil,
+   *  muzzle flash. */
   _shoot(k, squad) {
-    const rng = this.ctx.rngFx;
+    const rng = this.ctx.rngShot, p = this._policy;
     squad.shooterPosition(k, V_POS);
-    const ox = V_POS.x, oy = V_POS.y, oz = V_POS.z;
-    const kind = this._cfgKind, w = this._cfgWeight, life = this._cfgLife, speed = FIRE.bullet.speed;
-    let ax = 0, az = -1, vy = 0;
-    if (this._aimOn && !this._inYieldColumn(ox)) {
+    let ox = V_POS.x, oy = V_POS.y, oz = V_POS.z;
+    const kind = this._cfgKind, life = this._cfgLife, speed = FIRE.bullet.speed;
+    let w = this._cfgWeight, ax = 0, az = -1, vy = 0, spread = this._cfgSpread, fan = WEAPONS.shotgun.fanDeg * DEG;   // ±10° fan
+    let lane = false;
+    if (p !== null) {
+      const o = SHOT;
+      o.ox = ox; o.oy = oy; o.oz = oz; o.dirX = 0; o.dirZ = -1; o.weight = 1;
+      o.tracerY = typeof p.tracerY === 'number' ? p.tracerY : NaN; o.spread = 0; o.bossOnly = false; o.lane = this._addOn;
+      if (p.shot(k, o) === false) return;
+      w *= o.weight;
+      if (!(w > 0)) return;
+      ox = o.ox; oy = o.oy; oz = o.oz; ax = o.dirX; az = o.dirZ;
+      const l = Math.sqrt(ax * ax + az * az);
+      if (l > EPS) { ax /= l; az /= l; } else { ax = 0; az = -1; }
+      if (o.tracerY === o.tracerY) vy = (o.tracerY - oy) / life;    // reaches tracerY at the end of its range
+      spread = o.spread > 0 ? o.spread : 0;
+      if (this._polSpread > 0 && this._polSpread < fan) fan = this._polSpread;
+      SP[SP_BOSS] = o.bossOnly === true ? 1 : 0;
+      lane = this._laneHW > 0 && kind === K_MINIGUN && o.bossOnly !== true;
+    } else if (this._aimOn && !this._inYieldColumn(ox)) {
       const dx = V_AIM.x - ox, dz = V_AIM.z - oz;
       const l = Math.sqrt(dx * dx + dz * dz);
       if (l > BOSSES.radius) {
@@ -1236,27 +1352,32 @@ export class Weapons {
       }
     }
     SP[SP_VY] = vy;
-    const spread = this._cfgSpread;
-    const pellets = this._cfgPellets;
-    if (pellets > 1) {
-      const fan = WEAPONS.shotgun.fanDeg * DEG;                      // ±10° fan, pellets evenly spaced + ±spread jitter
-      const gap = (2 * fan) / (pellets - 1);
-      for (let p = 0; p < pellets; p++) {
-        const a = -fan + p * gap + (rng ? rng.range(-spread, spread) : 0);
-        const c = Math.cos(a), s = Math.sin(a);
-        SP[0] = ox; SP[1] = oy; SP[2] = oz; SP[3] = ax * c - az * s; SP[4] = ax * s + az * c; SP[5] = speed; SP[6] = life; SP[7] = w;
-        this._spawn(kind);
-      }
-    } else {
-      const a = rng ? rng.range(-spread, spread) : 0;
+    const pellets = this._cfgPellets, gap = pellets > 1 ? (2 * fan) / (pellets - 1) : 0;
+    for (let q = 0; q < pellets; q++) {                              // pellets evenly spaced over the fan, ±spread jitter
+      let a = rng ? rng.range(-spread, spread) : 0;
+      if (pellets > 1) a += -fan + q * gap;
       const c = Math.cos(a), s = Math.sin(a);
       SP[0] = ox; SP[1] = oy; SP[2] = oz; SP[3] = ax * c - az * s; SP[4] = ax * s + az * c; SP[5] = speed; SP[6] = life; SP[7] = w;
+      if (lane) this._toLane(rng);
       this._spawn(kind);
     }
+    SP[SP_BOSS] = 0;
     squad.setFireVisual(k);
     SP[0] = ox; SP[1] = oy; SP[2] = oz;
-    this._flash(kind === K_SHOTGUN ? FLASH_SCALE_SHOTGUN : (kind === K_MINIGUN ? FLASH_SCALE_MINIGUN : 1));
+    if (this._w !== W_LASER) this._flash(kind === K_SHOTGUN ? FLASH_SCALE_SHOTGUN : (kind === K_MINIGUN ? FLASH_SCALE_MINIGUN : 1));   // 1.4.0: rifles beside a laser (weaponAdd): its draw budget
     this._shotCount++;
+  }
+
+  /** 1.4.0 minigun frame: SP's round, when it would pass the lane's far end (FRAME.z1, or the end of its reach when nearer)
+   *  outside x ± halfWidth, is re-aimed from its muzzle at a point of the lane drawn from ctx.rngShot. */
+  _toLane(rng) {
+    const ox = SP[0], oz = SP[2], dz = SP[4], reach = SP[5] * SP[6];
+    const d = oz - this._laneZ < reach ? oz - this._laneZ : reach;
+    if (!(d > 0)) return;
+    const hw = this._laneHW, lx = this._laneX;
+    if (!this._addOn && dz < -EPS) { const e = ox + SP[3] * d / -dz - lx; if (e <= hw && e >= -hw) return; }
+    const ex = lx + (rng ? rng.range(-hw, hw) : 0) - ox, l = Math.sqrt(ex * ex + d * d);
+    SP[3] = ex / l; SP[4] = -d / l;
   }
 
   /** Pool insert of SP (x, y, z, unit dirX, dirZ, speed, life, weight) as `kind`. Counts a drop when full. */
@@ -1273,6 +1394,7 @@ export class Weapons {
     // drone tracers start ≈ 2.7 m up and descend to bullet height over DRONE_DROP_M; boss-aimed tracers climb
     // (SP[SP_VY] > 0, WPN-9). Cosmetic only: hit tests are XZ.
     this._bvy[i] = kind === K_DRONE && y > FIRE.bullet.y ? -(y - FIRE.bullet.y) * speed / DRONE_DROP_M : SP[SP_VY];
+    this._bboss[i] = SP[SP_BOSS];
     return true;
   }
 
@@ -1286,6 +1408,7 @@ export class Weapons {
     this._bspd[i] = this._bspd[last]; this._blife[i] = this._blife[last];
     this._bw[i] = this._bw[last]; this._bage[i] = this._bage[last];
     this._bkind[i] = this._bkind[last];
+    this._bboss[i] = this._bboss[last];
   }
 
   /** Bullet integration + swept hit tests (ARCH §7 priority: zombie, boss, gate, crate; smallest t; ties → zombie). */
@@ -1301,7 +1424,8 @@ export class Weapons {
     const yMin = FIRE.bullet.y;
     const yMax = BOSS_TRACER_Y_MAX;
     const bx = this._bx, by = this._by, bz = this._bz, bdx = this._bdx, bdz = this._bdz, bvy = this._bvy;
-    const bspd = this._bspd, blife = this._blife, bage = this._bage, bkind = this._bkind;
+    const bspd = this._bspd, blife = this._blife, bage = this._bage, bkind = this._bkind, bboss = this._bboss;
+    const crowdOnly = this._policy !== null && this._policy.crowdOnly === true;   // 1.4.0: only the policy's bossOnly rounds test the boss
     let i = 0;
     while (i < this._n) {
       const spd = bspd[i];
@@ -1321,9 +1445,11 @@ export class Weapons {
       blife[i] -= dt;
       bage[i] += dt;
       const drone = bkind[i] === K_DRONE;
+      const bossOnly = bboss[i] === 1;                          // 1.4.0
       // road-frame sweep: the start is pushed back by this step's scroll so thin targets cannot tunnel
       SEG[0] = px; SEG[1] = pz + road; SEG[2] = nx; SEG[3] = nz;
-      const hit = this._sweep(zombies, boss, drone ? null : gates, drone ? null : pickups, BULLET_R);
+      const hit = bossOnly ? this._sweep(null, boss, null, null, BULLET_R, false)
+        : this._sweep(zombies, crowdOnly && !drone ? null : boss, drone ? null : gates, drone ? null : pickups, BULLET_R, true);
       if (hit !== H_NONE) {
         this._applyBulletHit(hit, i, zombies, boss, gates, pickups);
         this._free(i);
@@ -1336,17 +1462,19 @@ export class Weapons {
 
   /**
    * Swept segment test of SEG [x0, z0, x1, z1] inflated by `radius` against every target system; fills OUT_* and
-   * this._hx/_hz with the winner. Returns H_NONE | H_ZOMBIE | H_BOSS | H_GATE | H_CRATE. Ties go to the
-   * earlier system in that order. WPN-8: each target is asked through its typed query hitTestSeg(SEG, …) (ARCH §7,
-   * nothing boxed); a target without one gets hitTestSegment(x0, z0, x1, z1, …) with SEG boxed once per sweep.
+   * this._hx/_hz with the winner. Returns H_NONE | H_ZOMBIE | H_PROV | H_BOSS | H_GATE | H_CRATE (providers by ascending
+   * priority; prov false skips them). Ties go to the earlier system in that order. WPN-8: each target is asked through its
+   * typed query hitTestSeg(SEG, …) (ARCH §7, nothing boxed); a target without one gets hitTestSegment(x0, z0, x1, z1, …)
+   * with SEG boxed once per sweep.
    * `radius` is always a module constant (BULLET_R / ROCKET_RADIUS), so it is passed as the same tagged value.
    */
-  _sweep(zombies, boss, gates, pickups, radius) {
+  _sweep(zombies, boss, gates, pickups, radius, prov) {
     // broadphase (exact): skip the queries that cannot hit
     const za = SEG[1], zb = SEG[3];
     if (gates !== null && (za < zb ? za : zb) > this._gateReachZ) gates = null;
     if (!this._zombiesAlive) zombies = null;
-    if (zombies === null && boss === null && gates === null && pickups === null) return H_NONE;
+    const np = prov ? this._provN : 0;                            // 1.4.0
+    if (zombies === null && boss === null && gates === null && pickups === null && np === 0) return H_NONE;
     let boxed = false;
     let best = H_NONE, bestT = 2;
     if (zombies !== null) {
@@ -1354,6 +1482,14 @@ export class Weapons {
       if (this._zSeg) h = zombies.hitTestSeg(SEG, radius, OUT_Z);
       else { boxSeg(); boxed = true; h = zombies.hitTestSegment(SEGT[0], SEGT[1], SEGT[2], SEGT[3], radius, OUT_Z); }
       if (h) { best = H_ZOMBIE; bestT = OUT_Z.t; this._hx = OUT_Z.x; this._hz = OUT_Z.z; }
+    }
+    for (let p = 0; p < np; p++) {
+      const pv = this._prov[p];
+      if (pv.alive === 0) continue;
+      if (pv.hitTestSeg(SEG, radius, OUT_P) && OUT_P.t < bestT) {
+        best = H_PROV; bestT = OUT_P.t; this._hx = OUT_P.x; this._hz = OUT_P.z; this._hitProv = p;
+        OUT_PW.id = OUT_P.id; OUT_PW.x = OUT_P.x; OUT_PW.y = OUT_P.y; OUT_PW.z = OUT_P.z;
+      }
     }
     if (boss !== null) {
       let h;
@@ -1413,6 +1549,25 @@ export class Weapons {
       if (g) gates.applyHit(g.id, w * KIND_GATE[kind], OUT_G.x, OUT_G.y, OUT_G.z);
     } else if (hit === H_CRATE) {
       pickups.hit(OUT_C.id);
+    } else if (hit === H_PROV) {
+      // 1.4.0: the provider applies it (and the pierce down its column); the leftover is spent
+      this._prov[this._hitProv].applyHit(OUT_PW.id, w * this._profileDamage() * this.damageMult * KIND_DMG[kind], kind === K_DRONE ? 1 : this._pierce,
+        OUT_PW.x, OUT_PW.y, OUT_PW.z, 'bullet');
+    }
+  }
+
+  /** 1.4.0: rocket blasts / rail and laser lines on the live providers that offer them. */
+  _provCircle(x, z, r, dmg, cause) {
+    for (let p = 0; p < this._provN; p++) {
+      const pv = this._prov[p];
+      if (pv.alive !== 0 && typeof pv.damageInCircle === 'function') pv.damageInCircle(x, z, r, dmg, cause);
+    }
+  }
+
+  _provLine(x, z0, hw, dmg, cause, zEnd) {
+    for (let p = 0; p < this._provN; p++) {
+      const pv = this._prov[p];
+      if (pv.alive !== 0 && typeof pv.damageInLine === 'function') pv.damageInLine(x, z0, hw, dmg, cause, Infinity, zEnd);
     }
   }
 
@@ -1443,12 +1598,22 @@ export class Weapons {
     const x = squad.x;
     const z = squad.centerZ;                                         // "from the blob centre"
     let dx = 0, dz = -1;
-    if (this._aimOn && !this._aimYield) {
+    let reach = WEAPONS.rocket.maxRange, rad = 0, fly = 0;
+    if (this._frame(WEAPONS.rocket.id)) {
+      // 1.4.0: down the lane to z1, detonating on the first hit; with a target (tx, tz) it flies over everything but the
+      // boss and detonates there
+      fly = FRAME.tx === FRAME.tx && FRAME.tz === FRAME.tz ? 1 : 0;
+      const ax = (fly ? FRAME.tx : FRAME.x) - x, az = (fly ? FRAME.tz : FRAME.z1) - z;
+      const l = Math.sqrt(ax * ax + az * az);
+      if (l > EPS) { dx = ax / l; dz = az / l; if (l < reach) reach = l; }
+      rad = FRAME.radius;
+    } else if (this._aimOn && !this._aimYield) {
       const ax = V_AIM.x - x, az = V_AIM.z - z;
       const l = Math.sqrt(ax * ax + az * az);
       if (l > BOSSES.radius) { dx = ax / l; dz = az / l; }
     }
     const r = this._rn++;
+    this._rreach[r] = reach; this._rrad[r] = rad; this._rfly[r] = fly;
     this._rx[r] = x; this._ry[r] = ROCKET_LAUNCH_Y; this._rz[r] = z;
     this._rpx[r] = x; this._rpz[r] = z;
     this._rdx[r] = dx; this._rdz[r] = dz;
@@ -1467,6 +1632,7 @@ export class Weapons {
     this._rpx[r] = this._rpx[last]; this._rpz[r] = this._rpz[last];
     this._rdx[r] = this._rdx[last]; this._rdz[r] = this._rdz[last];
     this._rdist[r] = this._rdist[last]; this._rsmoke[r] = this._rsmoke[last]; this._rroll[r] = this._rroll[last];
+    this._rreach[r] = this._rreach[last]; this._rrad[r] = this._rrad[last]; this._rfly[r] = this._rfly[last];
   }
 
   /** Rocket flight: smoke trail, swept test (all four target kinds), detonation on contact or at maxRange. */
@@ -1502,7 +1668,9 @@ export class Weapons {
         }
       }
       SEG[0] = px; SEG[1] = pz + road; SEG[2] = nx; SEG[3] = nz;
-      const hit = this._sweep(zombies, boss, gates, pickups, ROCKET_RADIUS);
+      const hit = this._rfly[r] === 1 ? this._sweep(null, boss, null, null, ROCKET_RADIUS, false)   // 1.4.0
+        : this._sweep(zombies, boss, gates, pickups, ROCKET_RADIUS, true);
+      RAD[0] = this._rrad[r];
       if (hit !== H_NONE) {
         const gateId = hit === H_GATE && OUT_G.gate ? OUT_G.gate.id : -1;
         const crateId = hit === H_CRATE ? OUT_C.id : -1;
@@ -1510,7 +1678,7 @@ export class Weapons {
         this._freeRocket(r);
         continue;
       }
-      if (this._rdist[r] >= WEAPONS.rocket.maxRange) {
+      if (this._rdist[r] >= this._rreach[r]) {
         this._detonate(nx, nz, -1, -1);
         this._freeRocket(r);
         continue;
@@ -1531,14 +1699,17 @@ export class Weapons {
     const def = WEAPONS.rocket;
     const dmg = this.squadDps() * def.dpsSeconds;
     const gateW = def.gateHits * this._baseWeight();
-    const splash = def.splash;
+    const own = RAD[0] > 0;                                          // 1.4.0: a frame's splash
+    const splash = own ? RAD[0] : def.splash;
+    RAD[0] = 0;
     const zombies = ctx.zombies;
     if (zombies && dmg > 0) zombies.damageInCircle(x, z, splash, dmg, 'explosion');
+    if (this._provN > 0 && dmg > 0) this._provCircle(x, z, splash, dmg, 'explosion');
     const world = ctx.world;
     const boss = ctx.boss;
     if (boss && world && world.bossActive) {
       SEGL[0] = x; SEGL[1] = z; SEGL[2] = x; SEGL[3] = z;
-      if (this._bossLine(boss, ROCKET_SPLASH, OUT_LB)) boss.damage(dmg, gateW, x, BOSSES.coreY, z);
+      if (this._bossLine(boss, own ? splash : ROCKET_SPLASH, OUT_LB)) boss.damage(dmg, gateW, x, BOSSES.coreY, z);
     }
     const gates = ctx.gates;
     if (gates) {
@@ -1591,17 +1762,20 @@ export class Weapons {
   _fireRail(squad) {
     const ctx = this.ctx;
     const def = WEAPONS.railgun;
-    const x = squad.x;
-    const y = FIRE.bullet.y;
-    const z0 = FIRE.muzzleOffset[2];
-    const z1 = WORLD.spawnZ;
+    const framed = this._frame(def.id);                              // 1.4.0: down the frame from its z0
+    const x = framed ? FRAME.x : squad.x;
+    const y = framed ? squad.shooterPosition(0, V_POS).y : FIRE.bullet.y;
+    const z0 = framed ? FRAME.z0 : FIRE.muzzleOffset[2];
+    const z1 = framed ? FRAME.z1 : WORLD.spawnZ;
+    const zs = framed ? z0 : 0;
     const dmg = this.squadDps() * def.dpsSeconds;
     const gateW = def.gateHits * this._baseWeight();
     const zombies = ctx.zombies;
-    if (zombies && dmg > 0) zombies.damageInLine(x, 0, def.halfWidth, dmg, 'bullet');
+    if (zombies && dmg > 0) zombies.damageInLine(x, zs, def.halfWidth, dmg, 'bullet', Infinity, z1);
+    if (this._provN > 0 && dmg > 0) this._provLine(x, zs, framed && FRAME.halfWidth > 0 ? FRAME.halfWidth : def.halfWidth, dmg, 'bullet', z1);
     const world = ctx.world;
     const boss = ctx.boss;
-    SEGL[0] = x; SEGL[1] = 0; SEGL[2] = x; SEGL[3] = z1;
+    SEGL[0] = x; SEGL[1] = zs; SEGL[2] = x; SEGL[3] = z1;
     if (boss && world && world.bossActive && this._bossLine(boss, RAIL_HW, OUT_LB)) {
       boss.damage(dmg, gateW, OUT_LB.x, BOSSES.coreY, OUT_LB.z);
     }
@@ -1697,15 +1871,19 @@ export class Weapons {
     const dmg = (def.dpsMult * this.squadDps() / beams) * dt;
     const gateW = def.gateHitsPerSec * this._baseWeight() * dt;
     const hw = def.halfWidth;
-    const aim = this._aimOn;
+    const framed = this._frame(def.id);                              // 1.4.0: beams across the frame
+    const aim = this._aimOn && !framed;
     const zombies = ctx.zombies || null;
     const world = ctx.world;
     const boss = world && world.bossActive && ctx.boss ? ctx.boss : null;
     for (let b = 0; b < beams; b++) {
       const k = S >= beams ? Math.floor((b + 0.5) * S / beams) : b % S;
       squad.shooterPosition(k, V_POS);
-      const ox = V_POS.x, oy = V_POS.y, oz = V_POS.z;
-      let ex = ox, ez = WORLD.spawnZ, dx = 0, dy = 0, dz = -1, len = oz - WORLD.spawnZ;
+      let ox = V_POS.x, oz = V_POS.z;
+      const oy = V_POS.y;
+      if (framed) { ox = FRAME.x + FRAME.halfWidth * (2 * (b + 0.5) / beams - 1); oz = FRAME.z0; }
+      const zFar = framed ? FRAME.z1 : WORLD.spawnZ;
+      let ex = ox, ez = zFar, dx = 0, dy = 0, dz = -1, len = oz - zFar;
       let aimed = false;
       if (aim && !this._inYieldColumn(ox)) {
         const ax = V_AIM.x - ox, ay = BOSSES.coreY - oy, az = V_AIM.z - oz;
@@ -1722,7 +1900,7 @@ export class Weapons {
       if (zombies !== null && dmg > 0) {
         const lateral = ex - ox;
         if (!aimed || (lateral < hw && lateral > -hw)) {
-          zombies.damageInLine(ox, oz, hw, dmg, 'bullet', Infinity, aimed ? ez : WORLD.spawnZ);
+          zombies.damageInLine(ox, oz, hw, dmg, 'bullet', Infinity, aimed ? ez : zFar);
         } else {
           for (let s = 0; s < LASER_SLABS; s++) {
             const za = oz + (ez - oz) * (s / LASER_SLABS);
@@ -1734,6 +1912,7 @@ export class Weapons {
           }
         }
       }
+      if (this._provN > 0 && dmg > 0) this._provLine(ox, oz, hw, dmg, 'bullet', ez);
       SEGL[0] = ox; SEGL[1] = oz; SEGL[2] = ex; SEGL[3] = ez;
       if (boss !== null && this._bossLine(boss, LASER_HW, OUT_LB)) {
         boss.damage(dmg, gateW, OUT_LB.x, BOSSES.coreY, OUT_LB.z);

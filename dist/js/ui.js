@@ -25,6 +25,10 @@
 // and prewarm(): Promise (UI-19, lays out + paints every first-use screen behind #scr-boot; main awaits it
 // before hideBoot — hideBoot also runs it, holding the boot screen, when main did not).
 //
+// r8 (P7): the level types' UI (tile badges and the D21 ring, the briefing, per-type results, the enrage clock) and the HUD KIT,
+// a mode's generic HUD driven only by events (hud:* in, ui:anchorTap / ui:action out). ?typesPreview=1 draws those views with
+// the 1.4.0 stage map; what a level plays is unchanged.
+//
 // Layout reads (UI-21): never in the frame that wrote the DOM. Element sizes come from one ResizeObserver
 // (hint pill, shield pill, progress bar); the level grid's scroll target is read at the start of the next
 // update() (read-first phase); the screen fade restarts by itself when a screen goes display:none → shown.
@@ -42,8 +46,9 @@ import { clamp, ease, fmtCoins, fmtCompact, storage, hasHaptics } from './util.j
 import {
   STRINGS, HINTS, JUICE, LEVELS, BOSSES, UPGRADES, upgradeCost, PALETTE, RENDER, WEAPONS, GEAR, PICKUPS, SQUAD,
   DISTRICTS, DISTRICT_RULES, districtForLevel,
-  starNeed, eBossOf,                                    // round 7 (r7, explain:0): star thresholds on the results / title captions
+  starNeed, eBossOf, isFinale,                                    // round 7 (r7, explain:0): star thresholds on the results / title captions
   CODEX, GATE_RULES,                                    // round 7 (r7, teaching:5): the FIELD GUIDE and its gate chips
+  LEVEL_TYPES, levelTypeOf, eTargetOf, starThreeOf, nextLevelOfType, HORDE_GEN, NIGHT,   // r8 (P7)
 } from './data.js';
 
 // ---------------------------------------------------------------------------------------------
@@ -98,6 +103,7 @@ const CODEX_ICON = (() => {
     'pickup.duplicate': { k: 'item', id: 'coins' },
     'hud.progress': { k: 'bar' }, 'hud.bossbar': { k: 'bossbar' }, 'hud.stars': { k: 'stars', t: '★★★' }, 'hud.fire': { k: 'fire', t: 'FIRE' },
     'hud.shield': { k: 'item', id: 'gear.armor' }, 'hud.pills': { k: 'pill' },
+    'hold.supply': { k: 'crate' }, 'hold.surges': { k: 'bar' },
   };
   for (let s = 0; s < CODEX.sections.length; s++) {
     const sec = CODEX.sections[s];
@@ -106,6 +112,10 @@ const CODEX_ICON = (() => {
       if (sec.id === 'weapons' || sec.id === 'gear' || sec.id === 'troops') o[id] = { k: 'item' };
       else if (sec.id === 'zombies') o[id] = { k: 'zombie', z: id.slice(id.indexOf('.') + 1) };
       else if (sec.id === 'bosses') o[id] = { k: 'boss' };
+      else if (id.indexOf('type.') === 0) o[id] = { k: 'type', key: id.slice(5) };   // r8 (P7): the tile badge
+      // r8 V1F (LOOKS-2): THE HOLD and NIGHT rows wear their type's badge — all 11 fell through to the "?" key cap
+      else if (sec.id === 'hold') o[id] = { k: 'type', key: 'horde' };
+      else if (sec.id === 'night') o[id] = { k: 'type', key: 'night' };
     }
   }
   return Object.freeze(o);
@@ -288,16 +298,31 @@ const SW_BUILD_MSG = Object.freeze({ type: 'GET_BUILD' });             // sw.js 
 const SW_ASK_MS = 3000;                                               // DATA-MISSING: JUICE.ui.swBuildAskMs — how long a worker has to answer GET_BUILD (a waiting worker may need a cold start)
 const SW_ASK_PAGE = 0, SW_ASK_CAND = 1;                               // _swAsk slots: the page's own controller (at boot), the update candidate
 
+// r8 (P7): level types and the HUD kit. ?typesPreview=1 = the 1.4.0 stage map for the type views (data.levelTypeOf's `on`)
+const TYPES_PREVIEW_ON = Object.freeze({ horde: true, night: true });
+const BRIEF_HINT = 'mode.';            // GOT IT marks hint 'mode.<key>'
+const TYPE_ROW = 'type.';              // the Field Guide's LEVEL TYPES rows
+const ANCHOR_SLOP_PX = 8;              // DATA-MISSING: JUICE.ui.anchorSlopPx — a fingertip this far outside a bubble still hits it
+const SEGMENTS_MAX = 6;                // hud:progress cells (#progress-segs holds SEGMENTS_MAX − 1 dividers)
+const ENRAGE_WARN_S = 5;               // DATA-MISSING: JUICE.ui.enrageWarnS — the enrage clock turns red for its last seconds
+const ENRAGE_HINT = 'boss.enrage';
+const ENRAGE_HINT_OPTS = Object.freeze({ priority: true });
+const ANCHOR_CLASS = Object.freeze({ repair: 'anchor an-repair', rebuild: 'anchor an-repair', gap: 'anchor an-gap', busy: 'anchor an-gap', nokits: 'anchor an-nokits', info: 'anchor an-info' });
+const P_ANCHOR_TAP = { id: '' };       // reused ui:anchorTap / ui:action / engine.pause payloads
+const P_ACTION = { id: '' };
+const P_BRIEF = { brief: '' };
+
 // Screens (§10.1). Non-overlay screens are exclusive; overlays stack above them. Round 7 (r7, teaching:5): 'guide' (the
 // FIELD GUIDE) is an overlay like 'settings' — over the title or in place of the pause panel — and never a state
+// r8 (P7): 'brief' — the briefing card, the paused state 'brief' (engine.pause({ brief: key }))
 const SCREEN_EL_ID = Object.freeze({
   boot: 'scr-boot', title: 'scr-title', levels: 'scr-levels', shop: 'scr-shop', settings: 'scr-settings',
-  pause: 'scr-pause', complete: 'scr-complete', gameover: 'scr-gameover', endless: 'scr-endless', guide: 'scr-guide',
+  pause: 'scr-pause', complete: 'scr-complete', gameover: 'scr-gameover', endless: 'scr-endless', guide: 'scr-guide', brief: 'scr-brief',
 });
-const SCREEN_IDS = Object.freeze(['boot', 'title', 'levels', 'shop', 'settings', 'pause', 'complete', 'gameover', 'endless', 'guide']);
+const SCREEN_IDS = Object.freeze(['boot', 'title', 'levels', 'shop', 'settings', 'pause', 'complete', 'gameover', 'endless', 'guide', 'brief']);
 const OVERLAY_IDS = Object.freeze({ settings: true, guide: true });
 // screens behind which the HUD stays visible (§10.1 "HUD is visible in playing, paused and during complete/gameover")
-const HUD_UNDER = Object.freeze({ pause: true, complete: true, gameover: true, endless: true });
+const HUD_UNDER = Object.freeze({ pause: true, complete: true, gameover: true, endless: true, brief: true });
 // BACK returns to these states, anything else falls back to the title (§10.3)
 const BACK_STATES = Object.freeze(['title', 'complete', 'gameover']);
 const UPGRADE_IDS = Object.freeze(Object.keys(UPGRADES));
@@ -373,6 +398,30 @@ function isWeaponId(id) { return typeof id === 'string' && id.indexOf('weapon.')
  *  when the boss dies. */
 function isBossHint(id) { return typeof id === 'string' && (id.indexOf('boss') === 0 || id.indexOf('dodge.') === 0); }
 
+/** r8 (P7): a night level in NIGHT CITY is a BLACKOUT. */
+function isBlackout(L, type) { return !!type && type.night === true && NIGHT.blackout.districts.indexOf(districtForLevel(L).id) !== -1; }
+
+/** r8 (P7): css class of type `key`'s badge (.tt-<LEVEL_TYPES badge>; a BLACKOUT crescent; a night combo's chip); '' for none. */
+function typeBadgeClass(key, blackout) {
+  const t = LEVEL_TYPES[key];
+  if (!t || !t.badge) return '';
+  if (t.badge === 'crescent') return blackout ? 'tt tt-blackout' : 'tt tt-crescent';
+  return t.night ? 'tt tt-' + t.badge + ' tt-chip' : 'tt tt-' + t.badge;
+}
+
+/** r8 (P7): the name a type shows ('BLACKOUT' for a night level in NIGHT CITY). */
+function typeName(key, blackout) { return blackout ? STRINGS.types.blackout : STRINGS.modes[key]; }
+
+/** r8 (P7): writes a type badge onto `node` (class + --tt-color; hidden for no badge; keeps data-keep's class). Event time. */
+function paintBadge(node, key, blackout) {
+  if (!node) return;
+  const cls = typeBadgeClass(key, blackout);
+  const keep = node.dataset.keep || '';
+  node.className = cls ? (keep ? keep + ' ' + cls : cls) : keep;
+  if (cls) node.style.setProperty('--tt-color', hexCss(LEVEL_TYPES[key].color));
+  if (node.hidden === !!cls) node.hidden = !cls;
+}
+
 function prefersReducedMotion() {
   try {
     if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
@@ -389,6 +438,15 @@ function prefersDesktopSteerHint() {
     const fine = typeof window !== 'undefined' && typeof window.matchMedia === 'function' && !!window.matchMedia('(pointer: fine)').matches;
     const noTouch = typeof navigator !== 'undefined' && !!navigator && navigator.maxTouchPoints === 0;
     return fine || noTouch;
+  } catch (_) {
+    return false;
+  }
+}
+
+/** r8 (P7): ?typesPreview=1 (guarded: a sandboxed frame has no location). */
+function typesPreview() {
+  try {
+    return new URLSearchParams(location.search).get('typesPreview') === '1';
   } catch (_) {
     return false;
   }
@@ -498,7 +556,8 @@ function drawHandIcon(g) {
 }
 
 /** §12 settings defaults, used only when the save store is missing (stub harness). */
-const DEFAULT_SETTINGS = Object.freeze({ sound: 100, music: 70, haptics: true, quality: 'auto', reducedMotion: null, hcGates: false, largeText: false, sensitivity: 1 });
+const DEFAULT_SETTINGS = Object.freeze({ sound: 100, music: 70, haptics: true, quality: 'auto', reducedMotion: null, hcGates: false, largeText: false, sensitivity: 1,
+  nightBright: false, leftHanded: false });
 
 
 // ---------------------------------------------------------------------------------------------
@@ -650,6 +709,10 @@ export class UI {
     this._puSec = new Int16Array(MAX_PILLS);
     this._puOpa = new Int16Array(MAX_PILLS);
     this._puRings = [null, null, null];
+    // r8 (P7): a hud:pill's own icon, ring colour (−1: the item's) and theatre-clock countdown
+    this._puIcon = ['', '', ''];
+    this._puColor = new Int32Array(MAX_PILLS).fill(-1);
+    this._puHud = new Uint8Array(MAX_PILLS);
 
     // HUD: shield (positioned beside the projected count label every frame while plates > 0)
     this._plates = 0;
@@ -679,6 +742,7 @@ export class UI {
     this._bossOn = false;
     this._bossName = '';
     this._bossMini = false;
+    this._bossHold = false;
     this._bossTwins = false;
     this._bossFrac = 0.5; this._bossFrac = 1;
     this._bossPhase = 1;
@@ -735,10 +799,11 @@ export class UI {
     this._guideSeen = [];
     this._guideScrollTo = null;                     // read-first: the first NEW row to bring into view after an open
     this._guideNew = -1;                            // the "?" buttons' has-new state written (−1 = never)
+    this._guideHeads = null;                        // r8 (P7): the section headings (_buildGuide)
     this._codexMigrated = false;
     // r7 (teaching:3 / explain:3 / :6): boss archetype (boss:spawn), the boss bar's phase label flash, the letterbox dock
     this._bossArch = '';
-    this._bossPhaseLabel = '';                      // "PHASE 2" / "ENRAGED" pending / shown (in place of the name; css)
+    this._bossPhaseLabel = '';                      // "PHASE 2" / "PHASE 3" pending / shown (in place of the name; css)
     this._bossPhaseUntil = 0.5; this._bossPhaseUntil = 0;
     this._bossPhaseReq = false;
     this._lbDock = false;
@@ -747,6 +812,7 @@ export class UI {
     this._ro = null;
     this._hintBoxOk = false;
     this._hintBL = 0; this._hintBT = 0; this._hintBW = 0; this._hintBH = 0;
+    this._hintEdgeL = EDGE_PX[3]; this._hintEdgeR = EDGE_PX[1];   // r8 (P6): how far ui may slide it (see _placeHint)
     this._hintShift = 0;             // applied shift in SHIFT_STEP_PX units
     this._shiftStr = null;           // 'Npx 0px' strings for the css `translate` property
 
@@ -778,7 +844,8 @@ export class UI {
 
     // results (r7, explain:7: bonusStars / bonusSurv = the level bonus's star and survivor parts, split = the payload had them)
     this._cmp = { level: 1, stars: 0, coins: 0, survivors: 0, eBoss: 0, score: 0, kills: 0, gates: 0, piles: 0, boss: 0, bonus: 0,
-      bonusStars: 0, bonusSurv: 0, split: false };
+      bonusStars: 0, bonusSurv: 0, split: false,
+      typeKey: 'standard', eTarget: 0, metric: 0, modeKills: 0, bonusMode: 0 };   // r8 (P7)
     this._cmpFresh = false;
     this._cmpAnimating = false;
     this._cmpT = 0.5; this._cmpT = 0;
@@ -789,7 +856,7 @@ export class UI {
     this._cmpDrive = false;
     this._cmpBase = 0;               // save.data.coins − payout (the wallet before this run)
     this._cmpWalletFrom = 0;         // the header's value when the results appeared
-    this._fail = { level: 1, fraction: 0, coinsKept: 0 };
+    this._fail = { level: 1, fraction: 0, coinsKept: 0, cause: '', counted: true, hold: false, holdActions: 0, surgesCleared: 0, kills: 0, total: 0 };   // r8 (P7)
     this._end = { distance: 0, score: 0, best: 0, coins: 0, chunks: 0, newBest: false };
 
     // shop (r7, flow-coins:5: no shop coin tween any more — the one wallet model below drives the HUD, title and shop pills)
@@ -821,6 +888,7 @@ export class UI {
     this._onKeyDom = (e) => this._key(e);
     this._onWheelDom = (e) => this._wheel(e);          // r7 (layout:0): wheel forwarder (SCROLL_LIST_ID)
     this._onFirePointer = (e) => this._firePointer(e);
+    this._onActionPointer = (e) => this._actionPointer(e);
     this._onGamepad = () => { this._gpSeen = true; };
     // r7 (flow-coins:2): window capture pointerdown also stamps the press for the stale-click guard (Event.timeStamp shares
     // performance.now()'s time base; a browser without a usable stamp gives 0 and is never guarded)
@@ -865,6 +933,43 @@ export class UI {
     this._dbAnimMs = -1;                             // currentTime last written (ms, integer)
     this._puOn = false;              // #hud.pu-on (a power-up pill is visible: the banner drops a row)
     this._runDistrict = '';          // level:start district id (round 5)
+    this._dbKickColor = -1;          // r8 (P7): the type kicker's colour (−1: the district accent)
+    this._dbShownKickColor = -2;
+
+    // r8 (P7): the stage map of the type views (null: LEVEL_TYPES' flags), the run's type, the briefing (level:start asks, the
+    // next playing frame pauses), the enrage clock (0 hidden, 1 the clock, 2 the ENRAGED tag)
+    this._typesOn = null;
+    this._runETarget = 0;
+    this._briefKey = '';
+    this._briefReq = false;
+    this._clockAt = 0;               // ctx.time.levelTime at boss:fight
+    this._clockFor = 0;              // enrageAt (s)
+    this._clockShown = -1;
+    this._clockWarn = false;
+    this._clockReq = -1;             // the mode update() switches to (−1: none)
+    this._clockMode = 0;
+    // r8 (P7): the HUD KIT: listeners copy the reused payloads, update() writes on change
+    this._hkSegs = 0;                // hud:progress: 0 = the run's bar, else its cells
+    this._hkFilled = 0;
+    this._hkEnd = 'skull';
+    this._hkLabel = '';
+    this._hkProgDirty = false;
+    this._hkSegsShown = -1; this._hkEndShown = ''; this._hkLabelShown = null;
+    this._hcText = ''; this._hcDirty = false; this._hcShownOn = false; this._hcShownText = '';
+    this._anN = 0;
+    this._anId = []; this._anX = []; this._anY = []; this._anState = []; this._anLabel = [];
+    this._anDirty = false;
+    this._anEls = null;              // the pooled bubbles [{ root, label, x, y, cls, text }]
+    this._tapSeq = 0;                // input.tap.seq last hit-tested
+    this._ac = { on: false, id: '', icon: '', label: '', badge: -1, disabled: false };       // hud:action
+    this._acDirty = false;
+    this._acShown = { on: false, icon: '', label: '', badge: -2, disabled: false };
+    this._acClickUntil = 0;          // a bare click before this (_realNow) repeats the activation just made (held Enter)
+    this._acAnim = null;
+    this._hb = { text: '', kicker: '', color: -1, seconds: 0 };                              // hud:banner
+    this._hbReq = false; this._hbShown = false; this._hbUntil = 0;
+    this._hbShownKicker = null; this._hbShownColor = -2;
+    this._hlb = []; this._hlbNext = 0; this._hlbOn = false;   // hud:pill labels [{ node, text, x, y, seconds, until, req }]
 
     // round 5: service-worker update pill (index shell only; ARCH §15.4)
     this._swReg = null;
@@ -901,12 +1006,14 @@ export class UI {
     this._doc = doc;
     if (!doc) return this;
     this._buildTables();
+    this._typesOn = typesPreview() ? TYPES_PREVIEW_ON : null;
     this._cacheDom(doc);
     this._buildPills(doc);
     this._buildTicks(doc);
     this._buildShopCards(doc);
     this._buildSegments(doc);
     this._applyStaticText(doc);
+    this._buildTypeUi(doc);                       // r8 (P7)
     this._hideUnsupported();
     this._wireDom(doc);
     this._subscribe();
@@ -965,6 +1072,7 @@ export class UI {
     this._cancelAnim(this._bossRage); this._bossRage = null;
     this._cancelAnim(this._handAnim); this._handAnim = null;
     this._cancelAnim(this._dbAnim); this._dbAnim = null;
+    this._cancelAnim(this._acAnim); this._acAnim = null;
     this._swReg = null; this._swWaiting = null;
     if (this._swCheckTimer) { try { clearTimeout(this._swCheckTimer); } catch (_) { /* ignore */ } this._swCheckTimer = 0; }
     this._swAskEnd(SW_ASK_PAGE); this._swAskEnd(SW_ASK_CAND); this._swCand = null;
@@ -1042,6 +1150,13 @@ export class UI {
       // r7 (teaching:5): the NEW card and the FIELD GUIDE (its "?" buttons on the title and the pause panel); r7 (explain:3)
       newcard: g('newcard'), ncdIcon: null, ncdKicker: null, ncdName: null, ncdLine: null,
       guideList: g('guide-list'), btnGuide: g('btn-guide'), btnPauseGuide: g('btn-pause-guide'), levelsLegend: g('levels-legend'),
+      // r8 (P7): the briefing card, the HUD kit, legend line 2, the typed results lines, the two settings rows
+      briefBadge: g('brief-badge'), briefName: g('brief-name'), briefTagline: g('brief-tagline'), briefRows: g('brief-rows'), briefGoal: g('brief-goal'),
+      hudCounter: g('hud-counter'), hudAnchors: g('hud-anchors'), btnAction: g('btn-action'), actIcon: null, actLabel: null, actBadge: null,
+      hudBanner: g('hud-banner'), hbKicker: null, hbText: null, progressSegs: g('progress-segs'), bossClock: g('boss-clock'),
+      levelsLegend2: g('levels-legend2'), completeKicker: g('complete-kicker'), completeLine: g('complete-line'),
+      gameoverTitle: g('gameover-title'), gameoverTip: g('gameover-tip'),
+      setLeft: g('set-lefthand'), setNight: g('set-night'), rowNight: g('row-night'), playType: null, nextType: null,
     };
     try { if (el.districtBanner) el.dbText = el.districtBanner.querySelector('.db-text'); } catch (_) { el.dbText = null; }
     // r7 (explain:4): the big card's kicker ("NEW DISTRICT 2") above the name — created once (both shells share the markup)
@@ -1061,7 +1176,7 @@ export class UI {
       } catch (_) { el.ncdIcon = null; }
       if (el.ncdKicker) el.ncdKicker.textContent = STRINGS.codex.kicker;
     }
-    // r7 (teaching:3): the boss bar's name in two spans — the archetype, and the phase flash ("PHASE 2" / "ENRAGED"), shown
+    // r7 (teaching:3): the boss bar's name in two spans — the archetype, and the phase flash ("PHASE 2" / "PHASE 3"), shown
     // in place of the name while it flashes (#bossbar.phase-flash hides .bn-name, css; r7 fix: at every size, no separator)
     if (el.bossName) {
       el.bossName.textContent = '';
@@ -1217,9 +1332,10 @@ export class UI {
     this._cards = cards;
   }
 
-  /** Fills the two .seg controls from their data-options (labels from STRINGS.settings.*Options). */
+  /** Fills the .seg controls from their data-options (labels from STRINGS.settings.*Options, STRINGS.types.nightBright). */
   _buildSegments(doc) {
-    const segs = [[this._el.setQuality, STRINGS.settings.qualityOptions], [this._el.setSens, STRINGS.settings.sensitivityOptions]];
+    const segs = [[this._el.setQuality, STRINGS.settings.qualityOptions], [this._el.setSens, STRINGS.settings.sensitivityOptions],
+      [this._el.setNight, STRINGS.types.nightBright]];
     for (let s = 0; s < segs.length; s++) {
       const seg = segs[s][0], labels = segs[s][1];
       if (!seg) continue;
@@ -1262,7 +1378,7 @@ export class UI {
     aria(el.coins, STRINGS.aria.coins);
     // round 5: the title's update pill (sw.js v4); guarded so an older data.js without the key still boots
     const upd = STRINGS.update || null;
-    set(el.updText, upd && typeof upd.ready === 'string' ? upd.ready : 'Update ready — tap to reload');   // DATA-MISSING fallback: STRINGS.update.ready
+    set(el.updText, upd && typeof upd.ready === 'string' ? upd.ready : 'Update — tap to reload');   // DATA-MISSING fallback: STRINGS.update.ready
     aria(el.btnUpdate, upd && typeof upd.aria === 'string' ? upd.aria : 'Update ready. Reload to update the game');
     // round 7 (r7): the FIELD GUIDE's "?" buttons (title, pause panel) and the LEVELS skull legend (explain:3)
     aria(el.btnGuide, STRINGS.aria.guide); aria(el.btnPauseGuide, STRINGS.aria.guide);
@@ -1296,6 +1412,35 @@ export class UI {
       if (first && first.nodeType === 1 && first.classList && first.classList.contains('row-label')) first.textContent = rows[i][1];
       else if (first && first.nodeType === 3) first.nodeValue = rows[i][1];
       ctl.setAttribute('aria-label', rows[i][1]);
+    }
+  }
+
+  /**
+   * r8 (P7): the parts of the types' DOM (index.html holds it and its fixed copy) and the PLAY / NEXT type badges (their
+   * labels are textContent writes, so these go in after _applyStaticText).
+   */
+  _buildTypeUi(doc) {
+    const el = this._el;
+    const badge = (btn) => {
+      if (!btn) return null;
+      const b = doc.createElement('span'); b.dataset.keep = 'btn-tt'; b.className = 'btn-tt'; b.hidden = true; b.setAttribute('aria-hidden', 'true');
+      btn.appendChild(b);
+      return b;
+    };
+    el.playType = badge(el.btnPlay);
+    el.nextType = badge(el.btnNext);
+    const q = (n, s) => (n ? n.querySelector(s) : null);
+    el.actIcon = q(el.btnAction, '.act-icon'); el.actLabel = q(el.btnAction, '.act-label'); el.actBadge = q(el.btnAction, '.act-badge');
+    el.hbKicker = q(el.hudBanner, '.hb-kicker'); el.hbText = q(el.hudBanner, '.hb-text');
+    if (el.hudAnchors) {
+      this._anEls = [];
+      for (const root of el.hudAnchors.children) this._anEls.push({ root, label: root.lastChild, x: -1, y: -1, cls: '', text: null });
+    }
+    for (const node of doc.querySelectorAll('.hud-label')) this._hlb.push({ node, text: '', x: 0, y: 0, seconds: 0, until: 0, req: false });
+    // legend line 2: its chips wear the colours of the badges they explain
+    for (const key of ['horde', 'night']) {
+      const chip = q(el.levelsLegend2, '.lg-' + key + ' .tt');
+      if (chip) chip.style.setProperty('--tt-color', hexCss(LEVEL_TYPES[key].color));
     }
   }
 
@@ -1405,6 +1550,10 @@ export class UI {
       if (this._hintShown && w > 0 && hh > 0) {
         this._hintBL = h.offsetLeft; this._hintBT = h.offsetTop; this._hintBW = w; this._hintBH = hh;
         this._hintBoxOk = true;
+        // r8 (P6): beside the action button the slide stops at the band css keeps clear of it (--hint-l / --hint-r), not at the screen edge
+        const cs = el.hud && el.hud.classList.contains('action-on') ? getComputedStyle(h) : null;
+        this._hintEdgeL = cs ? Math.max(EDGE_PX[3], parseFloat(cs.left) || 0) : EDGE_PX[3];
+        this._hintEdgeR = cs ? Math.max(EDGE_PX[1], parseFloat(cs.right) || 0) : EDGE_PX[1];
       } else {
         this._hintBoxOk = false;
       }
@@ -1456,6 +1605,7 @@ export class UI {
     // round 6: FIRE answers on pointerdown (no wait for the release, and a thumb that slides off still fired); the
     // engine never steers from a pointerdown on a button, and the delegated click that follows is swallowed (_click)
     this._listen(el.btnFire, 'pointerdown', this._onFirePointer, false);
+    this._listen(el.btnAction, 'pointerdown', this._onActionPointer, false);   // r8 (P7): acts on its press, as FIRE
     // r7 (layout:0): a wheel anywhere in the app scrolls the current screen's list (passive: it never blocks scrolling)
     this._listen(el.app, 'wheel', this._onWheelDom, { passive: true });
     // r7 fix round 3: each fading list re-checks its edges when it scrolls (wheel, keys, touch, scrollIntoView)
@@ -1496,7 +1646,15 @@ export class UI {
     on('hint:show', (p) => { if (p) this.showHint(p.id, p.text, p); });   // r7: p carries hold / until / priority / event
     on('hint:release', (p) => { if (p) this._releaseHint(p.key); });      // r7 (teaching:0 B): the held hint's subject is resolved
     on('codex:new', (p) => this._onCodexNew(p));                          // r7 (teaching:5): the NEW card
-    on('boss:fight', () => { if (!this._bossMini) this._lbOn = false; });  // r7 (perf-render:7): the bars retract when the fight starts
+    on('boss:fight', (p) => this._onBossFight(p));                         // r7 (perf-render:7): the bars retract; r8 (P7): the enrage clock
+    on('boss:enrage', () => this._onBossEnrage());
+    // r8 (P7): the HUD KIT
+    on('hud:progress', (p) => this._onHudProgress(p));
+    on('hud:counter', (p) => { this._hcText = p.on ? p.text : ''; this._hcDirty = true; });
+    on('hud:anchors', (p) => this._onHudAnchors(p));
+    on('hud:action', (p) => { Object.assign(this._ac, p); this._acDirty = true; });
+    on('hud:banner', (p) => { this._hb.kicker = ''; this._hb.color = -1; Object.assign(this._hb, p); this._hbReq = true; });
+    on('hud:pill', (p) => this._onHudPill(p));
     on('level:complete', (p) => this._copyComplete(p));
     on('level:failed', (p) => this._copyFailed(p));
     on('endless:end', (p) => this._copyEndless(p));
@@ -1505,7 +1663,7 @@ export class UI {
       if (b !== this._blur) { this._blur = b; this._htmlDirty = true; }
     });
     on('settings:change', (p) => {
-      if (p && (p.key === 'largeText' || p.key === 'reducedMotion' || p.key === 'hcGates')) this._htmlDirty = true;
+      if (p && (p.key === 'largeText' || p.key === 'reducedMotion' || p.key === 'hcGates' || p.key === 'leftHanded')) this._htmlDirty = true;
     });
     on('error', (p) => {
       if (!p) return;
@@ -1553,6 +1711,7 @@ export class UI {
       cl.toggle('reduced-motion', reduced);
       cl.toggle('large-text', !!s.largeText);
       cl.toggle('hc-gates', !!s.hcGates);
+      cl.toggle('left-handed', !!s.leftHanded);   // r8 (P7)
       cl.toggle('blur', this._blur);
     } catch (_) { /* ignore */ }
     this._coinPosDirty = true;
@@ -1747,12 +1906,16 @@ export class UI {
     for (let i = 0; i < ids.length; i++) { const id = ids[i]; steps.push(() => { this._iconUrl(id); return null; }, 1); }
     // round 6: the FIRE button's larger pictograms (one per weapon), encoded at boot too
     for (let i = 0; i < FIRE_WEAPON_IDS.length; i++) { const id = FIRE_WEAPON_IDS[i]; steps.push(() => { this._fireIconUrl(id); return null; }, 1); }
+    // r8 (P7): the 1.4.0 icon row (hud:action, hud:pill)
+    const row2 = RENDER.icons && RENDER.icons.row2 ? RENDER.icons.row2 : [];
+    for (let i = 0; i < row2.length; i++) { const id = row2[i]; steps.push(() => { this._iconUrl(id); return null; }, 1); }
     steps.push(() => {
       const c = this._cmp;
       // one earned + two empty stars: both star images get rastered. Round 7 (r7): a four-digit "Earned +1,340" (the comma),
       // the split ★ / Survivors chips and the survivors line with its ★★ / ★★★ thresholds, as the real results lay out
       c.level = 1; c.stars = 1; c.coins = 1340; c.survivors = 20; c.eBoss = 140; c.kills = 120; c.gates = 60; c.piles = 30; c.boss = 40; c.bonus = 20;
       c.bonusStars = 15; c.bonusSurv = 5; c.split = true;
+      c.typeKey = 'horde'; c.eTarget = 140; c.metric = 20; c.modeKills = 11642; c.bonusMode = 10; c.score = 48210;   // r8 (P7): as a Horde clear
       this._cmpFresh = false;
       this._enterComplete();
       this._cmpAnimating = false;
@@ -1763,13 +1926,15 @@ export class UI {
       return [S.complete];
     }, W);
     // r7: a generated level's game over (L2), so its "New road each retry" note rasters too (_prewarmRestore resets it)
-    steps.push(() => { this._fail.level = 2; this._fail.coinsKept = 1234; this._fillGameover(); return [S.gameover]; }, W);
+    // r8 (P7): with the coaching line
+    steps.push(() => { this._fail.level = 2; this._fail.coinsKept = 1234; this._fail.counted = false; this._fillGameover(); return [S.gameover]; }, W);
     steps.push(() => { this._fillEndless(); return [S.endless]; }, W);
     steps.push(() => { this._fillLevels(false); return [S.levels]; }, W);
     for (let i = 0; i < UPGRADE_IDS.length; i++) { const id = UPGRADE_IDS[i]; steps.push(() => { this._drawCardIcon(id); return null; }, 1); }
     steps.push(() => { this._fillShop(); return [S.shop]; }, W);
     steps.push(() => { this._syncSettings(); return [S.settings]; }, W);
     steps.push(() => { this._fillPauseControls(); return [S.pause]; }, W);   // r7: with its controls line
+    steps.push(() => { this._briefKey = 'horde'; this._fillBrief(); return [S.brief]; }, W);   // r8 (P7)
     // r7 (teaching:5): the FIELD GUIDE — every row built and filled (its first open rasters 50 rows, icons and the fallback
     // glyphs ★ ← → that the game fonts lack), each row drawn met so every icon / gate chip rasters now; _prewarmRestore
     // resets the rows, so the first real open fills them from the save
@@ -1777,7 +1942,7 @@ export class UI {
     // round 3: the title (the logo's six drop-shadow filters, the PLAY ring) is the first screen after boot — warm its
     // raster too. Sample caption / coins only: _fillTitle() would spend the one-time volatile-save caption
     steps.push(() => {
-      if (el.titleCaption) el.titleCaption.textContent = STRINGS.title.caption(1, 2, starNeed(eBossOf(1), 3));   // r7: with the ★★★ goal
+      if (el.titleCaption) el.titleCaption.textContent = STRINGS.title.caption(1, 2, starNeed(eBossOf(1), 3, 1));   // r7: with the ★★★ goal
       if (el.titleCoinsValue) el.titleCoinsValue.textContent = fmtCoins(12345);   // r7: full numbers with a comma (_prewarmRestore re-syncs the pill)
       return [S.title];
     }, W);
@@ -1792,8 +1957,11 @@ export class UI {
       const a = this._prewarmBossAnims;
       a.push(this._animate(el.bossbar, KF_SLIDE_DOWN, T_BOSS_IN), this._animate(el.letterbox, KF_LB_TOP, T_LETTERBOX),
         this._animate(el.letterboxBottom, KF_LB_BOTTOM, T_LETTERBOX), this._animate(el.namecard, KF_POP_IN, T_NAMECARD));
+      this._setClock(1);                            // r8 (P7): the enrage clock, red
+      if (el.bossClock) { el.bossClock.textContent = this._secs[4]; el.bossClock.classList.add('warn'); }
       return [el.hud, el.bossbar, el.namecard, el.letterbox, el.letterboxBottom];
     }, W);
+    steps.push(() => this._prewarmHudKit(), W);   // r8 (P7)
     steps.push(() => {
       if (el.hintText) el.hintText.textContent = HINTS.shoot || '';
       if (el.hintHand) el.hintHand.hidden = false;
@@ -1839,6 +2007,20 @@ export class UI {
     return steps;
   }
 
+  /** r8 (P7): the HUD kit in one boot surface through its own writers (_prewarmRestore takes it down the same way). */
+  _prewarmHudKit() {
+    const w = this._appW, y = this._appH * 0.7, T = 'NO KITS';
+    this._onHudProgress({ variant: 'segments', segments: 3, filled: 1, endIcon: 'barricade', label: '' });
+    this._hcText = '1,240';
+    this._onHudAnchors({ n: 3, list: [{ id: 0, x: w * 0.25, y, state: 'repair', label: T }, { id: 1, x: w * 0.5, y, state: 'gap', label: T }, { id: 2, x: w * 0.75, y, state: 'nokits', label: T }] });
+    Object.assign(this._ac, { on: true, icon: 'kit', label: T, badge: 3 });
+    Object.assign(this._hb, { text: T, kicker: T, seconds: 1 });
+    this._hbReq = true;
+    this._onHudPill({ id: 'l', text: T, x: w / 2, y, seconds: 1 });
+    this._syncHudProgress(); this._syncCounter(); this._syncAnchors(); this._syncAction(); this._updateHudBanner(0); this._updateHudLabels(0);
+    return [this._el.hud];
+  }
+
   /** r7 (teaching:5): the NEW card's prewarm sample — the longest card line, an item pictogram and its accent. */
   _prewarmNewCard() {
     const el = this._el;
@@ -1874,7 +2056,8 @@ export class UI {
     this._cmp.stars = 0; this._cmp.coins = 0;
     // round 7 (r7): the sample results / game-over fields, and the title pill's sample text (the wallet rewrites every pill)
     this._cmp.eBoss = 0; this._cmp.bonusStars = 0; this._cmp.bonusSurv = 0; this._cmp.split = false;
-    this._fail.level = 1; this._fail.coinsKept = 0;
+    Object.assign(this._cmp, { typeKey: 'standard', eTarget: 0, metric: 0, modeKills: 0, bonusMode: 0, score: 0 });   // r8 (P7)
+    this._fail.level = 1; this._fail.coinsKept = 0; this._fail.counted = true;
     this._coinShown = -1;
     if (el.bnName) el.bnName.textContent = this._bossName;
     if (el.hintText) el.hintText.textContent = '';
@@ -1900,6 +2083,10 @@ export class UI {
     this._hintTone = '';
     if (el.ncdIcon) el.ncdIcon.dataset.id = '';
     if (this._guideRows) { for (const id in this._guideRows) { const r = this._guideRows[id]; r.state = ''; r.tag.hidden = true; } }
+    // r8 (P7): the enrage clock and the HUD kit samples
+    this._setClock(0);
+    this._hkSegs = 0; this._hkEnd = 'skull'; this._hcText = ''; this._anN = 0; this._ac.on = false;
+    this._syncHudProgress(); this._syncCounter(); this._syncAnchors(); this._syncAction(); this._hideHudBanner(); this._updateHudLabels(1e9);
   }
 
   /**
@@ -2060,6 +2247,7 @@ export class UI {
       case 'complete': this._enterComplete(); break;
       case 'gameover': this._fillGameover(); break;
       case 'endless': this._fillEndless(); break;
+      case 'brief': this._fillBrief(); break;               // r8 (P7)
       default: break;
     }
     if (target === 'complete' || target === 'gameover' || target === 'endless') {
@@ -2077,7 +2265,8 @@ export class UI {
     // the next update(), when style is clean, instead of flushing style + layout inside this frame
     const shown = target === null ? this._el.hud : screens[target];
     if (target !== prev) this._focusPending = target === null ? this._el.app : (shown || null);
-    if (target !== null && target !== 'pause' && !overlay) this._hintQueueClear(true);   // UI-25: quit / results / menus (not the overlays over pause)
+    // UI-25: quit / results / menus (not the overlays over pause; r8: nor the briefing, whose run goes on after GOT IT)
+    if (target !== null && target !== 'pause' && target !== 'brief' && !overlay) this._hintQueueClear(true);
 
     this._coinPosDirty = true;
     this._puPosDirty = true;
@@ -2333,15 +2522,28 @@ export class UI {
     return out;
   }
 
-  /** Debug overlay text (engine, 4 Hz; multi-line). */
+  /** Debug overlay text (engine, 4 Hz; multi-line). r8 (P7): + the crowd line while a crowd runs. */
   setDebugText(text) {
     const panel = this.debugPanel;
     if (!panel) return;
-    const t = typeof text === 'string' ? text : String(text);
+    let t = typeof text === 'string' ? text : String(text);
+    const crowd = this.ctx.crowd;
+    if (crowd && crowd.active) t += this._crowdDebugLine(crowd);
     if (t === this._debugText) return;
     this._debugText = t;
     if (panel.hidden && this.ctx.config && this.ctx.config.debug) panel.hidden = false;
     panel.textContent = t;
+  }
+
+  /**
+   * r8 (P7): the crowd line (alive, waiting + queued, drawn cap, LOD drawn, carpet front, tick A+B) and, with a hold, its focus
+   * level, the threat per surge (D29) and the counted actions. Debug only, 4 Hz.
+   */
+  _crowdDebugLine(crowd) {
+    const s = crowd.stats(), d = s.drawn, h = this.ctx.hold, v = h && h.active ? h.botView : null;
+    const th = (i) => (v.eased[i] ? HORDE_GEN.firstMeet.threat : 1);
+    return `crowd alive ${s.alive} | wait ${s.waiting}+${s.queued} | cap ${s.governorCap} | lod ${d[0]}/${d[1]}/${d[2]} | carpet ${s.carpetFront.toFixed(1)} | tick ${s.tickA.toFixed(2)}+${s.tickB.toFixed(2)} ms`
+      + (v ? ` | focus ${v.focusLevel} | threat ${th(0)}/${th(1)}/${th(2)} | acts ${v.holdActions}` : '') + '\n';
   }
 
   /** RESET SAVE: the first tap arms "TAP AGAIN TO CONFIRM" for 3 s; a second tap at least JUICE.ui.confirmMinS
@@ -2409,7 +2611,7 @@ export class UI {
       case 'levels': return 'levels';
       case 'shop': return 'shop';
       case 'playing': return null;
-      case 'paused': return 'pause';
+      case 'paused': return data && data.brief ? 'brief' : 'pause';   // r8 (P7)
       case 'complete': return (data ? !!data.endless : this._lastCompleteEndless) ? 'endless' : 'complete';
       case 'gameover': return 'gameover';
       default: return this._current;
@@ -2474,7 +2676,13 @@ export class UI {
       c.split = Number.isFinite(b.bonusStars) && Number.isFinite(b.bonusSurvivors);
       c.bonusStars = c.split ? b.bonusStars | 0 : 0;
       c.bonusSurv = c.split ? b.bonusSurvivors | 0 : 0;
+      c.bonusMode = b.bonusMode | 0;                // r8 (P1T): LINE HELD, inside b.bonus
     }
+    // r8 (P7): the type, what the stars counted, the hold's kills
+    c.typeKey = p.typeKey || 'standard';
+    c.eTarget = p.eTarget > 0 ? p.eTarget : c.eBoss;
+    c.metric = Number.isFinite(p.metric) ? p.metric : c.survivors;
+    c.modeKills = p.stat ? p.stat.kills | 0 : 0;
     this._lastCompleteEndless = false;
   }
 
@@ -2484,6 +2692,15 @@ export class UI {
     if (Number.isFinite(p.level)) f.level = p.level;
     if (Number.isFinite(p.fraction)) f.fraction = p.fraction;
     if (Number.isFinite(p.coinsKept)) f.coinsKept = p.coinsKept;
+    // r8 (P7): the cause, whether the fail counted (D30) and the hold's report (no stat: lost before the barricade, it reads as a run)
+    const s = p.stat;
+    f.cause = p.cause || '';
+    f.counted = p.counted !== false;
+    f.hold = !!s && p.base === 'horde';
+    f.holdActions = s ? s.holdActions | 0 : 0;
+    f.surgesCleared = s ? s.surgesCleared | 0 : 0;
+    f.kills = s ? s.kills | 0 : 0;
+    f.total = s ? s.total | 0 : 0;                  // the hold's unit total ("x OF y"), when the mode reports it
   }
 
   _copyEndless(p) {
@@ -2551,7 +2768,9 @@ export class UI {
     // round-3 FTUE: the level's best survivors before this run (−1 = never cleared), so the results line can name a new best
     const d0 = this._saveData();
     const r0 = !this._runEndless && d0 && d0.levels ? d0.levels[this._runLevel] : null;
-    this._prevBest = r0 && Number.isFinite(r0.bestSurvivors) ? r0.bestSurvivors : -1;
+    // r8 (P7, D21): only a best earned in this run's type compares
+    const t0 = p.typeKey || 'standard';
+    this._prevBest = r0 && Number.isFinite(r0.bestSurvivors) && (typeof r0.t === 'string' && r0.t ? r0.t : 'standard') === t0 ? r0.bestSurvivors : -1;
     // progress ticks: special deliveries (crates, gate events with an item lane) at at/length (§10.3)
     let n = 0;
     const script = p.script;
@@ -2595,14 +2814,35 @@ export class UI {
     this._vigOn = false;
     this._hudResetPending = true;
     const save = this.ctx.save;
+    // r8 (P7): the HUD kit starts over (a hold's road ends at the barricade) and the clock goes. The first run of a type asks for
+    // the briefing: on the level's own stage type only (never a ?type= override), and a ?debug=1 run (smoke, the harness) plays
+    // on unless ?typesPreview=1 asks for it. The type's Field Guide row is met
+    const key = p.typeKey || 'standard', cfg = this.ctx.config;
+    this._runETarget = p.eTarget > 0 ? p.eTarget : 0;
+    this._hkSegs = 0; this._hkFilled = 0; this._hkLabel = '';
+    this._hkEnd = p.finale === 'hold' ? 'barricade' : 'skull';
+    this._hkProgDirty = true;
+    this._hcText = ''; this._hcDirty = true;
+    this._anN = 0; this._anDirty = true;
+    this._ac.on = false; this._acDirty = true;
+    this._hbReq = false; this._hbUntil = 0;
+    for (let i = 0; i < this._hlb.length; i++) { const s = this._hlb[i]; s.req = false; s.node.hidden = true; }
+    this._hlbOn = false;
+    this._clockReq = 0;
+    this._briefReq = !this._runEndless && !!STRINGS.types.brief[key] && levelTypeOf(this._runLevel, null, this._typesOn).key === key
+      && !(cfg && cfg.debug && !this._typesOn) && !!save && !save.hintDone(BRIEF_HINT + key);
+    if (this._briefReq) this._briefKey = key;
+    const row = SEEN_K[TYPE_ROW + key];
+    if (!this._runEndless && row && save && !save.hintDone(row)) this._markHint(row);
     const coins = save && save.data ? save.data.coins : 0;
     this._cmpDrive = false;                         // r7 (flow-coins:6): the run's coins:change drive the header again
     this._coinFrom = coins; this._coinTo = coins; this._coinValue = coins; this._coinT = 0; this._coinTween = true;
     this._coinTotal = coins; this._coinHold = false;
   }
 
-  /** weapon:start / gear:start with a finite duration: add a pill or refresh it (a new weapon replaces the old one). */
-  _pillAdd(id, duration) {
+  /** weapon:start / gear:start with a finite duration: add a pill or refresh it (a new weapon replaces the old one). r8 (P7):
+   *  hud:pill too: its `icon`, ring `color` (0xRRGGBB) and `hud` (counts on the theatre clock). */
+  _pillAdd(id, duration, icon, color, hud) {
     if (typeof id !== 'string' || !(duration > 0) || !Number.isFinite(duration)) return;
     let slot = -1;
     const weapon = isWeaponId(id);
@@ -2621,9 +2861,13 @@ export class UI {
     }
     this._puId[slot] = id;
     this._puDur[slot] = duration;
-    this._puStart[slot] = this._clock;
+    this._puHud[slot] = hud ? 1 : 0;
+    this._puIcon[slot] = icon || id;
+    this._puColor[slot] = color >= 0 ? color : -1;
+    this._puStart[slot] = hud ? this._tclock : this._clock;
     this._puLeft[slot] = duration;
     this._puFlash[slot] = 1;
+    this._puShownId[slot] = '';                     // r8: a refreshed slot re-reads its icon / ring
     this._puPosDirty = true;
   }
 
@@ -2640,6 +2884,7 @@ export class UI {
       this._puStart[i] = this._puStart[i + 1];
       this._puLeft[i] = this._puLeft[i + 1];
       this._puFlash[i] = this._puFlash[i + 1];
+      this._puHud[i] = this._puHud[i + 1]; this._puIcon[i] = this._puIcon[i + 1]; this._puColor[i] = this._puColor[i + 1];
     }
     this._puCount--;
     this._puId[this._puCount] = '';
@@ -2652,6 +2897,7 @@ export class UI {
     this._bossName = typeof p.name === 'string' ? p.name : '';
     this._bossArch = typeof p.archetype === 'string' ? p.archetype : '';   // r7 (teaching:3): the name card's tagline
     this._bossMini = !!p.mini;
+    this._bossHold = !!p.hold;                      // r8 (P6): a hold's boss: no letterbox, its own tagline
     this._bossTwins = !!p.twins;
     this._bossFrac = 1;
     this._bossPhase = 1;
@@ -2664,7 +2910,7 @@ export class UI {
   _onBossIntro(p) {
     if (this._bossMini) return;                     // mini-bosses: no letterbox, no name card (boss:intro is still emitted)
     if (p && typeof p.name === 'string' && p.name) this._bossName = p.name;
-    this._lbOn = true;
+    this._lbOn = !this._bossHold;
     this._ncPending = true;
   }
 
@@ -2672,25 +2918,290 @@ export class UI {
    *  cinematic (slow-mo, collapse) of a campaign boss; the results screen hides them, level:start clears them. */
   _onBossDead() {
     this._bossHideAt = this._tclock + BOSS_OUT_S;
-    this._lbOn = !this._bossMini && !this._runEndless;
+    this._lbOn = !this._bossMini && !this._bossHold && !this._runEndless;
     this._ncUntil = 0;
     this._ncPending = false;
+    this._clockReq = 0;                             // r8 (P7): the enrage clock / tag leaves with the fight
     // r7 (teaching:3): the fight's lessons are moot once the boss is dead — a queued "ENRAGED! …" showed over the collapse.
     // They stay un-marked (unless already read), so the next boss teaches them
     for (let i = this._hqLen - 1; i >= 0; i--) if (isBossHint(this._hqId[i])) this._hintQueueRemove(i);
     if (this._hintShown && isBossHint(this._hintId)) { this._hintCut = false; this._hintHideReq = true; }
   }
 
-  /** boss:phase → the bar's colour (10 Hz block) and (r7, teaching:3) a 1.5 s "PHASE 2" / "ENRAGED" in place of its name. */
+  /** boss:phase → the bar's colour (10 Hz block) and (r7, teaching:3) a 1.5 s "PHASE 2" / "PHASE 3" in place of its name
+   *  (r8 V1F, LOOKS-1: phase 3 flashed "ENRAGED", the word of the enrage clock's tag beside the same bar). */
   _onBossPhase(p) {
     if (!p) return;
     const n = p.phase | 0;
     this._bossPhase = n;
     this._bossDirty = true;
     if (n < 2) return;
-    const B = STRINGS.boss;
-    this._bossPhaseLabel = (n >= 3 && B.enraged ? B.enraged : B.phase(n));   // event time
+    this._bossPhaseLabel = STRINGS.boss.phase(n);   // event time
     this._bossPhaseReq = true;
+  }
+
+  /** boss:fight: r7 (perf-render:7) the bars retract; r8 (P7) `enrageAt` starts the enrage clock on the level clock (it stops with
+   *  the game and slows with a slow-mo, like the boss's own time). Campaign bosses only. */
+  _onBossFight(p) {
+    if (this._bossMini) return;
+    this._lbOn = false;
+    if (this._runEndless || !(p && p.enrageAt > 0)) return;
+    this._clockAt = this.ctx.time.levelTime;
+    this._clockFor = p.enrageAt;
+    this._clockReq = 1;
+  }
+
+  /** boss:enrage: the ENRAGED tag replaces the clock; the first time ever, its lesson (naming a stored weapon when one is stored). */
+  _onBossEnrage() {
+    if (this._bossMini || this._runEndless) return;
+    this._clockReq = 2;
+    const save = this.ctx.save, w = this.ctx.weapons;
+    if (save && !save.hintDone(ENRAGE_HINT)) this.showHint(ENRAGE_HINT, HINTS[ENRAGE_HINT](w ? w.storedCount : 0), ENRAGE_HINT_OPTS);
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // r8 (P7) — the HUD KIT, a mode's generic HUD (ARCH §8). Listeners copy the reused payloads; update() writes on change.
+  //   hud:progress { variant 'run' | 'segments', segments 1–6, filled, endIcon 'skull' | 'barricade' | 'none', label }
+  //   hud:counter  { on, text }
+  //   hud:anchors  { n ≤ 6, list [{ id, x, y (CSS px of #app), state, label }] } → a tap in a bubble: ui:anchorTap { id }
+  //   hud:action   { on, id, icon, label, badge (−1 none), disabled } → ui:action { id }
+  //   hud:banner   { text, kicker, color, seconds (≤ 0 hides) }
+  //   hud:pill     { id, icon, seconds (≤ 0 removes), color } a timer pill, or with `text`, x, y a short label at that point
+  // -------------------------------------------------------------------------------------------
+
+  _onHudProgress(p) {
+    this._hkSegs = p.variant === 'segments' ? clamp(p.segments | 0, 1, SEGMENTS_MAX) : 0;
+    this._hkFilled = p.filled || 0;
+    if (p.endIcon) this._hkEnd = p.endIcon;
+    this._hkLabel = p.label || '';
+    this._hkProgDirty = true;
+    this._progDirty = true;
+  }
+
+  _onHudAnchors(p) {
+    const list = p.list, n = Math.min(list.length, p.n >= 0 ? p.n : list.length, this._anEls ? this._anEls.length : 0);
+    for (let i = 0; i < n; i++) {
+      const a = list[i];
+      this._anId[i] = a.id; this._anX[i] = a.x; this._anY[i] = a.y; this._anState[i] = a.state || ''; this._anLabel[i] = a.label || '';
+    }
+    this._anN = n;
+    this._anDirty = true;
+  }
+
+  _onHudPill(p) {
+    if (p.text) {                                   // a label: the next slot of the pool, written by _updateHudLabels
+      const s = this._hlb[this._hlbNext];
+      this._hlbNext = (this._hlbNext + 1) % this._hlb.length;
+      s.text = p.text; s.x = p.x; s.y = p.y; s.seconds = p.seconds; s.req = true;
+      this._hlbOn = true;
+    } else if (p.seconds > 0) this._pillAdd(p.id, p.seconds, p.icon, p.color, true);
+    else this._pillRemove(p.id);
+  }
+
+  /** hud:pill labels per frame (theatre clock): a new one pops in at its point, an old one hides. */
+  _updateHudLabels(tnow) {
+    let on = false;
+    for (let i = 0; i < this._hlb.length; i++) {
+      const s = this._hlb[i];
+      if (s.req) {
+        s.req = false;
+        s.node.textContent = s.text;
+        s.node.style.left = this._px[clamp(Math.round(s.x), 0, PX_STEPS - 1)];
+        s.node.style.top = this._px[clamp(Math.round(s.y), 0, PX_STEPS - 1)];
+        s.until = tnow + s.seconds;
+        s.node.hidden = false;
+        this._animate(s.node, KF_POP_IN, T_NAMECARD);
+      }
+      if (s.node.hidden) continue;
+      if (tnow >= s.until) s.node.hidden = true; else on = true;
+    }
+    this._hlbOn = on;
+  }
+
+  /** The progress bar's shape (hud:progress; level:start resets it): label, dividers at k / cells, end icon. Endless keeps its metres
+   *  and mini-boss skull. */
+  _syncHudProgress() {
+    this._hkProgDirty = false;
+    const el = this._el;
+    const label = this._runEndless ? this._hkLabelShown : this._hkLabel || STRINGS.hud.level(this._runLevel);   // event time
+    if (label !== this._hkLabelShown) { this._hkLabelShown = label; if (el.progressLabel) el.progressLabel.textContent = label; }
+    const segs = this._hkSegs;
+    if (segs !== this._hkSegsShown && el.progressSegs) {
+      this._hkSegsShown = segs;
+      const ds = el.progressSegs.children;
+      for (let i = 0; i < ds.length; i++) {
+        ds[i].hidden = i >= segs - 1;
+        if (!ds[i].hidden) ds[i].style.left = this._pct[Math.round((i + 1) / segs * PCT_STEPS)];
+      }
+      el.progressSegs.hidden = segs <= 1;
+      el.progressLabel.parentNode.classList.toggle('segments', segs > 0);
+    }
+    const sk = el.progressSkull;
+    if (this._hkEnd !== this._hkEndShown && sk) {
+      this._hkEndShown = this._hkEnd;
+      sk.classList.toggle('barricade', this._hkEnd === 'barricade');
+      if (!this._runEndless) { this._skullShown = this._hkEnd !== 'none'; sk.hidden = !this._skullShown; }
+    }
+  }
+
+  /** hud:counter: the line under the bar (#hud.counter-on moves the power-up row down, css). */
+  _syncCounter() {
+    this._hcDirty = false;
+    const el = this._el, n = el.hudCounter, on = !!this._hcText;
+    if (!n) return;
+    if (on && this._hcText !== this._hcShownText) { this._hcShownText = this._hcText; n.textContent = this._hcText; }
+    if (on === this._hcShownOn) return;
+    this._hcShownOn = on;
+    n.hidden = !on;
+    el.hud.classList.toggle('counter-on', on);
+    this._puPosDirty = true;
+  }
+
+  /** hud:anchors: the pooled bubbles, class by state (none: hidden; unknown: 'info'), label, position. */
+  _syncAnchors() {
+    this._anDirty = false;
+    const els = this._anEls;
+    if (!els) return;
+    for (let i = 0; i < els.length; i++) {
+      const e = els[i];
+      const st = i < this._anN ? this._anState[i] : '';
+      if (!st) { e.root.hidden = true; continue; }
+      const cls = ANCHOR_CLASS[st] || ANCHOR_CLASS.info;
+      if (cls !== e.cls) { e.cls = cls; e.root.className = cls; }
+      const t = this._anLabel[i];
+      if (t !== e.text) { e.text = t; e.label.textContent = t; }
+      const xi = clamp(Math.round(this._anX[i]), 0, PX_STEPS - 1), yi = clamp(Math.round(this._anY[i]), 0, PX_STEPS - 1);
+      if (xi !== e.x) { e.x = xi; e.root.style.left = this._px[xi]; }
+      if (yi !== e.y) { e.y = yi; e.root.style.top = this._px[yi]; }
+      e.root.hidden = false;
+    }
+  }
+
+  /** Read-first phase: a new input.tap (engine's classifier: any pointer, a second finger too) inside a shown bubble (+ the slop)
+   *  emits ui:anchorTap { id } for the nearest. Layout is clean here. */
+  _anchorTap(tap) {
+    if (tap.seq === this._tapSeq) return;
+    this._tapSeq = tap.seq;
+    const a = this._el.app.getBoundingClientRect();
+    const r = this._el.hudAnchors.querySelector('.anchor:not([hidden])');
+    const lim = r ? r.offsetWidth * 0.5 + ANCHOR_SLOP_PX : 0;
+    const x = tap.x - a.left, y = tap.y - a.top;
+    let best = -1, bestD = lim * lim;
+    for (let i = 0; i < this._anN; i++) {
+      if (!this._anState[i]) continue;
+      const dx = x - this._anX[i], dy = y - this._anY[i], d = dx * dx + dy * dy;
+      if (d <= bestD) { bestD = d; best = i; }
+    }
+    if (best < 0) return;
+    P_ANCHOR_TAP.id = this._anId[best];
+    this.ctx.events.emit('ui:anchorTap', P_ANCHOR_TAP);
+  }
+
+  /** hud:action: the round button (FIRE's mirror): icon, label, badge, disabled; its name ("Repair · 3"). */
+  _syncAction() {
+    this._acDirty = false;
+    const el = this._el, b = el.btnAction, S = this._acShown, A = this._ac;
+    if (!b) return;
+    if (A.on !== S.on) {
+      S.on = A.on;
+      b.hidden = !A.on;
+      el.hud.classList.toggle('action-on', A.on);
+      if (A.on) { this._cancelAnim(this._acAnim); this._acAnim = this._animate(b, KF_POP_IN, T_NAMECARD); }
+    }
+    if (!A.on) return;
+    if (A.icon !== S.icon) { S.icon = A.icon; this._applyIcon(el.actIcon, this._iconUrl(A.icon)); }
+    if (A.label !== S.label || A.badge !== S.badge) {
+      S.label = A.label; S.badge = A.badge;
+      el.actLabel.textContent = A.label;
+      el.actBadge.textContent = A.badge;
+      el.actBadge.hidden = !(A.badge >= 0);
+      b.setAttribute('aria-label', STRINGS.types.action(A.label, A.badge));
+    }
+    if (!!A.disabled !== S.disabled) {
+      S.disabled = !!A.disabled;
+      b.classList.toggle('disabled', S.disabled);
+      b.setAttribute('aria-disabled', String(S.disabled));
+    }
+  }
+
+  /** pointerdown on the action button: act now, as FIRE does (no focus; the stale-press rule of _click). */
+  _actionPointer(e) {
+    if (e.button > 0) return;
+    e.preventDefault();
+    if (e.isTrusted && e.timeStamp > 0 && this._staleAt(e.timeStamp, 'btn-action')) return;
+    this._actionTap();
+  }
+
+  /** One press (pointer, or Enter's bare click): ui:action while playing; disabled: a refusal shake and no event. */
+  _actionTap() {
+    this._acClickUntil = this._realNow() + FIRE_CLICK_SUPPRESS_S;
+    const b = this._el.btnAction;
+    if (!this._ac.on || !this.ctx.state.is('playing')) return;
+    this._cancelAnim(this._acAnim);
+    if (this._ac.disabled) { this._acAnim = this._animate(b, KF_FIRE_DENY, T_FIRE_DENY); return; }
+    P_ACTION.id = this._ac.id;
+    this.ctx.events.emit('ui:action', P_ACTION);
+    this._acAnim = this._animate(b, KF_PUNCH, T_PUNCH);
+  }
+
+  /** hud:banner per frame (theatre clock): shows / replaces / hides it; the same banner re-emitted while up (LINE COLLAPSING 3…2…1)
+   *  only changes its text and deadline, without popping again. */
+  _updateHudBanner(tnow) {
+    const el = this._el, node = el.hudBanner, B = this._hb;
+    if (!node) return;
+    if (this._hbReq) {
+      this._hbReq = false;
+      if (!(B.seconds > 0) || !B.text) this._hideHudBanner();
+      else {
+        const c = B.color >= 0 ? B.color : PALETTE.ui.primary;
+        const same = this._hbShown && B.kicker === this._hbShownKicker && c === this._hbShownColor;
+        el.hbText.textContent = B.text;
+        if (B.kicker !== this._hbShownKicker) { this._hbShownKicker = B.kicker; el.hbKicker.textContent = B.kicker; el.hbKicker.hidden = !B.kicker; }
+        if (c !== this._hbShownColor) {
+          this._hbShownColor = c;
+          node.style.setProperty('--hb-color', hexCss(c)); node.style.setProperty('--hb-glow', rgbaCss(c, DB_GLOW_ALPHA));
+        }
+        this._hbUntil = tnow + B.seconds;
+        if (!same) { node.hidden = false; this._animate(node, KF_POP_IN, T_NAMECARD); }
+        this._hbShown = true;
+      }
+    }
+    if (this._hbShown && tnow >= this._hbUntil) this._hideHudBanner();
+  }
+
+  _hideHudBanner() {
+    this._hbShown = false;
+    if (this._el.hudBanner) this._el.hudBanner.hidden = true;
+  }
+
+  /** The enrage clock per frame: whole seconds left, red for the last ENRAGE_WARN_S; a request swaps it for the tag or hides it. */
+  _updateClock() {
+    if (this._clockReq >= 0) { this._setClock(this._clockReq); this._clockReq = -1; this._clockShown = -1; }
+    if (this._clockMode !== 1) return;
+    const left = this._clockFor - (this.ctx.time.levelTime - this._clockAt);
+    const s = Math.min(SECONDS_TABLE - 1, Math.max(0, Math.ceil(left - 1e-6)));
+    if (s === this._clockShown) return;
+    this._clockShown = s;
+    const n = this._el.bossClock;
+    n.textContent = this._secs[s];
+    const warn = s <= ENRAGE_WARN_S;
+    if (warn !== this._clockWarn) { this._clockWarn = warn; n.classList.toggle('warn', warn); }
+    n.setAttribute('aria-label', STRINGS.types.enrage.aria(s));
+  }
+
+  /** #boss-clock: 0 hidden, 1 the clock, 2 the ENRAGED tag (#bossbar.has-clock keeps the name clear of it). */
+  _setClock(mode) {
+    this._clockMode = mode;
+    const n = this._el ? this._el.bossClock : null;
+    if (!n) return;
+    const E = STRINGS.types.enrage;
+    this._clockWarn = false;
+    n.classList.remove('warn');
+    n.classList.toggle('tag', mode === 2);
+    this._el.bossbar.classList.toggle('has-clock', mode !== 0);
+    n.textContent = mode === 2 ? E.tag : '';
+    if (mode === 2) n.setAttribute('aria-label', E.ariaTag);
+    n.hidden = mode === 0;
   }
 
   /**
@@ -2723,11 +3234,16 @@ export class UI {
       for (let i = 0; i < DISTRICTS.length; i++) { const d = DISTRICTS[i]; if (d && d.label === label) { name = d.name; index = d.index; break; } }
     }
     this._dbNew = p.first === true && !!name;
+    this._dbKickColor = -1;
     if (this._dbNew && D) {
       this._dbKicker = p.reason === 'start' && this._runEndless ? D.endless : D.kicker(index);
       this._dbLabel = name;
     } else {
-      this._dbKicker = '';
+      // r8 (P7, PLAN campaign INTRODUCTIONS): a typed run's small tag wears a kicker in the type's colour — 'HORDE', 'NIGHT', or
+      // 'BLACKOUT' for a night level in NIGHT CITY (district:change modeKey / modeColor; slot 1, the big card, is always RUN)
+      const mk = !this._runEndless && typeof p.modeKey === 'string' && LEVEL_TYPES[p.modeKey] && p.modeKey !== 'standard' ? p.modeKey : '';
+      this._dbKicker = mk ? typeName(mk, isBlackout(this._runLevel, LEVEL_TYPES[mk])) : '';
+      if (this._dbKicker) this._dbKickColor = Number.isFinite(p.modeColor) && p.modeColor > 0 ? p.modeColor : LEVEL_TYPES[mk].color;
       const step = p.step | 0, steps = p.steps | 0;
       // r7 fix: an endless start that is not new (a RETRY: no step) shows the district's name — the round-5 label
       // "DISTRICT 1 · SUNSET BOULEVARD" is the old format the tester saw; only an older level.js (no name) still gets it
@@ -2742,11 +3258,11 @@ export class UI {
    *  archetype's name, and (teaching:3) its tagline from data (STRINGS.boss.tagline; '' hides the line). */
   _fillNameCard() {
     const el = this._el;
-    const fin = !this._runEndless && BOSSES.milestones.indexOf(Math.min(this._runLevel, LEVELS.curve.loopAfter)) !== -1;
+    const fin = !this._runEndless && isFinale(this._runLevel);   // r8v2: every 5th level, the real level
     const label = fin && STRINGS.boss.finale ? STRINGS.boss.finale : STRINGS.boss.label;
     if (el.ncLabel && el.ncLabel.textContent !== label) el.ncLabel.textContent = label;
     if (el.ncName) el.ncName.textContent = this._bossName;
-    const tags = STRINGS.boss.tagline;
+    const tags = this._bossHold ? STRINGS.hold.cards : STRINGS.boss.tagline;
     const tag = tags && typeof tags[this._bossArch] === 'string' ? tags[this._bossArch] : '';
     if (el.ncTag) {
       if (tag !== this._ncTagText) { this._ncTagText = tag; this._buildTagline(el.ncTag, tag); }
@@ -2863,6 +3379,13 @@ export class UI {
     if (this._dbShownNew !== this._dbNew) {
       this._dbShownNew = this._dbNew;
       try { node.classList.toggle('db-new', this._dbNew); } catch (_) { /* cosmetic */ }
+    }
+    if (this._dbShownKickColor !== this._dbKickColor) {   // r8 (P7): the type kicker's colour (css --db-kick; none: the accent)
+      this._dbShownKickColor = this._dbKickColor;
+      try {
+        if (this._dbKickColor >= 0) node.style.setProperty('--db-kick', 'color-mix(in srgb,' + hexCss(this._dbKickColor) + ' 62%,#fff)');
+        else node.style.removeProperty('--db-kick');
+      } catch (_) { /* cosmetic */ }
     }
     if (this._dbShownAccent !== this._dbAccent) {
       this._dbShownAccent = this._dbAccent;
@@ -3004,6 +3527,9 @@ export class UI {
       const z = PALETTE.zombie[ic.z] || PALETTE.zombie.walker;
       try { st.setProperty('--ci-skin', hexCss(z.skin)); st.setProperty('--ci-eyes', hexCss(z.eyes)); } catch (_) { /* cosmetic */ }
       if (ic.t) node.textContent = ic.t;
+    } else if (ic.k === 'type' && LEVEL_TYPES[ic.key]) {   // r8 (P7): the type's tile badge, large
+      cls += ' ' + typeBadgeClass(ic.key, false);
+      try { st.setProperty('--tt-color', hexCss(LEVEL_TYPES[ic.key].color)); } catch (_) { /* cosmetic */ }
     } else if (ic.t) {
       node.textContent = ic.t;
       if (ic.k === 'key' && ic.t.length > 3) cls += ' ci-long';
@@ -3022,6 +3548,7 @@ export class UI {
     const hl = this._highestUnlocked();
     for (let i = 0; i < GUIDE_IDS.length; i++) {
       const id = GUIDE_IDS[i];
+      if (id.indexOf(TYPE_ROW) === 0) continue;    // r8 (P7): a level type is met by playing it, never by progress
       const unlock = CODEX.unlock[id];
       let met = unlock > 0 ? hl > unlock : hl > 1;
       const old = CODEX.legacy[id];
@@ -3059,11 +3586,13 @@ export class UI {
     host.textContent = '';
     const rows = {};
     const C = STRINGS.codex;
+    this._guideHeads = [];                               // r8 (P7): a section whose rows are all hidden hides its heading
     for (let s = 0; s < CODEX.sections.length; s++) {
       const sec = CODEX.sections[s];
       const head = doc.createElement('div'); head.className = 'gd-head'; head.setAttribute('role', 'heading'); head.setAttribute('aria-level', '2');
       head.textContent = C.sections[sec.id] || sec.id.toUpperCase();
       host.appendChild(head);
+      this._guideHeads.push(head);
       if (C.notes && C.notes[sec.id]) { const n = doc.createElement('p'); n.className = 'gd-note'; n.textContent = C.notes[sec.id]; host.appendChild(n); }
       for (let i = 0; i < sec.ids.length; i++) {
         const id = sec.ids[i];
@@ -3107,15 +3636,26 @@ export class UI {
       const r = rows[id];
       if (!r) continue;
       const seen = done(SEEN_K[id]);
-      const unlock = CODEX.unlock[id];
-      const locked = !seen && unlock > 0 && hl < unlock;
+      let unlock = CODEX.unlock[id];
+      let locked = !seen && unlock > 0 && hl < unlock;
+      let off = false;
+      // r8 (P7): a LEVEL TYPES row stays "???" until its type is first played (level:start marks it); "MEET IT ON LEVEL n" names
+      // the next level of that type from the frontier (nextLevelOfType: 43 and 45 for a frontier at L43), and a type this
+      // build does not play (n = 0) hides its row
+      if (id.indexOf(TYPE_ROW) === 0) {
+        unlock = nextLevelOfType(id.slice(TYPE_ROW.length), hl, this._typesOn);
+        locked = !seen;
+        off = !seen && !(unlock > 0);
+      }
       const isNew = seen && !done(READ_K[id]);
-      const state = locked ? 'L' : (isNew ? 'N' : 'O');
+      const state = off ? 'X' : (locked ? 'L' + unlock : (isNew ? 'N' : 'O'));   // r8: a moving unlock level rewrites the row
       if (show && seen) this._guideSeen.push(id);
       if (isNew && !firstNew) firstNew = r.row;
       if (state === r.state) continue;
       const E = C.entries[id];
       r.state = state;
+      if (r.row.hidden !== off) r.row.hidden = off;
+      if (off) continue;
       if (locked) {
         r.name.textContent = C.lockedName;
         r.line.textContent = C.locked(unlock);
@@ -3130,6 +3670,14 @@ export class UI {
       }
       r.tag.hidden = !isNew;
       try { r.row.classList.toggle('locked', locked); r.row.classList.toggle('new', isNew); } catch (_) { /* ignore */ }
+    }
+    // r8 (P7): a section with no row shown (LEVEL TYPES while the build plays no type) hides its heading
+    const heads = this._guideHeads;
+    for (let s = 0; heads && s < CODEX.sections.length && s < heads.length; s++) {
+      const ids = CODEX.sections[s].ids;
+      let any = false;
+      for (let k = 0; k < ids.length && !any; k++) { const r = rows[ids[k]]; if (r && !r.row.hidden) any = true; }
+      if (heads[s].hidden === any) heads[s].hidden = !any;
     }
     if (show) this._guideScrollTo = firstNew;
   }
@@ -3365,6 +3913,14 @@ export class UI {
     if (this._guideScrollTo) this._scrollGuide();      // r7 (teaching:5)
     if (this._ncTagCheck) { this._ncTagCheck = false; this._breakTagline(); }   // r7 fix (teaching:3): no hanging " ·"
     if (this._focusPending) { const f = this._focusPending; this._focusPending = null; this._focusFirst(f === this._el.app ? null : f); }
+    // r8 (P7): a tap inside a HUD-kit bubble; the briefing pauses the run on its first playing frame (it shows in this update)
+    const inp = this.ctx.input;
+    if (inp && inp.tap) { if (this._anN > 0 && playing) this._anchorTap(inp.tap); else this._tapSeq = inp.tap.seq; }
+    if (this._briefReq && playing) {
+      this._briefReq = false;
+      P_BRIEF.brief = this._briefKey;
+      this.ctx.engine.pause(P_BRIEF);
+    }
 
     if (this._pendingSet) {
       this._flushPendingScreen();
@@ -3381,6 +3937,14 @@ export class UI {
     this._updateFlash(dt);
     this._updateVignette(dt);
     this._updateTheatre(tnow);
+    // r8 (P7): the enrage clock and the HUD kit
+    if (this._clockMode === 1 || this._clockReq >= 0) this._updateClock();
+    if (this._hkProgDirty) this._syncHudProgress();
+    if (this._hcDirty) this._syncCounter();
+    if (this._anDirty) this._syncAnchors();
+    if (this._acDirty) this._syncAction();
+    if (this._hbReq || this._hbShown) this._updateHudBanner(tnow);
+    if (this._hlbOn) this._updateHudLabels(tnow);
     if (this._dbShown || this._dbReq || this._dbHideReq) this._updateBanner(tnow, paused);
     if (this._ncdShown || this._ncdHideReq || this._ncdQ.length > 0) this._updateNewCard(tnow, paused);   // r7 (teaching:5)
     if (this._swDirty) this._syncUpdatePill();
@@ -3420,6 +3984,8 @@ export class UI {
     if (prog && prog.classList) { try { prog.classList.toggle('endless', this._runEndless); } catch (_) { /* ignore */ } }
     this._skullShown = !this._runEndless;
     if (el.progressSkull) el.progressSkull.hidden = !this._skullShown;
+    // r8 (P7): rewritten by this run's first _syncHudProgress
+    this._hkLabelShown = null; this._hkSegsShown = -1; this._hkEndShown = '';
     this._hideBossBar();
     this._bossShowPending = false;
     if (el.letterbox) el.letterbox.hidden = true;
@@ -3686,12 +4252,16 @@ export class UI {
       if (T < lb && T + H > lt && L < lr && L + W > ll) {
         const toLeft = ll - (L + W);                     // ≤ 0: the pill's right edge to the label's left
         const toRight = lr - L;                          // ≥ 0: the pill's left edge to the label's right
-        const okL = L + toLeft >= EDGE_PX[3];
-        const okR = L + W + toRight <= this._appW - EDGE_PX[1];
+        const okL = L + toLeft >= this._hintEdgeL;
+        const okR = L + W + toRight <= this._appW - this._hintEdgeR;
         let s = 0;
         if (okL && okR) s = -toLeft < toRight ? toLeft : toRight;
         else if (okL) s = toLeft;
         else if (okR) s = toRight;
+        else if (this._hintEdgeL + this._hintEdgeR > EDGE_PX[3] + EDGE_PX[1]) {   // r8 (P6): beside the action button: as far as the band allows
+          const roomL = this._hintEdgeL - L, roomR = this._appW - this._hintEdgeR - L - W;
+          s = -roomL > roomR ? roomL : roomR;
+        }
         k = clamp(Math.round(s / SHIFT_STEP_PX), -SHIFT_STEPS, SHIFT_STEPS);
       }
     }
@@ -3845,6 +4415,7 @@ export class UI {
     if (this._el.bossbar) { try { this._el.bossbar.classList.remove('phase-flash'); } catch (_) { /* cosmetic */ } }
     this._cancelAnim(this._bossRage);
     this._bossRage = null;
+    this._setClock(0);
     if (this._el.bossbar) this._el.bossbar.hidden = true;
     if (this._el.hud) { try { this._el.hud.classList.remove('boss-on'); } catch (_) { /* ignore */ } }
     this._puPosDirty = true;
@@ -3867,7 +4438,9 @@ export class UI {
     const pct = this._pct;
     if (this._progDirty) {
       this._progDirty = false;
-      const idx = Math.round(clamp(Number.isFinite(this._progFrac) ? this._progFrac : 0, 0, 1) * PCT_STEPS);
+      // r8 (P7): a mode's cells (hud:progress) fill by cells done
+      const f = this._hkSegs > 0 ? this._hkFilled / this._hkSegs : this._progFrac;
+      const idx = Math.round(clamp(Number.isFinite(f) ? f : 0, 0, 1) * PCT_STEPS);
       if (idx !== this._progIdx) {
         this._progIdx = idx;
         if (el.progressFill) el.progressFill.style.transform = this._txFill[idx];   // UI-22: compositor-only
@@ -3948,8 +4521,8 @@ export class UI {
       if (this._puShownId[i] !== id) {
         this._puShownId[i] = id;
         e.root.dataset.id = id;
-        this._applyIcon(e.icon, this._iconUrl(id));
-        this._puRings[i] = this._ringStrings(id);
+        this._applyIcon(e.icon, this._iconUrl(this._puIcon[i] || id));   // r8 (P7): a hud:pill's own
+        this._puRings[i] = this._ringStrings(id, this._puColor[i]);
         this._puRing[i] = -1;
         this._puSec[i] = -1;
         this._puOpa[i] = -1;
@@ -3983,7 +4556,7 @@ export class UI {
           else { const g = weapons.gear; if (g) { const v = g[id]; if (typeof v === 'number') left = v; } }
         } catch (_) { left = -1; }
       }
-      if (!(left >= 0) || !Number.isFinite(left)) left = Math.max(0, this._puDur[i] - (now - this._puStart[i]));
+      if (!(left >= 0) || !Number.isFinite(left)) left = Math.max(0, this._puDur[i] - ((this._puHud[i] ? this._tclock : now) - this._puStart[i]));
       if (left <= 0) { this._pillRemoveAt(i); i--; continue; }   // expired without an *:end (stub / reset race)
       this._puLeft[i] = left;
       const e = els[i];
@@ -4036,8 +4609,9 @@ export class UI {
     const rec = d && d.levels ? d.levels[hl] : null;
     const stars = rec ? rec.stars | 0 : 0;
     if (el.titleCaption) {
-      // r7 (explain:0): the caption names the survivors the 3★ need on the level PLAY starts ("★★★ at 176")
-      el.titleCaption.textContent = STRINGS.title.caption(hl, stars, starNeed(eBossOf(hl), 3));
+      // r7 (explain:0): the caption names the survivors the 3★ need on the level PLAY starts ("★★★ at 176"); r8 (D16): of its type
+      const tk = levelTypeOf(hl, null, this._typesOn).key;
+      el.titleCaption.textContent = STRINGS.title.caption(hl, stars, starNeed(eTargetOf(hl, null, this._typesOn), 3, hl, starThreeOf(hl, tk)));
       // round 5: the district the title scene shows (DISTRICTS.md §3.5: districtForLevel(highestUnlocked)) as a small
       // second line with its accent dot
       const td = el.titleDistrict;
@@ -4060,6 +4634,7 @@ export class UI {
       }
     }
     if (el.btnEndless) el.btnEndless.hidden = !(hl > LEVELS.endlessUnlock);
+    this._paintStartBadge(el.btnPlay, el.playType, hl, STRINGS.types.aria.play);   // r8 (P7)
     this._syncShopBadges();
     this._syncGuideBadge();                         // r7 (teaching:5): "?" wears a badge while a met entry is unread
     if (el.btnFullscreen) el.btnFullscreen.hidden = !this._fsAvailable;
@@ -4087,15 +4662,17 @@ export class UI {
     const hl = this._highestUnlocked();
     const tiles = this._lvTiles;
     const base = LEVELS.count;
-    for (let i = 0; i < base; i++) this._setTile(tiles[i], i + 1, hl, d);
+    let rings = 0;                                   // r8 (P7): tiles wearing the D21 ring
+    for (let i = 0; i < base; i++) if (this._setTile(tiles[i], i + 1, hl, d)) rings++;
     const from = Math.max(base + 1, hl - LEVEL_WINDOW + 1);
     for (let i = 0; i < LEVEL_WINDOW; i++) {
       const t = tiles[base + i];
       const n = from + i;
       const on = n <= hl;
-      if (on) this._setTile(t, n, hl, d);
+      if (on && this._setTile(t, n, hl, d)) rings++;
       if (t.btn.hidden === on) t.btn.hidden = !on;
     }
+    this._syncLegend2(rings > 0);
     const e = this._lvEndless;
     if (e) {
       const endlessOn = hl > LEVELS.endlessUnlock;
@@ -4108,6 +4685,21 @@ export class UI {
       if (e.stars.textContent !== txt) e.stars.textContent = txt;
     }
     if (show) this._lvScrollPending = true;
+  }
+
+  /** r8 (P7): whether this build's map plays type `key`. */
+  _typeOn(key) {
+    const on = this._typesOn;
+    return on ? !!on[key] : LEVEL_TYPES[key].enabled;
+  }
+
+  /** r8 (P7): LEVELS legend line 2: a chip per type the map plays and, while some tile wears it, the D21 ring. */
+  _syncLegend2(ring) {
+    const lg = this._el.levelsLegend2;
+    if (!lg) return;
+    const h = this._typeOn('horde'), n = this._typeOn('night'), it = lg.children;
+    it[0].hidden = !h; it[1].hidden = !n; it[2].hidden = !ring;
+    lg.hidden = !(h || n);
   }
 
   _buildLevelGrid(grid) {
@@ -4126,9 +4718,10 @@ export class UI {
       const skull = doc.createElement('span'); skull.className = 'skull'; skull.setAttribute('aria-hidden', 'true'); skull.hidden = true;
       // round 5: district band — a short accent rule at the tile's top and a faint accent wash at its foot (css .tile-band)
       const band = doc.createElement('span'); band.className = 'tile-band'; band.setAttribute('aria-hidden', 'true');
-      btn.appendChild(band); btn.appendChild(num); btn.appendChild(stars); btn.appendChild(skull);
+      const tt = doc.createElement('span'); tt.dataset.keep = 'tile-type'; tt.className = 'tile-type'; tt.setAttribute('aria-hidden', 'true'); tt.hidden = true;   // r8 (P7)
+      btn.appendChild(band); btn.appendChild(num); btn.appendChild(stars); btn.appendChild(skull); btn.appendChild(tt);
       grid.appendChild(btn);
-      return { btn, num, stars, on, off, skull, n: 0, key: '', dname: '' };
+      return { btn, num, stars, on, off, skull, tt, n: 0, key: '', dname: '' };
     };
     for (let n = 1; n <= LEVELS.count; n++) {
       tiles.push(mk());
@@ -4146,16 +4739,22 @@ export class UI {
     this._observeList(grid);                             // r7 fix round 3: its edge fades follow the tiles shown
   }
 
-  /** One tile in place (writes only what changed since its last fill). */
+  /** One tile in place (writes only what changed since its last fill). r8 (P7): its type badge, the night look and (D21) the ring
+   *  on a cleared level that now plays another type (rec.t ≠ its key). Returns whether it wears the ring. */
   _setTile(t, n, hl, d) {
     const locked = n > hl;
     const current = n === hl;
     const rec = d && d.levels ? d.levels[n] : null;
     const stars = rec ? clamp(rec.stars | 0, 0, 3) : 0;
-    const milestone = BOSSES.milestones.indexOf(Math.min(n, LEVELS.curve.loopAfter)) !== -1;
+    const milestone = isFinale(n);   // r8v2: every 5th level (L35, L40 …), the real level
     const blank = locked || (current && !rec);           // a never-played current tile shows no stars at all
-    const key = n + (locked ? 'L' : '') + (current ? 'C' : '') + (blank ? 'b' : stars);
-    if (t.key === key) return;
+    const type = levelTypeOf(n, null, this._typesOn);
+    const tkey = type.key;
+    const bl = isBlackout(n, type);
+    const retype = !!rec && (rec.clears | 0) > 0 && (typeof rec.t === 'string' && rec.t ? rec.t : 'standard') !== tkey
+      && LEVEL_TYPES.retypeRewardSkip.indexOf(n) === -1;
+    const key = n + (locked ? 'L' : '') + (current ? 'C' : '') + (blank ? 'b' : stars) + tkey + (bl ? 'B' : '') + (retype ? 'R' : '');
+    if (t.key === key) return retype;
     t.key = key;
     if (t.n !== n) {
       t.n = n;
@@ -4177,17 +4776,24 @@ export class UI {
     if (current) cls += ' current';
     if (milestone) cls += ' milestone';
     if ((n - 1) % TILE_BAND_LEVELS === 0) cls += ' band-start';
+    if (type.night) cls += ' night';                  // r8 (P7)
+    if (retype) cls += ' retype';
     if (t.btn.className !== cls) t.btn.className = cls;
+    paintBadge(t.tt, tkey, bl);
+    if (retype) t.btn.style.setProperty('--tt-color', hexCss(LEVEL_TYPES[tkey].color));
     t.btn.disabled = locked;
     if (current) t.btn.setAttribute('aria-current', 'true'); else t.btn.removeAttribute('aria-current');
     const sep = STRINGS.common.separator;
     const dsuffix = t.dname ? sep + t.dname : '';     // round 5: the district is part of the tile's name
-    // r7 (explain:3): a skull tile is a district finale (every level has a boss) — "Level 5 · District finale · SUNSET …"
+    // r7 (explain:3): a skull tile is a district finale (every level has a boss) — "Level 5 · District finale · SUNSET …"; r8: + its type and ring
+    const tname = tkey !== 'standard' ? typeName(tkey, bl) : '';
     t.btn.setAttribute('aria-label', (locked ? STRINGS.aria.level(n) + sep + STRINGS.levels.locked
-      : (milestone ? STRINGS.aria.level(n) + sep + STRINGS.levels.finale : STRINGS.aria.level(n))) + dsuffix);
+      : (milestone ? STRINGS.aria.level(n) + sep + STRINGS.levels.finale : STRINGS.aria.level(n)))
+      + (tname ? sep + tname : '') + (retype ? sep + STRINGS.types.aria.retype : '') + dsuffix);
     const star = STRINGS.common.star;
     t.on.textContent = blank ? '' : star.repeat(stars);
     t.off.textContent = blank ? '' : star.repeat(3 - stars);
+    return retype;
   }
 
   /** Read-first phase (start of update): bring the current tile into view inside the grid (never scrollIntoView:
@@ -4397,6 +5003,10 @@ export class UI {
     if (el.setLarge) el.setLarge.checked = !!s.largeText;
     this._syncSeg(el.setQuality, String(s.quality));
     this._syncSeg(el.setSens, String(s.sensitivity));
+    // r8 (P7): Night brightness shows once the map plays night and the player reached its debut
+    if (el.setLeft) el.setLeft.checked = !!s.leftHanded;
+    this._syncSeg(el.setNight, s.nightBright ? 'bright' : 'normal');
+    if (el.rowNight) el.rowNight.hidden = !(this._typeOn('night') && this._highestUnlocked() >= LEVEL_TYPES.night.debut);
     if (el.rowFullscreen && el.rowFullscreen.hidden === this._fsAvailable) el.rowFullscreen.hidden = !this._fsAvailable;
     this._syncFullscreenButton();                    // r7 (layout:3): the toggle shows the real fullscreen state
     if (this._confirmArmed) this._disarmReset();
@@ -4428,7 +5038,14 @@ export class UI {
     const c = this._cmp;
     const fresh = this._cmpFresh;
     this._cmpFresh = false;
-    if (el.completeTitle) el.completeTitle.textContent = STRINGS.complete.title(c.level);
+    // r8 (P7): a typed clear's title under a "LEVEL 43" kicker, a Horde clear's kills line, NEXT's type badge
+    const RS = STRINGS.types.results;
+    const R = RS[c.typeKey] || RS[LEVEL_TYPES[c.typeKey].base] || null;
+    if (el.completeTitle) el.completeTitle.textContent = R ? R.title : STRINGS.complete.title(c.level);
+    if (el.completeKicker) { el.completeKicker.textContent = R ? STRINGS.hud.level(c.level) : ''; el.completeKicker.hidden = !R; }
+    const killsLine = R && R.kills && c.modeKills > 0 ? R.kills(fmtCoins(c.modeKills)) : '';
+    if (el.completeLine) { el.completeLine.textContent = killsLine; el.completeLine.hidden = !killsLine; }
+    this._paintStartBadge(el.btnNext, el.nextType, (c.level | 0) + 1, STRINGS.types.aria.next);
     const stars = el.stars;
     if (stars) {
       for (let i = 0; i < stars.length; i++) {
@@ -4448,10 +5065,15 @@ export class UI {
       const B = STRINGS.complete.breakdown;
       for (let i = 0; i < BD_KEYS.length; i++) {
         const key = BD_KEYS[i];
-        // r7 (explain:7): the level bonus as its two parts — the stars' reward ("★★★ +160") and the survivors' ("Survivors +69")
+        // r7 (explain:7): the level bonus as its two parts — the stars' reward ("★★★ +160") and the survivors' ("Survivors +69");
+        // r8 (P7): a type's premium ("Night bonus +16") and LINE HELD are chips of their own; the chips still add up to the payout
         if (key === 'bonus' && c.split) {
-          this._chip(list, 'bd-bonus bd-stars', STRINGS.common.star.repeat(c.stars), c.bonusStars);
+          const mult = LEVEL_TYPES[c.typeKey].bonusMult;
+          const prem = R && R.bonus && mult > 1 ? clamp(Math.round(c.bonusStars - c.bonusStars / mult), 0, c.bonusStars) : 0;
+          this._chip(list, 'bd-bonus bd-stars', STRINGS.common.star.repeat(c.stars), c.bonusStars - prem);
+          if (prem > 0) this._chip(list, 'bd-bonus bd-type', R.bonus, prem);
           this._chip(list, 'bd-bonus bd-survivors', B.survivors, c.bonusSurv);
+          if (c.bonusMode > 0) this._chip(list, 'bd-bonus bd-type', RS.horde.lineHeld, c.bonusMode);
           continue;
         }
         this._chip(list, 'bd-' + key, B[key], c[key] | 0);
@@ -4465,15 +5087,18 @@ export class UI {
       // round-3 FTUE: a first clear prints its survivors alone (the "best" was this very run: "239 survivors · Best survivors
       // at boss: 239"); beating an earlier best says NEW BEST!; otherwise the best stays the target to beat
       const prev = c.level === this._runLevel ? this._prevBest : -2;
-      let line = STRINGS.complete.survivors(c.survivors);
+      // r8 (P7, D16): what the stars counted against the type's target and 3★ fraction
+      const m = c.metric;
+      let line = STRINGS.complete.survivors(m);
       // r7 (explain:0): the star thresholds of this level (data.starNeed, the rule level._commitWon awarded them by) —
       // "172 survivors · ★★★ at 176" (2★), "65 survivors · ★★ at 178 · ★★★ at 284" (1★), "172 survivors · ★★★ at 164" (3★)
-      if (c.eBoss > 0) {
-        const g3 = STRINGS.complete.goal(3, starNeed(c.eBoss, 3));
-        line += sep + (c.stars < 2 ? STRINGS.complete.goal(2, starNeed(c.eBoss, 2)) + sep + g3 : g3);
+      if (c.eTarget > 0) {
+        const g3 = STRINGS.complete.goal(3, starNeed(c.eTarget, 3, c.level, starThreeOf(c.level, c.typeKey)));   // r8v2: the level's 3★ fraction
+        line += sep + (c.stars < 2 ? STRINGS.complete.goal(2, starNeed(c.eTarget, 2, c.level)) + sep + g3 : g3);
       }
-      if (prev >= 0 && c.survivors > prev && STRINGS.complete.newBest) line += sep + STRINGS.complete.newBest;
-      else if (prev !== -1 && best > c.survivors) line += sep + STRINGS.complete.best(best);
+      if (prev >= 0 && m > prev && STRINGS.complete.newBest) line += sep + STRINGS.complete.newBest;
+      else if (prev !== -1 && best > m) line += sep + STRINGS.complete.best(best);
+      if (R && R.score && c.score > 0) line += sep + R.score(fmtCoins(c.score));   // r8 (P7, D45)
       el.completeBest.textContent = line;
     }
     this._cmpT = 0;
@@ -4569,15 +5194,38 @@ export class UI {
 
   _fillGameover() {
     const f = this._fail;
+    const el = this._el;
     // round 3 (GDD §14 UI-33): the failed level as a kicker above SQUAD LOST, spelled like the HUD and results ('LEVEL 7')
-    const lv = this._el.gameoverLevel;
+    const lv = el.gameoverLevel;
     if (lv) lv.textContent = (STRINGS.gameover.level || STRINGS.hud.level)(f.level);
-    if (this._el.gameoverInfo) this._el.gameoverInfo.textContent = STRINGS.gameover.info(Math.round(clamp(f.fraction, 0, 1) * 100), fmtCoins(f.coinsKept));
+    // r8 (P7): a Horde run lost at the barricade names its cause and how far it got ("SURGE 2/3 · 6,820 OF 10,200 ZOMBIES · Coins
+    // kept +N"); a fail with no play under it gets the coaching line (D30)
+    const RS = STRINGS.types.results, H = RS.horde, hold = f.hold;
+    const title = hold ? (f.cause === 'overrun' ? H.overrun : H.lost) : STRINGS.gameover.title;
+    if (el.gameoverTitle) { el.gameoverTitle.textContent = title; el.gameoverTitle.classList.toggle('long', title.length > STRINGS.gameover.title.length); }
+    const n = HORDE_GEN.surges.count;
+    if (el.gameoverInfo) {
+      if (hold) this._fillParts(el.gameoverInfo, H.surge(Math.min(n, f.surgesCleared + 1), n), f.total > 0 ? H.of(fmtCoins(f.kills), fmtCoins(f.total)) : H.down(fmtCoins(f.kills)), H.kept(fmtCoins(f.coinsKept)));
+      else el.gameoverInfo.textContent = STRINGS.gameover.info(Math.round(clamp(f.fraction, 0, 1) * 100), fmtCoins(f.coinsKept));
+    }
+    const tip = hold ? (f.holdActions < LEVELS.curve.assist.holdActions ? H.tip : '') : (f.counted ? '' : RS.steer);
+    if (el.gameoverTip) { el.gameoverTip.textContent = tip; el.gameoverTip.hidden = !tip; }
     // round 7 (r7, from balance:10): RETRY after a failure plays a new road (seed 1000 + L + 100·failures); the authored L1
     // always replays its own, so it gets no note
     const note = this._el.retryNote;
     if (note) { const show = !LEVELS.authored[f.level]; if (note.hidden === show) note.hidden = !show; }
     this._syncShopBadges();
+  }
+
+  /** r8 (P7): a one-line list that may wrap on a phone: each part keeps its words together and the only break is a .part-gap, a
+   *  plain space that draws its " · " (css). A space that ends a line collapses, so a wrapped line ends clean, with no hanging dot. */
+  _fillParts(node, ...parts) {
+    const doc = this._doc;
+    node.textContent = '';
+    for (let i = 0; i < parts.length; i++) {
+      if (i > 0) { const gap = doc.createElement('span'); gap.className = 'part-gap'; gap.textContent = ' '; node.appendChild(gap); }
+      node.appendChild(doc.createTextNode(parts[i].replace(/ /g, '\u00A0')));
+    }
   }
 
   _fillEndless() {
@@ -4600,14 +5248,15 @@ export class UI {
    * / no touch (the steerDesktop rule; "F FULLSCREEN" only where fullscreen exists), else controlsTouch. Its " · " items
    * become nowrap spans that wrap as whole items (css #pause-controls: a centred flex row with gaps, so no line starts or
    * ends on a stray "·"); in the keys line each item's last word is the action and the words before it are keys, drawn as
-   * key caps (<kbd>; "/" stays a plain "or"). Rebuilt only when the text changes (at most once per input kind).
+   * key caps (<kbd>; "/" stays a plain "or"). Rebuilt only when the text changes (per input kind, and in and out of a hold).
    */
   _fillPauseControls() {
     const n = this._el ? this._el.pauseControls : null;
     const doc = this._doc;
     if (!n || !doc) return;
     const keys = prefersDesktopSteerHint();
-    const t = keys ? STRINGS.pause.controlsKeys(this._fsAvailable) : STRINGS.pause.controlsTouch;
+    const hold = !!(this.ctx.hold && this.ctx.hold.active), P = STRINGS.pause;   // r8 (P8): a hold's own controls
+    const t = keys ? (hold ? P.controlsKeysHold : P.controlsKeys)(this._fsAvailable) : (hold ? P.controlsTouchHold : P.controlsTouch);
     if (n.dataset.text === t) return;
     n.dataset.text = t;
     n.textContent = '';
@@ -4632,6 +5281,39 @@ export class UI {
       }
       n.appendChild(item);
     }
+  }
+
+  /**
+   * r8 (P7): the briefing card (the run paused on its first frame): the type's badge and colour, name, tagline, three rows and
+   * this level's ★★★ goal. Event time.
+   */
+  _fillBrief() {
+    const el = this._el, key = this._briefKey, b = STRINGS.types.brief[key], L = this._runLevel, c = LEVEL_TYPES[key].color;
+    paintBadge(el.briefBadge, key, false);
+    const scr = this._screens.brief;
+    if (scr) { scr.style.setProperty('--tt-color', hexCss(c)); scr.style.setProperty('--tt-glow', rgbaCss(c, 0.35)); }
+    if (el.briefName) el.briefName.textContent = typeName(key, false);
+    if (el.briefTagline) el.briefTagline.textContent = b.tagline;
+    if (el.briefRows) { const r = el.briefRows.children; for (let i = 0; i < r.length; i++) r[i].textContent = b.rows[i]; }
+    const need = starNeed(this._runETarget > 0 ? this._runETarget : eTargetOf(L, null, this._typesOn), 3, L, starThreeOf(L, key));
+    if (el.briefGoal) el.briefGoal.textContent = STRINGS.types.brief.goal(need);
+  }
+
+  /** GOT IT (a click, Enter / Space, Esc / P): trusted input marks hint 'mode.<key>' (a synthetic click resumes, but the card comes
+   *  back at the next run of that type); the run resumes. */
+  _briefOk(trusted) {
+    if (this._current !== 'brief') return;
+    if (trusted) this._markHint(BRIEF_HINT + this._briefKey);
+    this.ctx.engine.resume();
+    if (this._pendingSet) this._flushPendingScreen();
+  }
+
+  /** r8 (P7): a start button's type badge and accessible name ("Next · HORDE"); a RUN level shows none. Event time. */
+  _paintStartBadge(btn, badge, L, aria) {
+    if (!btn) return;
+    const t = levelTypeOf(L, null, this._typesOn), bl = isBlackout(L, t);
+    paintBadge(badge, t.key, bl);
+    if (t.key !== 'standard') btn.setAttribute('aria-label', aria(typeName(t.key, bl))); else btn.removeAttribute('aria-label');
   }
 
   // -------------------------------------------------------------------------------------------
@@ -4663,10 +5345,14 @@ export class UI {
     // round 6: FIRE fired on its pointerdown (or the key); only a click with no activation just before it (Enter on the
     // focused button, assistive tech) fires here. No ui:button — the weapon's own sting is the feedback, not ui_tap
     if (id === 'btn-fire') { if (this._realNow() >= this._fireClickUntil) this._fireTap(); return; }
+    // r8 (P7): the action acted on its pointerdown too, and it spends a kit: the click at the end of a press acts never, however long
+    // the press was held; only a click with no pointer under it (detail 0: Enter, assistive tech) does
+    if (id === 'btn-action') { if (e.detail === 0 && this._realNow() >= this._acClickUntil) this._actionTap(); return; }
     P_BUTTON.id = id || this._buttonKind(btn);
     const events = this.ctx.events;
     if (events) events.emit('ui:button', P_BUTTON);
-    this._route(btn, id);
+    if (id === 'btn-brief-ok') this._briefOk(e.isTrusted === true);
+    else this._route(btn, id);
     // r7 (flow-coins:2): the screen of the state this click set shows now, in the click's own task — not one (multi-second)
     // frame later, while the old buttons stay up and take more clicks
     if (this._pendingSet) this._flushPendingScreen();
@@ -4679,7 +5365,7 @@ export class UI {
     if (id === 'btn-reload') return false;
     const painted = this._paintedStamp();
     if (stamp < painted) return true;
-    return this._hudArm && this._current === null && (id === 'btn-pause' || id === 'btn-fire') && stamp < painted + HUD_ARM_MS;
+    return this._hudArm && this._current === null && (id === 'btn-pause' || id === 'btn-fire' || id === 'btn-action') && stamp < painted + HUD_ARM_MS;
   }
 
   /** r7 (flow-coins:2): performance.now() ms from which the current screen counts as painted (showScreen, _armPaintMark);
@@ -4807,6 +5493,10 @@ export class UI {
       if (!(n > 0)) return;
       this._setSetting('sensitivity', n);
       this._syncSeg(seg, v);
+    } else if (seg.id === 'set-night') {               // r8 (P7)
+      if (v !== 'normal' && v !== 'bright') return;
+      this._setSetting('nightBright', v === 'bright');
+      this._syncSeg(seg, v);
     }
   }
 
@@ -4827,6 +5517,7 @@ export class UI {
       case 'set-reduced': if (isChange) this._setSetting('reducedMotion', !!t.checked); return;
       case 'set-hc': if (isChange) this._setSetting('hcGates', !!t.checked); return;
       case 'set-large': if (isChange) this._setSetting('largeText', !!t.checked); return;
+      case 'set-lefthand': if (isChange) this._setSetting('leftHanded', !!t.checked); return;
       // r7 (layout:3): not a saved setting — the toggle asks for the opposite of the real state (the change event runs
       // inside the click's / Space's user activation, so requestFullscreen is allowed); fullscreenchange or a refusal
       // re-syncs the box (_syncFullscreenButton)
@@ -4842,7 +5533,7 @@ export class UI {
       try { save.setSetting(key, value); } catch (_) { /* in-memory value still broadcast below */ }
     }
     this._emitSetting(key, value);
-    if (key === 'largeText' || key === 'reducedMotion' || key === 'hcGates') {
+    if (key === 'largeText' || key === 'reducedMotion' || key === 'hcGates' || key === 'leftHanded') {
       this._applyHtmlClasses();
       if (key === 'reducedMotion' && this._el.setReduced) this._el.setReduced.checked = this._reduced;
     }
@@ -4864,7 +5555,15 @@ export class UI {
     const code = e.code || e.key;
     if (code === 'Space' || code === ' ') { this._fireKey(e); return; }   // round 6: Space fires a stored weapon
     if (code === 'KeyF') { this._fullscreenKey(e); return; }
+    // r8 (P7): one press is one action: a held Enter's repeats on the focused action button click nothing (a kit each, otherwise)
+    if (e.repeat && code === 'Enter' && e.target === this._el.btnAction) { e.preventDefault(); return; }
     if (code === 'PageDown' || code === 'PageUp' || code === 'Home' || code === 'End') { this._pageKey(e, code); return; }
+    // r8 (P7): Esc / P on the briefing is its GOT IT (consumed: engine's would resume past it unread)
+    if (this._current === 'brief' && (code === 'Escape' || code === 'KeyP')) {
+      e.preventDefault(); e.stopPropagation();
+      if (!e.repeat) this._briefOk(e.isTrusted === true);
+      return;
+    }
     if (code !== 'Escape' || e.repeat) return;
     const cur = this._current;
     if (cur !== 'settings' && cur !== 'guide' && cur !== 'levels' && cur !== 'shop') return;
@@ -5322,19 +6021,21 @@ export class UI {
     st.backgroundPosition = 'center';
   }
 
-  /** conic-gradient ring strings for one item (its WEAPONS / GEAR colour over the panel colour), built once per id. */
-  _ringStrings(id) {
-    const hit = this._ringCache.get(id);
+  /** conic-gradient ring strings for one item (its WEAPONS / GEAR colour over the panel colour; r8: a hud:pill's `color` ≥ 0), built once per id. */
+  _ringStrings(id, color) {
+    const own = color >= 0;
+    const k = own ? '#' + color : id;
+    const hit = this._ringCache.get(k);
     if (hit) return hit;
-    const entry = itemEntry(id);
-    const col = hexCss(entry && Number.isFinite(entry.color) ? entry.color : PALETTE.flash.weaponEdge);
+    const entry = own ? null : itemEntry(id);
+    const col = hexCss(own ? color : (entry && Number.isFinite(entry.color) ? entry.color : PALETTE.flash.weaponEdge));
     const track = rgbaCss(PALETTE.ui.bgPanel, PALETTE.ui.bgPanelAlpha);
     const arr = new Array(RING_STEPS + 1);
     for (let i = 0; i <= RING_STEPS; i++) {
       const deg = (i * 360 / RING_STEPS).toFixed(1);
       arr[i] = 'conic-gradient(' + col + ' 0deg ' + deg + 'deg, ' + track + ' ' + deg + 'deg 360deg)';
     }
-    this._ringCache.set(id, arr);
+    this._ringCache.set(k, arr);
     return arr;
   }
 

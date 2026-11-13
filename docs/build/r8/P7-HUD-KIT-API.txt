@@ -1,0 +1,70 @@
+GATE RUSH 1.4.0 — THE HUD KIT (js/ui.js, P7). Draft for docs/ARCHITECTURE.md §8 (P10 folds it in).
+=====================================================================================================
+The HUD kit is a mode's generic HUD. A mode never touches the DOM: it emits these events and listens to two answers. Payload
+objects may be reused by the emitter (ui copies them in the listener and writes the DOM in update(), on change only). Everything
+is reset at level:start, so a mode only emits what it wants while it runs. Nothing here needs a mode: with no hud:* event the
+HUD is byte-for-byte the RUN HUD.
+
+EVENTS IN (mode -> ui)
+----------------------
+hud:progress { variant, segments, filled, endIcon, label }
+  variant   'segments' = the bar becomes `segments` cells (1-6, dividers at k/n); anything else = the run's bar again.
+  segments  number of cells.
+  filled    0..segments, may be fractional (the fill follows it; level:progress stops moving the bar while segments are on).
+            On a portrait box a segments label starts at the bar's left end and sets tighter: "NEXT SURGE 16" clears a 7-digit wallet with Large
+            text by 2 px at 320 x 568, so a label should not be longer than that one, and must stay shorter than the bar (it would move the bar).
+  endIcon   'skull' | 'barricade' | 'none'. Omitted = unchanged. level:start sets 'barricade' on a level whose script finale is
+            'hold', else 'skull'.
+  label     the text over the bar ('SURGE 2/3'); '' = 'LEVEL n'.
+  Campaign only; endless keeps its metres and mini-boss skull. Extra fields are ignored (hold.js sends boss).
+
+hud:counter { on, text }
+  A big line under the bar ('1,240 LEFT', 28 px Lilita). The power-up row, district tag and NEW card drop a row while it shows; under
+  the boss bar while that is up. Emit at most 10 Hz. Extra fields are ignored (hold.js sends value).
+
+hud:anchors { n, list: [{ id, x, y, state, label }] }
+  Up to 6 bubbles, projected by the mode at 10 Hz. n omitted or < 0 = list.length; n = 0 hides them.
+  id     anything; returned as-is in ui:anchorTap (hold.js uses the section index).
+  x, y   the bubble's centre in CSS px of #app (render.worldToScreen output).
+  state  'repair' | 'rebuild' (green rim, wrench, pulsing halo), 'gap' | 'busy' (amber rim, dim wrench), 'nokits' (red rim, dim wrench,
+         a shake), 'info' or any other non-empty string (blue rim); '' = this bubble hidden.
+  label  a chip under the bubble ('CLEAR THE GAP', 'NO KITS'); '' = none.
+  Size: 56 px; 48 px on landscape phones (max-height 500). Bubbles take no pointer: a drag over them still aims.
+
+hud:action { on, id, icon, label, badge, disabled }
+  The round button (64 px minimum), bottom-left, FIRE's mirror. Left-handed (settings.leftHanded, html.left-handed) swaps it with
+  FIRE and keeps the hint pill clear of both corners.
+  id        returned in ui:action (optional; hold.js sends none).
+  icon      an icon-atlas id (RENDER.icons row 2: 'kit', 'kit2', 'airstrike', 'flare', 'supply', and the item ids).
+  label     the chip under the button ('REPAIR'); part of its accessible name ("REPAIR · 3").
+  badge     the number in the corner; < 0 hides it.
+  disabled  grey; a press gives the refusal shake and NO event.
+
+hud:banner { text, kicker, color, seconds }
+  A centred card for `seconds` of theatre time (it holds while paused); kicker optional, color 0xRRGGBB (omitted or < 0: the UI
+  primary). seconds <= 0 or text '' hides it. The same banner (same kicker and colour) re-emitted while up only changes its text and
+  deadline, without popping again ('LINE COLLAPSING 3…2…1').
+
+hud:pill { id, icon, seconds, color }
+  A timer pill in the power-up row: icon-atlas `icon` (default id), ring colour 0xRRGGBB (omitted: the item's colour), counting
+  on the theatre clock. Re-emit to refresh; seconds <= 0 removes it. The row holds 3 pills, shared with weapons and gear.
+hud:pill { id, icon, seconds, text, x, y }
+  With `text`: a short label instead ('BREACH!', '+1 KIT') centred on x, y (CSS px of #app) for `seconds`, popping in; 3 at a time,
+  round-robin. Added for hold.js's world labels (P6's WIP already emitted this shape); the plan's list has no other DOM path for them.
+
+EVENTS OUT (ui -> mode)
+-----------------------
+ui:anchorTap { id }   a tap (engine's classifier: < STEER.tapMaxPx, < tapMaxMs, any pointer, a second finger during a drag too) inside
+                      a shown bubble, 8 px of slop, nearest bubble wins. Only while playing. The payload is reused.
+ui:action { id }      a press of the action button (pointerdown, or Enter on it), only while playing and not disabled. Reused payload.
+                      One press is one event, however long it is held: the click after a pointer press never acts, so a mode may
+                      spend a resource on every ui:action.
+
+RELATED
+-------
+Pause with a screen: engine.pause({ brief: key }) -> the paused state shows #scr-brief. ui does this itself on the first playing frame
+of a run whose type key has an undone hint 'mode.<key>'. See TYPES-UI-NOTES.txt.
+Debug overlay: while ctx.crowd.active, ui appends the crowd line; with ctx.hold.active it reads hold.botView { focusLevel, eased[3],
+holdActions }.
+CSS: the kit's DOM lives in the TYPES-UI region; P6's region may restyle it for the hold (ids #hud-counter, #hud-anchors > .anchor,
+#btn-action, #hud-banner, .hud-label, #progress-segs).

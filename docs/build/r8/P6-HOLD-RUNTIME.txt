@@ -1,0 +1,76 @@
+GATE RUSH 1.4.0 — THE HOLD RUNTIME (js/hold.js, boss.js hold mode, P6). Draft for docs/ARCHITECTURE.md (P10 folds it in).
+=====================================================================================================================
+A Horde level runs its gates, then digs in at the script's 'hold' event. hold.js is a ModeSystem (ARCH §5): level.js calls begin()
+and reads metric / fraction / stat; the crowd (js/crowd.js) is the zombies, boss.js in hold mode is the boss, and hold.js is everything
+between them: the timetable, the wall, the fire, the kits, the barricade, the lessons and the HUD kit events. tools/holdsim.js is the model
+of the same rules; every balance number was tuned there and measured in the engine with harness/p6/holdmx.mjs.
+
+FLOW
+  begin        the road stops so the wall face lands at z −3.9; squad 'wall' formation, hold rig, aim input, fire policy, troop placement;
+               kits = start + the run's crates + assist steps; boss.setHoldMode.
+  _startHold   road stopped: crowd.begin, live scaling at the dig-in (count above E_hold, HP everywhere: A9), the unit timetable, surge 1's ease.
+  step         surge decisions (D29), hold-action windows (D30), feed, boss at spec.boss.at, fire lists and focus, input, supply and airstrike,
+               lessons, HUD at 10 Hz.
+  end          boss:dead (win; crowd.flee), squad:dead (SQUAD LOST) or all sections down for overrunS (level.finish(false, 'overrun')).
+
+THE FIRE (weapons.setPolicy)
+  The policy is called once per round of the fold (rate = min(90, C·f)). k only counts: laneShare of the rounds leave from the in-lane shooters,
+  the rest from the others, each side round-robin. Why: holdsim budgets pierce by a column's share of the bullets; when in-lane shooters kept
+  only their own share of the rounds and took a heavier weight instead, a round at L29+ outweighed 4 units and the lane lost a quarter of its
+  kills. A round walks across its shooter's 1 m column by the golden step (PLAN horde 4.4: the first unit in the 1 m column takes it), so
+  units at the wall corners (|x| 3.4–3.73, beyond the outer shooter files) are under fire.
+  Boss share β: per-shooter accumulators send bossOnly rounds at the chest; the spitter share is applied straight to a holding spitter.
+  policy.crowdOnly: rifle rounds that fly on through an empty column do not test the boss (weapons.js), so the boss takes exactly its β share;
+  without it the bosses fell 25 % faster than the model and a parked lane could kill one.
+
+  Stored weapons (policy.weaponAdd = HORDE.weapons.add): a weapon never takes from the rifle fold in a hold. _fireConfig stays the rifle's; the
+  shotgun and minigun add weaponAdd × the fold's rounds and output on top (_fireAdd; SHOT.lane marks those rounds, hold._shot sends them from the
+  in-lane shooters, the minigun's re-aimed over the frame); rocket, railgun and laser run beside the rifles. The rifles already take most of
+  what walks into the lane (L43: rifles 71 % hit rate, the add rounds 54 %; a lane-clearing laser tops out near 1.6×), so the two bullet weapons
+  fire wider than the lane (HORDE.weapons.shotgun / minigun) to reach crowd the lane does not cover.
+
+SOFTWARE GL
+  The hold's view is all lit road and street, no sky: the same frame costs about 1.4 × a run's. A manual tier on software GL holds at render scale
+  HORDE.stop.softwareScale (hold._cutScale); Auto has its rungs and stays on them. Moving draws around (sky last, crowd first) measured nothing.
+
+THE WALL (crowd RULES, 30 Hz)
+  Claw slots: 5 per section, holders pinned in MODE.HOLD. holdsim's fire reaches its slot holders last (a list-order artefact the balance rests
+  on); the engine's nearest-first rounds strip them first. So on a section the lane does not cover (under half of it), the pile keeps its
+  slots: the next unit within slotReach of the face takes a free slot at once and lurches up, and under a pile (≥ wall.pile, contact ≥ the claw
+  delay) a take-over claws without its own delay. Inside the lane every unit serves its own delay, so focused fire protects a section.
+  Breach: tokens per s; a token passes a unit at the face, which lunges through the gap at passSpeed. Outside the lane it cannot be shot
+  on the way (its HP is set out of reach): the rifles' front-first rounds otherwise stopped half of the bites the model counts.
+  Climbers, spitters, brutes at the line, runners' re-targeting, repairs, rebuilds and the overrun clock follow holdsim's numbers.
+
+TROOPS (troops.setPlacement)
+  place(key, out) gives every slot; flameRange limits the wall flamer's jet to HORDE.troops.flameReach (the RUN jet, 13 m, wiped a parked hold).
+  lean: true (the ARCH §12 worst case, 5 troops + Twins + laser + crate + airstrike): troops cast no shadow and drop their ground rings, lens,
+  headlights and rotor discs while the hold runs. This takes the place of the named fallback's instanced troop merge.
+  reachZ: HF.rangeZ: troops shoot only inside rifle range, so a boss on its walk-in is no target (troops._bossInReach; crowd.highestHp takes the
+  same far z and skips units through a breach, whose PASS_HP would outrank the boss). A capped sniper shot lands HORDE.boss.sniperShot of the boss's
+  max HP after bossDamage (BOSS_SPEC.capHp), about a tenth of the rifles.
+
+BOSS (boss.js hold mode)
+  setHoldMode(o): no intro, letterbox or input lock. Walk-in pushing the crowd, wind-up → stagger → attack on a section the hold names,
+  phase minions into the crowd (never zombies.spawnWave), enrage enrageS s after arriving (charge, break, chew). botView reads unit x / z / hp.
+
+BOT VIEW
+  hold.botView is written only under ?debug=1. Bots act through input.aimTargetX and ui:action / ui:anchorTap only.
+
+HARNESS (new files, added by the steward)
+  bots/holdbots.mjs                the hold bots (holdPassive, swipeOnce, swipePerSurge, oscillator, aimer, aimerR, holdHuman, strongH)
+  p6/holdmx.mjs                    the Horde matrix (run bot + hold bot, --owner, --seq / --replayStreaks, --skipRun --arrival, --boss)
+  p6/holdcmp.mjs, tracecmp.mjs     engine against simulateHold on the same scripts, shop, arrival and hold seed
+  p6/b2sum.mjs, assistsum.mjs      summaries
+  p6/horde/peakprobe.mjs           HORDE ON SCREEN
+  p6/horde/holdperf.mjs            the hold against the same level as a RUN
+  p6/holdscreens.mjs, holdlife.mjs geometry and screenshots, lifecycle
+
+LESSON PILL IN A HOLD
+- Portrait: css HORDE region puts #hint at bottom 21 % at the full width while #hud.action-on: above the count label, under the section bars and bubbles. Between REPAIR and FIRE it stood 5-7 lines tall over the count.
+- Landscape: the pill stays in the bottom band. ui._placeHint's slide stops at the band css keeps clear of the action button (_hintEdgeL / R, read when the pill is measured), and slides as far as that band allows when it cannot clear the label.
+- p6/holdhint.mjs measures all 11 lessons in a real hold: 10 boxes x both hands x normal and Large text.
+
+QUITTING A HOLD
+- hold.reset() calls _hudOff() when a hold is active: the roar bed and the hold's HUD go with it, as at the end of a hold. p6/holdtrans.mjs covers pause > quit, a RUN level after it, overrun > retry and win.
+

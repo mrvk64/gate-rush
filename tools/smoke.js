@@ -27,6 +27,32 @@
 //   node tools/smoke.js --boss                  # jump the level to just before the boss (distance = length - 20)
 //   node tools/smoke.js --bootTimeout 60        # seconds to wait for the boot (default 30; raise it on a loaded host)
 //   node tools/smoke.js --root <dir>            # round 7: serve another tree with this harness (a before / after A/B)
+// 1.4.0 (r8 build):
+//   node tools/smoke.js --idle                  # truly hands-off: no drag, no bot, no FIRE press — no input of any kind
+//                                              #   (--nobot alone still makes the 120 px input-path drag = held right)
+//   node tools/smoke.js --events a,b,c          # log those game events: report.events [{ t, name, p }] (t = run seconds
+//                                              #   on the sim clock, p = the payload's scalar fields; ≤ 500 entries)
+//   node tools/smoke.js --expect 'boss:fight>=1' --expect 'boss:enrage@boss:fight+19..21'
+//                                              #   'name>=n' / 'name<=n' / 'name==n' counts, or 'name@ref+lo..hi': the FIRST
+//                                              #   name at or after the first ref must come lo..hi s after it (stricter than
+//                                              #   D41's "a name within lo..hi" when name repeats — an early one fails; the
+//                                              #   same for one-shot events such as boss:enrage); a miss is a CHECK FAILED
+//                                              #   (expected names are logged even when --events omits them)
+//   node tools/smoke.js --type horde            # ?type= (works with ?debug=1, which smoke always sets)
+//   node tools/smoke.js --skip [kind]           # level.debugSkip(kind) right after the start (default 'run'); a build
+//                                              #   without it is a CHECK FAILED
+//   node tools/smoke.js --digest                # report.digest: sha256 of the run's gameplay trail (start, gate passes,
+//                                              #   boss, end); runs on the real-time clock match only when frame timing
+//                                              #   does not matter — the harness (synthetic clock) is the parity tool
+//   node tools/smoke.js --quality med           # low | med (alias medium / mid) | high
+//   node tools/smoke.js --matrix [filter] --out d  # P8: every 1.4.0 type × High / Medium / Low / software GL × phone / landscape, one Chrome
+//                                              #   per cell (the lock is free between cells); a filter keeps the cells whose name holds any
+//                                              #   of its comma-separated parts ('horde', 'night-low-landscape'); --shell, --root, --bootTimeout
+//                                              #   pass through (the sw cells bring their own --gpu). A cell passes with verdict CLEAN, programs min == max, the draw caps (ARCH §12);
+//                                              #   writes <out>/matrix.json and exits 1 on any failed cell
+// With GR_HEAVY_LOCK / GR_CHROME_LOCK set (E:/Temp/claude/r8build/env.sh) smoke takes a node slot, then the machine-wide
+// Chrome lock (tools/lib/chrome-lock.js; a waiter logs '[chrome.lock] waiting'); the Chrome profile is a fresh folder in
+// os.tmpdir(), deleted at the end.
 //
 // Output: a JSON report on stdout (and <out>/report.json) with boot status, every page error,
 // console error/warning (deduped with counts), failed request, a 2 s timeline of game state,
@@ -64,8 +90,11 @@
 import puppeteer from 'puppeteer-core';
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { acquireHeavySlot, acquireChromeLock, releaseChromeLock, releaseHeavySlot } from './lib/chrome-lock.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -81,12 +110,32 @@ const opt = (name, dflt) => {
 const SERVE_ROOT = (() => { const r = opt('root', null); return typeof r === 'string' ? path.resolve(r) : ROOT; })();
 const SCENARIO = String(opt('scenario', 'play'));
 const SHELL = String(opt('shell', 'index'));
-const QUALITY = opt('quality', null);
+// 1.4.0: --quality low | med | high (medium / mid alias med, like main.parseParams)
+const QUALITY = (() => {
+  const q = opt('quality', null);
+  if (q === null) return null;
+  const v = String(q).toLowerCase() === 'medium' || String(q).toLowerCase() === 'mid' ? 'med' : String(q).toLowerCase();
+  if (v !== 'low' && v !== 'med' && v !== 'high') { console.error(`--quality must be low, med or high (got ${q})`); process.exit(2); }
+  return v;
+})();
 const LEVEL = Number(opt('level', 1));
 const SECONDS = Number(opt('seconds', 110));
 const SHOT_EVERY = Number(opt('shots', 8));
 const DESKTOP = !!opt('desktop', false);
-const NOBOT = !!opt('nobot', false);
+// 1.4.0: --idle = no input at all (implies --nobot: no drag, no steering, no FIRE press)
+const IDLE = !!opt('idle', false);
+const NOBOT = IDLE || !!opt('nobot', false);
+const TYPE = (() => { const t = opt('type', null); return typeof t === 'string' ? t : null; })();
+const SKIP = (() => { const k = opt('skip', null); return k === null ? null : (k === true ? 'run' : String(k)); })();
+const DIGEST = !!opt('digest', false);
+// --expect may repeat; each is 'name>=n' | 'name<=n' | 'name==n' | 'name@ref+lo..hi' (D41)
+const EXPECTS = argv.flatMap((a, i) => (a === '--expect' && argv[i + 1] !== undefined ? [argv[i + 1]] : []));
+const EXPECT_RE = /^([\w:.-]+)(?:(>=|<=|==)(\d+)|@([\w:.-]+)\+(-?[\d.]+)\.\.(-?[\d.]+))$/;
+for (const e of EXPECTS) if (!EXPECT_RE.test(e)) { console.error(`--expect '${e}': use name>=n, name<=n, name==n or name@ref+lo..hi`); process.exit(2); }
+const EVENTS = [...new Set([
+  ...String(opt('events', '') === true ? '' : opt('events', '')).split(',').map((s) => s.trim()).filter(Boolean),
+  ...EXPECTS.flatMap((e) => { const m = EXPECT_RE.exec(e); return m[4] ? [m[1], m[4]] : [m[1]]; }),
+])];
 const HEADFUL = !!opt('headful', false);
 const ENDLESS = !!opt('endless', false);
 const PRE = opt('pre', null);
@@ -167,6 +216,52 @@ const server = http.createServer((req, res) => {
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const PORT = server.address().port;
 
+// ---------------------------------------------------------------- matrix (P8)
+const MATRIX_TYPES = Object.freeze({ standard: { level: 2, seconds: 100 }, horde: { level: 9, seconds: 170 }, night: { level: 7, seconds: 135 } });
+const MATRIX_TIERS = Object.freeze({ high: ['--quality', 'high'], med: ['--quality', 'med'], low: ['--quality', 'low'], sw: ['--gpu', 'sw'] });
+const MATRIX_BOXES = Object.freeze({ phone: ['--viewport', '390x844'], landscape: ['--viewport', '844x390'] });
+const MATRIX_PRE = "for (const id of ['squad', 'fireRate', 'damage', 'coinMult', 'bossDamage']) g.save.setUpgrade(id, 6)";
+const MATRIX_ARGS = ['shell', 'root', 'bootTimeout'];   // passed to every cell
+/** ARCH §12's draw caps of one cell: { main, shadow, post } (night adds 2 main draws; Medium's post chain is shorter). */
+function matrixCaps(type, tier) { return { main: 50 + (type === 'night' ? 2 : 0), shadow: 20, post: tier === 'med' ? 10 : 14 }; }
+function matrixRow(name, type, tier, r) {
+  const fails = [];
+  if (!r) fails.push('no report');
+  else {
+    if (r.verdict !== 'CLEAN') fails.push('verdict ' + r.verdict);
+    if (!r.programs || r.programs.min !== r.programs.max) fails.push('programs ' + JSON.stringify(r.programs));
+    const cap = matrixCaps(type, tier);
+    for (const [id, c] of Object.entries(r.callsMax || {})) for (const k of ['main', 'shadow', 'post']) if (c[k] > cap[k]) fails.push(`${id} ${k} ${c[k]} > ${cap[k]}`);
+  }
+  return { cell: name, pass: fails.length === 0, fails, ended: r && r.result ? r.result.ended : null, programs: r ? r.programs : null, callsMax: r ? r.callsMax : null,
+    fps: r && r.perf ? r.perf.fps : null, clockRatio: r && r.perf ? r.perf.clockRatio : null, errors: r ? r.pageErrors.length + Object.keys(r.consoleErrors).length : null };
+}
+/** Runs the cells one after the other, each in its own smoke process, and exits. */
+async function runMatrix(filter) {
+  const { spawnSync } = await import('node:child_process');
+  const parts = typeof filter === 'string' ? filter.split(',').filter(Boolean) : [];
+  const rows = [];
+  for (const type of Object.keys(MATRIX_TYPES)) for (const tier of Object.keys(MATRIX_TIERS)) for (const box of Object.keys(MATRIX_BOXES)) {
+    const name = `${type}-${tier}-${box}`;
+    if (parts.length && !parts.some((p) => name.includes(p))) continue;
+    const dir = path.join(OUT, name), m = MATRIX_TYPES[type];
+    const cellArgs = [process.argv[1], '--level', String(m.level), '--seconds', String(m.seconds), '--shots', '40', '--out', dir, '--pre', MATRIX_PRE, ...MATRIX_TIERS[tier], ...MATRIX_BOXES[box]];
+    for (const k of MATRIX_ARGS) { const v = opt(k, null); if (typeof v === 'string') cellArgs.push('--' + k, v); }
+    const t0 = Date.now();
+    spawnSync(process.execPath, cellArgs, { stdio: 'ignore' });
+    let rep = null;
+    try { rep = JSON.parse(fs.readFileSync(path.join(dir, 'report.json'), 'utf8')); } catch { rep = null; }
+    const row = matrixRow(name, type, tier, rep);
+    row.wallS = Math.round((Date.now() - t0) / 1000);
+    rows.push(row);
+    console.log(`${row.pass ? 'ok  ' : 'FAIL'} ${name} ${row.wallS}s ended ${row.ended} programs ${row.programs ? row.programs.min + '/' + row.programs.max : '-'} fps ${row.fps} clock ${row.clockRatio} ${row.fails.join('; ')}`);
+    fs.writeFileSync(path.join(OUT, 'matrix.json'), JSON.stringify(rows, null, 1));
+  }
+  const bad = rows.filter((r) => !r.pass).length;
+  console.log(`smoke matrix: ${rows.length} cells, ${bad} failed`);
+  process.exit(bad ? 1 : 0);
+}
+
 // ---------------------------------------------------------------- report
 const VP = VIEWPORT
   ? (DESKTOP ? { width: VIEWPORT.w, height: VIEWPORT.h, deviceScaleFactor: 1 } : { width: VIEWPORT.w, height: VIEWPORT.h, deviceScaleFactor: 2, isMobile: true, hasTouch: true })
@@ -178,17 +273,33 @@ const report = {
   pageErrors: [], consoleErrors: {}, consoleWarnings: {}, failedRequests: [], dialogs: [],
   input: null, timeline: [], frames: null, result: null, ui: [], screenshots: [], home: null, checkFailures: [], verdict: 'unknown',
   fire: { presses: [], stored: [] },   // round 6: stored weapons and the bot's FIRE presses
+  idle: IDLE, type: TYPE, skip: SKIP, events: EVENTS.length ? [] : null, expect: EXPECTS.length ? [] : null, digest: null,   // 1.4.0
 };
 const bump = (bag, text) => { const k = text.slice(0, 400); bag[k] = (bag[k] || 0) + 1; };
 
 if (!CHROME) { console.error('No Chrome/Edge executable found'); process.exit(2); }
+if (opt('matrix', null) !== null) await runMatrix(opt('matrix', null));   // never returns
+// 1.4.0 (D24): a node slot first, then the machine-wide Chrome lock (no-ops without GR_HEAVY_LOCK / GR_CHROME_LOCK); the
+// profile is a fresh folder in os.tmpdir(), removed by finish() — on any other exit (a throw before finish(), Ctrl+C) by
+// the exit hook, which first ends our own Chrome if it still runs
+await acquireHeavySlot('smoke');
+await acquireChromeLock('smoke');
+const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'gr-smoke-'));
+let chromeProc = null;   // our Chrome's ChildProcess until finish() has closed it
+process.on('exit', () => {
+  try { if (chromeProc && chromeProc.exitCode === null && chromeProc.signalCode === null) chromeProc.kill(); } catch { /* gone */ }
+  try { fs.rmSync(PROFILE, { recursive: true, force: true, maxRetries: 4, retryDelay: 250 }); } catch { /* still locked */ }
+});
 const browser = await puppeteer.launch({
   executablePath: CHROME,
   headless: HEADFUL ? false : true,
+  userDataDir: PROFILE,
   args: ['--no-first-run', '--no-default-browser-check', '--autoplay-policy=no-user-gesture-required',
     ...GPU_ARGS, '--disable-background-timer-throttling',
     '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows'],
 });
+chromeProc = browser.process();
+const CHROME_PID = chromeProc ? chromeProc.pid : null;
 const page = await browser.newPage();
 await page.setViewport(VP);
 page.on('pageerror', (e) => report.pageErrors.push(String(e && (e.stack || e.message) || e).slice(0, 1500)));
@@ -207,6 +318,7 @@ const params = new URLSearchParams();
 params.set('debug', '1');
 params.set('nomusic', '1');
 if (QUALITY) params.set('quality', String(QUALITY));
+if (TYPE) params.set('type', TYPE);
 const url = SHELL === 'artifact' ? `/__artifact.html?${params}` : SHELL === 'sandbox' ? `/__sandbox.html?${params}` : `/index.html?${params}`;
 
 // The game lives in the top frame except for the sandbox shell (child iframe).
@@ -219,19 +331,57 @@ const shot = async (name) => {
   const b = await gameFrame.evaluate(() => performance.now()).catch(() => null);
   if (a !== null && b !== null) shotWindows.push([a, b]);
 };
-const ev = (fn, ...args) => gameFrame.evaluate(fn, ...args);
+// async: a detached frame (Chrome gone) throws synchronously inside puppeteer — as a rejection, the callers' .catch and
+// finish() still run
+const ev = async (fn, ...args) => gameFrame.evaluate(fn, ...args);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function finish(code) {
   // round 7: the engine's diagnostics log (window.__gateRushDiag without the console print) — states, screens, pointer
   // targets, blur / focus, pauses, frame gaps — so an unexpected pause or stall in a run is visible in the report
   report.diag = await ev(() => { const e = window.__game && window.__game.engine; return e && typeof e.diagText === 'function' ? e.diagText(false).split('\n') : null; }).catch(() => null);
+  await collectEvents();
   const errCount = report.pageErrors.length + Object.keys(report.consoleErrors).length;
   const checkCount = report.checkFailures.length;
   report.verdict = !report.boot.ok ? 'BOOT FAILED' : errCount ? `ERRORS (${errCount})` : checkCount ? `CHECK FAILED (${checkCount})` : 'CLEAN';
   fs.writeFileSync(path.join(OUT, 'report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
-  return browser.close().catch(() => {}).then(() => { server.close(); process.exit(code ?? (report.verdict === 'CLEAN' ? 0 : 1)); });
+  return browser.close().catch(() => {}).then(() => {
+    // 1.4.0: only our own Chrome (by PID, if close() left it running), then the temp profile and the locks
+    try { if (CHROME_PID) { process.kill(CHROME_PID, 0); process.kill(CHROME_PID); } } catch { /* already gone */ }
+    chromeProc = null;
+    try { fs.rmSync(PROFILE, { recursive: true, force: true, maxRetries: 4, retryDelay: 250 }); } catch { /* a file still locked: os.tmpdir() keeps it */ }
+    releaseChromeLock();
+    releaseHeavySlot();
+    server.close();
+    process.exit(code ?? (report.verdict === 'CLEAN' ? 0 : 1));
+  });
+}
+
+/** 1.4.0 (D41): report.events / report.expect / report.digest from the page's event log (installProbes hooks it). */
+async function collectEvents() {
+  const got = await ev(() => { const s = window.__smoke; return s ? { events: s.events || [], trail: s.trail || [] } : null; }).catch(() => null);
+  if (!got) { for (const e of EXPECTS) report.checkFailures.push(`expect ${e}: no event log (the run never started)`); return; }
+  if (report.events) report.events = got.events;
+  if (DIGEST) report.digest = { sha256: crypto.createHash('sha256').update(got.trail.join('\n')).digest('hex'), entries: got.trail.length, trail: got.trail.slice(0, 60) };
+  for (const e of EXPECTS) {
+    const m = EXPECT_RE.exec(e);
+    const of = (n) => got.events.filter((x) => x.name === n);
+    let ok, detail;
+    if (m[2]) {
+      const n = of(m[1]).length, want = Number(m[3]);
+      ok = m[2] === '>=' ? n >= want : m[2] === '<=' ? n <= want : n === want;
+      detail = `${m[1]} × ${n}`;
+    } else {
+      const ref = of(m[4])[0];
+      const hit = ref ? of(m[1]).find((x) => x.t >= ref.t) : null;
+      const dt = hit ? +(hit.t - ref.t).toFixed(2) : null;
+      ok = dt !== null && dt >= Number(m[5]) && dt <= Number(m[6]);
+      detail = !ref ? `no ${m[4]}` : !hit ? `no ${m[1]} after ${m[4]}` : `${m[1]} at ${m[4]} + ${dt} s`;
+    }
+    report.expect.push({ expect: e, ok, detail });
+    if (!ok) report.checkFailures.push(`expect ${e}: ${detail}`);
+  }
 }
 
 // ---------------------------------------------------------------- boot
@@ -279,12 +429,41 @@ if (!report.boot.ok || SCENARIO === 'boot') await finish();
 
 // ---------------------------------------------------------------- helpers in page
 async function installProbes() {
-  await ev(() => {
+  await ev((EVENTS) => {
     const g = window.__game;
     // frame-interval sampler (independent of the engine)
     window.__smoke = { intervals: [], stamps: [], last: performance.now(), pickups: [], stored: [], callsMax: {}, programs: { min: 1e9, max: 0 }, districts: [], drawList: [], peaks: {},
       // round 7: game clock vs real time over the frames spent playing, and the render scale (report.perf)
-      perf: { wall: 0, clock: 0, frames: 0, lt0: null, lt1: 0, wall0: null, wall1: 0, rsFirst: null, rsLast: null, rsMin: 9, rsMax: 0, scale: [] } };
+      perf: { wall: 0, clock: 0, frames: 0, lt0: null, lt1: 0, wall0: null, wall1: 0, rsFirst: null, rsLast: null, rsMin: 9, rsMax: 0, scale: [] },
+      events: [], trail: [] };   // 1.4.0: --events / --expect log and the --digest gameplay trail
+    // 1.4.0 (D41): the event log { t (run seconds, sim clock), name, p (the payload's scalar fields; payloads are reused,
+    // so they are copied at emit time) } and the gameplay trail; hooked once (installProbes runs per scenario)
+    if (g && g.events && typeof g.events.on === 'function' && !window.__smokeEventHook) {
+      window.__smokeEventHook = true;
+      const T = () => (g.run && Number.isFinite(g.run.elapsed) ? Math.round(g.run.elapsed * 100) / 100 : null);
+      const scalars = (p) => {
+        const o = {};
+        if (!p || typeof p !== 'object') return p === undefined ? null : p;
+        let n = 0;
+        for (const k in p) {
+          const v = p[k];
+          if (typeof v === 'number') o[k] = Math.round(v * 1000) / 1000;
+          else if (typeof v === 'string') o[k] = v.slice(0, 40);
+          else if (typeof v === 'boolean') o[k] = v;
+          else continue;
+          if (++n >= 12) break;
+        }
+        return o;
+      };
+      for (const name of EVENTS) g.events.on(name, (p) => { const s = window.__smoke; if (s.events.length < 500) s.events.push({ t: T(), name, p: scalars(p) }); });
+      const trail = (txt) => { const s = window.__smoke; if (s.trail.length < 2000) s.trail.push(txt); };
+      g.events.on('level:start', (p) => { window.__smoke.trail.length = 0; trail(`start L${p && p.level} s${p && p.seed}`); });
+      g.events.on('gate:pass', (p) => trail(`gate ${p.op}${p.value} ${p.before}>${p.after}`));
+      g.events.on('boss:spawn', (p) => trail(`boss ${p.name} ${Math.round(p.maxHp)}`));
+      g.events.on('boss:dead', () => trail(`boss dead t${T()}`));
+      g.events.on('level:complete', (p) => trail(`complete ${p.stars}★ ${p.survivors}`));
+      g.events.on('level:failed', (p) => trail(`failed ${Math.round(p.fraction * 1000) / 1000}`));
+    }
     if (g && g.events && typeof g.events.on === 'function' && !window.__smokeScaleHook) {
       window.__smokeScaleHook = true;
       g.events.on('quality:scale', (p) => { const s = window.__smoke; if (p && s.perf.scale.length < 100) s.perf.scale.push({ t: Math.round((g.time?.levelTime ?? 0) * 10) / 10, scale: p.scale, reason: String(p.reason), meanMs: Math.round((p.meanInt || 0) * 10) / 10 }); });
@@ -380,7 +559,7 @@ async function installProbes() {
         if (g.input) g.input.steerDx = (Math.max(-2.1, Math.min(2.1, tx)) - cur) / k;
       } catch (e) { b.err = String(e); }
     }, 100);
-  });
+  }, EVENTS);
 }
 
 async function snapshot() {
@@ -524,6 +703,12 @@ async function runPlay(level) {
     await sleep(200);
     report.afterResult = await ev((code) => { try { const g = window.__game; const v = new Function('g', code)(g); return 'ok ' + String(v ?? ''); } catch (e) { return 'AFTER ERROR ' + (e.stack || e); } }, String(AFTER));
   }
+  if (SKIP !== null) {
+    // 1.4.0: level.debugSkip(kind) (P1 / P1T) jumps a mode's phase; a build without it cannot honour --skip
+    const r = await ev((kind) => { const lv = window.__game.level; if (typeof lv.debugSkip !== 'function') return 'missing'; try { lv.debugSkip(kind); return 'ok'; } catch (e) { return 'threw ' + String(e).slice(0, 200); } }, SKIP);
+    report.skipResult = r;
+    if (r !== 'ok') report.checkFailures.push(`--skip ${SKIP}: level.debugSkip ${r}`);
+  }
   if (BOSS) {
     await sleep(300);
     report.bossJump = await ev(() => {
@@ -535,7 +720,7 @@ async function runPlay(level) {
     });
   }
   await sleep(600);
-  await realDrag();
+  if (!IDLE) await realDrag();                                   // 1.4.0: --idle sends no input at all
   if (!NOBOT) await ev(() => { window.__bot.on = true; });
   // round 5: the intervals are kept from the start call on (report.startFrames); `frames` still begins here
   const playT0 = await ev(() => performance.now());

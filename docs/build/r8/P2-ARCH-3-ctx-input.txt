@@ -1,0 +1,16 @@
+ARCHITECTURE.md §3 "The shared context ctx" — 1.4.0 draft by P2 (hooks; the release folds this into the .md)
+=============================================================================================================
+
+ctx.input gains these fields (all declared in engine.init's literal, so the object never changes shape):
+
+| `input.aimTargetX` | number (m) | engine (aim mode: the drag, A/D / arrows at SQUAD.aim.keySpeed, the stick) or a bot | the fire-lane target, clamped to ±range; never re-centred |
+| `input.aimX` | number (m) | engine, on the fixed step | follows aimTargetX at SQUAD.aim.follow (lerpExp), at most SQUAD.aim.maxSpeed m/s; what a hold reads as the lane |
+| `input.aiming` | boolean | engine.setInputMode | true while 'aim' |
+| `input.activityM` | number (m) | engine, on the fixed step | metres the ACTIVE target (targetX in 'steer', aimTargetX in 'aim') has travelled since boot; sampled once per fixed step (so a bot's direct write counts too); a mode switch or resetSteering is no travel. Consumers (level's per-event decision counter, A1) take differences |
+| `input.action` | { seq, name, arg } | engine (keys / gamepad, while playing) | latched action keys: 1-4 → 'snap' 0-3; Shift+1-4 → 'repair' 0-3; R or gamepad X → 'repair' −1 (the weakest). seq increments per action |
+| `input.tap` | { seq, x, y, t } | engine (tap classifier) | the last tap: any pointer that passed _pointerDown's UI / state tests, released (not cancelled) within SQUAD.steer.tapMaxMs (300) and never SQUAD.steer.tapMaxPx (10) from its press; a second finger during a drag included. x / y in client px, t = performance.now() |
+
+Unchanged rule: steerDx is still integrated ONCE per frame in beginFrame; in 'aim' it moves aimTargetX instead of targetX
+(k = getSteerK() × SQUAD.aim.k / SQUAD.steer.k), and squad.targetX stays where it was.
+
+ctx.engine gains `scalerGuard` { exemptMs: 0, dropOk: true } (written by a hold; see §6.2) and the getter `inputMode`.

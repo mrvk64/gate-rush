@@ -35,6 +35,7 @@
 //         squadX, bossX, bossZ, bossActive), ctx.squad (intersectsCircle, centerZ), ctx.state, ctx.time,
 //         ctx.rngFx, ctx.models.geo.shard, ctx.debug.dropped.
 // Writes: nothing on ctx; emits no events.
+// 1.4.0 hooks (ARCH §3): 'fx:burst', 'fx:decal' (id back in p.id), 'crowd:kills' (coalesced); JUICE.kinds / crowdKills.
 import {
   InstancedMesh, InstancedBufferAttribute, PlaneGeometry, BoxGeometry, ShaderMaterial, MeshBasicMaterial,
   Color, Vector3, Quaternion, Matrix4, DynamicDrawUsage, AdditiveBlending, NormalBlending, DoubleSide, LinearSRGBColorSpace,
@@ -102,6 +103,7 @@ const SPARK_SPEED = P_SPEED[K_SPARK], SPARK_UP = P_UP[K_SPARK], SPARK_LIFE = P_L
 const SPARK_GRAVITY = P_GRAVITY[K_SPARK], BOSS_SPARK_SIZE = P_SIZE[K_SPARK] * 1.2;
 const GATE_HIT_Y = GATE_RULES.panel.bottom + 0.15;   // gate-hit sparks never start below the panel's bottom edge
 const P_JITTER = 0.25;               // DATA-MISSING: JUICE.particles.jitter — ± life / size variation per particle
+const CK = JUICE.crowdKills;          // 1.4.0: crowd:kills coalescing
 
 // Burst presets (JUICE.bursts counts) → kind, colour, speed multiplier, spawn height offset.
 // DATA-MISSING: JUICE.burstStyle.<preset> = { kind, colorIdx, speedMult } (the GDD names counts and colours).
@@ -864,6 +866,9 @@ export class Fx {
     this._introFade = F64; this._introFade = 1;          // round-3 FTUE: label opacity while the boss-intro dolly runs (1 = shown)
     this._renderRef = null;                              // ctx.render, cached on first use (render.dollying)
     this._lastCount = 0;        // latest squad:count.count
+    // 1.4.0 crowd:kills: kills, coins, kill-weighted x / z sums, s since the last flush / coin flight, the last flush position
+    this._ckN = 0; this._ckCoins = F64; this._ckX = F64; this._ckZ = F64; this._ckT = F64; this._ckCoinT = F64;
+    this._ckCx = F64; this._ckCz = F64;
   }
 
   // ===========================================================================================
@@ -1485,6 +1490,7 @@ export class Fx {
     this._labelPending = -1;
     this._lastCount = 0;
     this._hideLabel();
+    this._ckN = 0; this._ckCoins = 0; this._ckX = 0; this._ckZ = 0; this._ckT = 0; this._ckCoinT = 0;   // 1.4.0
     // decals (every live id becomes stale)
     for (let i = 0; i < DECAL_SLOTS; i++) if (this._dActive[i]) this._freeDecal(i);
     setDrawCount(this.decals, 0);
@@ -1614,6 +1620,7 @@ export class Fx {
     this._updateScorch(sdt);
     this._updateFlights(udt, sdt);
     this._updateRamps(udt);
+    if (this._ckN > 0 || this._ckCoins > 0) this._flushKills(sdt);
   }
 
   /** Camera basis (right, up, forward, position) from the camera's world matrix (last frame's: render.update runs after). */
@@ -2932,6 +2939,10 @@ export class Fx {
     on('crate:open', function (p) { self._onCrateOpen(p); });
     on('item:pickup', function (p) { if (p && p.item !== 'coins') self.iconFlight(p.item, p.x, 0.8, p.z); });
     on('coin:pickup', function (p) { self._onCoinPickup(p); });
+    // 1.4.0 hooks
+    on('fx:burst', function (p) { self._onFxBurst(p); });
+    on('fx:decal', function (p) { self._onFxDecal(p); });
+    on('crowd:kills', function (p) { self._onCrowdKills(p); });
   }
 
   // ---- lifecycle -------------------------------------------------------------------------------
@@ -3362,5 +3373,51 @@ export class Fx {
     }
     if (p.source === 'pile') this._emitRaw(K_COINSPARKLE, 3, p.x, y, p.z, 0, 0.6, 0, 1.2, 0.5, P_LIFE[K_COINSPARKLE], P_SIZE[K_COINSPARKLE], P_GRAVITY[K_COINSPARKLE], 0, C_GOLD);
     this.coinFlight(p.x, y, p.z, p.amount);
+  }
+
+  // ---- 1.4.0 hooks ----------------------------------------------------------------------------
+  /** 'fx:burst' { kind, x, y, z, n?, color? }: a JUICE.kinds.burst preset, or 4 particles of a particle kind. */
+  _onFxBurst(p) {
+    if (!p || !this._inited) return;
+    const b = JUICE.kinds.burst[p.kind];
+    const k = PARTICLE_KIND[b !== undefined ? b.kind : p.kind];
+    if (k === undefined) return;
+    const col = typeof p.color === 'number' ? fxColorIndex(p.color) : (b !== undefined && b.color ? FX_COLOR[b.color] : P_COLOR[k]);
+    const road = this.ctx.world ? this.ctx.world.roadSpeed : 0;
+    this._emitRaw(k, p.n > 0 ? p.n | 0 : (b !== undefined ? b.n : 4), p.x, p.y, p.z, 0, 0, 0, P_SPEED[k] * (b !== undefined ? b.speed : 1), P_UP[k], P_LIFE[k], P_SIZE[k], P_GRAVITY[k], P_CARRY[k] * road, col);
+  }
+
+  /** 'fx:decal' { kind, x, z, size, seconds, color?, top? }: a JUICE.kinds.decal kind; p.id = its id (−1 refused). */
+  _onFxDecal(p) {
+    if (!p) return;
+    const name = JUICE.kinds.decal[p.kind] || p.kind;
+    p.id = DECAL_KIND[name] === undefined ? -1
+      : this.decal(name, p.x, p.z, p.size, p.seconds > 0 ? p.seconds : 1, typeof p.color === 'number' ? p.color : PALETTE.flash.red, p.top === true);
+  }
+
+  /** 'crowd:kills' { n, coins, x, z } batches sum until _flushKills. */
+  _onCrowdKills(p) {
+    if (!p || !(p.n > 0)) return;
+    this._ckN += p.n;
+    this._ckX += p.x * p.n; this._ckZ += p.z * p.n;
+    if (p.coins > 0) this._ckCoins += p.coins;
+  }
+
+  /** At most CK.flushHz: one blood burst (perKill per kill, ≤ cap); a coin flight every CK.coinEvery s. */
+  _flushKills(dt) {
+    this._ckT += dt; this._ckCoinT += dt;
+    if (this._ckT < 1 / CK.flushHz) return;
+    this._ckT = 0;
+    const n = this._ckN;
+    if (n > 0) {
+      this._ckCx = this._ckX / n; this._ckCz = this._ckZ / n;
+      this._emitRaw(K_BLOOD, Math.min(CK.cap, n * CK.perKill), this._ckCx, ZOMBIES.walker.height * BLOOD_Y_FRACTION, this._ckCz, 0, 0, 0,
+        P_SPEED[K_BLOOD], P_UP[K_BLOOD], P_LIFE[K_BLOOD], P_SIZE[K_BLOOD], P_GRAVITY[K_BLOOD], 0, C_BLOOD);
+      this._ckN = 0; this._ckX = 0; this._ckZ = 0;
+    }
+    if (this._ckCoins > 0 && this._ckCoinT >= CK.coinEvery) {
+      this.coinFlight(this._ckCx, 1, this._ckCz, this._ckCoins);
+      this._ckCoins = 0; this._ckCoinT = 0;
+    }
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "gate-rush",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": true,
   "type": "module",
   "description": "Gate Rush - mobile-first 3D zombie gate-runner (Three.js r170, procedural assets only)",

@@ -19,6 +19,8 @@
 //   troop:add { id }   troop:remove { id, reason }   troop:fire { id, x, y, z, tx, ty, tz } (sniper + drone shots; y = muzzle world y, ty = hit height)
 //   weapon:fire { id, x, z }   explosion { x, z, radius, kind:'apc' }
 //
+// 1.4.0 hooks (ARCH §3): setPlacement(provider); with no zombie target the sniper, flamer and drone use weapons' providers.
+//
 // Hot paths (step / render) allocate nothing: per-troop state lives in objects created once in init(),
 // THREE scratch vectors are module-level, the zombie scan callback is a module-level function reading
 // a module-level state object.
@@ -76,6 +78,8 @@ const Q_HIGHEST = { id: -1, x: -0, y: -0, z: -0, hp: -0 };
 const Q_NEAREST = { id: -1, x: -0, y: -0, z: -0 };
 const Q_RUNNER = { id: -1, x: -0, y: -0, z: -0 };
 const Q_FLAME = { id: -1, x: -0, y: -0, z: -0 };
+const Q_PROV = { id: -1, x: -0, y: -0, z: -0, hp: -0 };        // 1.4.0: a provider query's out
+const PLACE = { x: -0, y: -0, z: -0, yaw: -0 };                 // 1.4.0: setPlacement provider's out
 
 // Reused fx.emit option objects (fx copies the fields on receipt).
 const O_FLAME = { vx: -0, vy: -0, vz: -0, spread: -0, size: -0, life: -0, gravity: -0 };
@@ -165,6 +169,7 @@ const RE_LED = /led|lamp|headlight|light|lens/i;
 const RE_MUZZLE = /muzzle|nozzle|barrel/i;
 const RE_TANK = /tank/i;
 const RE_DISC = /disc/i;
+const RE_LEAN = /ring|lens|headlight|disc|^led/i;
 
 // ---------------------------------------------------------------------------------------------
 // Troops
@@ -194,6 +199,29 @@ export class Troops {
     this._refsBound = false;
     this._squad = null; this._zombies = null; this._weapons = null; this._boss = null; this._level = null; this._fx = null;
     this._hasForEach = false; this._hasSlotWorld = false; this._hasAimPoint = false;
+    this._placement = null;     // 1.4.0: setPlacement provider (null = the formation slots)
+    this._leaned = false;
+  }
+
+  /** 1.4.0: provider.place(key, out { x, y, z, yaw }) → true moves that troop's slot (out holds the default); null = none.
+   *  provider.lean (ARCH §12, a hold's draw budget): the troops cast no shadow and drop their ground rings, lens, LED, headlights, rotor discs. */
+  setPlacement(provider) {
+    this._placement = provider && typeof provider.place === 'function' ? provider : null;
+    this._lean(this._placement !== null && this._placement.lean === true);
+  }
+
+  _lean(on) {
+    if (on === this._leaned) return;
+    this._leaned = on;
+    for (let i = 0; i < COUNT; i++) {
+      const st = this._t[i];
+      if (!st || !st.mesh) continue;
+      st.mesh.traverse((o) => {
+        if (!o.isMesh) return;
+        o.castShadow = !on && !(o.material && o.material.transparent);
+        if (RE_LEAN.test(o.name)) o.visible = !on;
+      });
+    }
   }
 
   // ---- lifecycle ------------------------------------------------------------------------------
@@ -337,6 +365,8 @@ export class Troops {
     this._smokeAcc = 0;
     this._droneAcc = 0;
     this._flamerActive = false;
+    this._placement = null;     // 1.4.0: a level starts on the formation slots
+    this._lean(false);
   }
 
   /** Removes meshes from the scene and disposes the materials this module cloned. */
@@ -596,6 +626,21 @@ export class Troops {
         break;
       default: break;
     }
+    const pl = this._placement;
+    if (pl !== null) {
+      PLACE.x = st.tx; PLACE.y = st.ty; PLACE.z = st.tz; PLACE.yaw = st.tyaw;
+      if (pl.place(st.key, PLACE) === true) {
+        st.tx = PLACE.x; st.ty = PLACE.y; st.tz = PLACE.z;
+        if (st.aimHold <= 0) st.tyaw = PLACE.yaw;
+      }
+    }
+  }
+
+  /** 1.4.0: the first live weapons target provider offering method fn, or null. */
+  _prov(fn) {
+    const w = this._weapons, n = w !== null && w.targetCount > 0 ? w.targetCount : 0;
+    for (let i = 0; i < n; i++) { const p = w.targetAt(i); if (p.alive !== 0 && typeof p[fn] === 'function') return p; }
+    return null;
   }
 
   /** Exponential follow toward the target (snaps on a large jump); tracks velocity for lean/tilt. */
@@ -640,20 +685,30 @@ export class Troops {
     const ctx = this.ctx;
     const zombies = this._zombies;
     const dmg = TROOPS.sniper.dmg * this._waveHz() * this._profileDamage();   // 40·hz·d
+    const bossIn = this._bossInReach();
     let tx = 0, tz = 0, ty = SNIPER_HIT_Y, fired = false;
+    let pv = null;
     if (zombies !== null && zombies.highestHp(Q_HIGHEST)) {
       tx = Q_HIGHEST.x; tz = Q_HIGHEST.z;
       zombies.damage(Q_HIGHEST.id, dmg, Q_HIGHEST.x, SNIPER_HIT_Y, Q_HIGHEST.z, 'bullet');
       fired = true;
-    } else if (ctx.world.bossActive && this._boss !== null) {
+    } else if ((pv = this._prov('highestHp')) !== null && pv.highestHp(Q_PROV, this._reachZ())
+      && !(bossIn && this._boss.hp >= Q_PROV.hp)) {
+      // 1.4.0: no zombie — the providers' highest-HP unit in reach (unless the boss, in reach, has as much)
+      tx = Q_PROV.x; tz = Q_PROV.z;
+      pv.applyHit(Q_PROV.id, dmg, 1, Q_PROV.x, SNIPER_HIT_Y, Q_PROV.z, 'bullet');
+      fired = true;
+    } else if (bossIn) {
       if (this._hasAimPoint) this._boss.aimPoint(V_AIM);
       else V_AIM.set(ctx.world.bossX, BOSSES.coreY, ctx.world.bossZ);
       tx = V_AIM.x; tz = V_AIM.z; ty = BOSSES.coreY;
       // boss ×0.5 (TROOPS.sniper.bossMult), at most TROOPS.sniper.bossCapFrac of the boss's max HP per shot (round-3 verify:
       // 40·hz·d follows the wave hz, which carries endless's design multiple and pressure while the mini-boss HP does not —
-      // uncapped, one shot killed an endless Juggernaut 0.5 s after it spawned); shield-gauge weight 1; a crit number
+      // uncapped, one shot killed an endless Juggernaut 0.5 s after it spawned); shield-gauge weight 1; a crit number.
+      // r8 (P1 audit, D18): against boss.capHp (a campaign boss's HP before the floors, level._fireBoss): on the floor-raised
+      // max HP the cap let hands-off squads beat the under-curve floor (boss DPS up to 7× the formula)
       let bossDmg = dmg * TROOPS.sniper.bossMult;
-      const cap = SNIPER_BOSS_CAP * this._boss.maxHp;
+      const cap = SNIPER_BOSS_CAP * (this._boss.capHp > 0 ? this._boss.capHp : this._boss.maxHp);
       if (cap > 0 && bossDmg > cap) bossDmg = cap;
       this._boss.damage(bossDmg, SNIPER_SHIELD_WEIGHT, V_AIM.x, BOSSES.coreY, V_AIM.z, true);
       fired = true;
@@ -742,6 +797,8 @@ export class Troops {
           st.volley = ANIM.flamerVolleyEvery;                              // stay ready
         }
       }
+    } else if (this._prov('damageInCone') !== null) {
+      this._stepFlamerProv(st, dt, this._prov('damageInCone'));
     } else {
       this._flamerActive = false;
     }
@@ -754,7 +811,7 @@ export class Troops {
     const rng = this.ctx.rngFx;
     this._muzzleWorld(st, V_B);
     const active = this._flamerActive;
-    const speed = active ? TROOPS.flamer.range / ANIM.flameLife : ANIM.flamePilotReach / ANIM.flameLife;
+    const speed = active ? this._flameRange() / ANIM.flameLife : ANIM.flamePilotReach / ANIM.flameLife;
     const dirX = -Math.sin(st.yaw);
     const dirZ = -Math.cos(st.yaw);
     O_FLAME.life = ANIM.flameLife;
@@ -770,6 +827,25 @@ export class Troops {
       fx.emit('flame', V_B.x, V_B.y, V_B.z, 1, O_FLAME);
     }
   }
+
+  /** 1.4.0: no zombie — the cone burns provider pv's units, aimed at the nearest in reach. */
+  _stepFlamerProv(st, dt, pv) {
+    const range = this._flameRange();
+    this._flamerActive = typeof pv.nearest === 'function' && pv.nearest(st.x, st.z, Q_PROV) && this._flameAimable(st, Q_PROV, range + ANIM.flamerActiveMargin);
+    if (!this._flamerActive) return;
+    st.tyaw = clamp(yawToward(Q_PROV.x - st.x, Q_PROV.z - st.z), -ANIM.flamerAimMaxYaw, ANIM.flamerAimMaxYaw);
+    st.aimHold = ANIM.flamerAimHold;
+    pv.damageInCone(st.x, st.z, -Math.sin(st.yaw), -Math.cos(st.yaw), FLAME_HALF_RAD, range, TROOPS.flamer.dps * this._waveHz() * this._profileDamage() * dt, 'burn');
+  }
+
+  /** 1.4.0: the farthest z a troop shoots at: a placement provider's reachZ (the hold's rifle range), else no limit. */
+  _reachZ() { const pl = this._placement; return pl !== null && pl.reachZ < 0 ? pl.reachZ : -Infinity; }
+
+  /** 1.4.0: a living boss inside that reach (a hold boss on its walk-in is not a target yet). */
+  _bossInReach() { const w = this.ctx.world; return w.bossActive && this._boss !== null && w.bossZ >= this._reachZ(); }
+
+  /** 1.4.0: the jet's reach (m): a placement provider's flameRange (the hold's wall flamer), else the data's. */
+  _flameRange() { const pl = this._placement; return pl !== null && pl.flameRange > 0 ? pl.flameRange : TROOPS.flamer.range; }
 
   /** True when the zombie in `q` is ahead of the trooper, within `reach` and inside the aim arc. */
   _flameAimable(st, q, reach) {
@@ -807,15 +883,18 @@ export class Troops {
     const ctx = this.ctx;
     const zombies = this._zombies;
     const weapons = this._weapons;
-    let have = false, tx = 0, tz = 0;
+    let have = false, tx = 0, tz = 0, pv = null;
     if (zombies !== null && zombies.alive > 0) {
       if (zombies.nearestOfType('runner', st.x, st.z, Q_RUNNER)) {        // runners prioritised
         tx = Q_RUNNER.x; tz = Q_RUNNER.z; have = true;
       } else if (zombies.nearest(st.x, st.z, Q_NEAREST)) {
         tx = Q_NEAREST.x; tz = Q_NEAREST.z; have = true;
       }
+    } else if ((pv = this._prov('nearest')) !== null
+      && ((typeof pv.nearestOfType === 'function' && pv.nearestOfType('runner', st.x, st.z, Q_PROV)) || pv.nearest(st.x, st.z, Q_PROV))) {
+      tx = Q_PROV.x; tz = Q_PROV.z; have = true;                          // 1.4.0: a provider's units, runners first
     }
-    if (!have && ctx.world.bossActive && this._boss !== null) {
+    if (!have && this._bossInReach()) {
       if (this._hasAimPoint) this._boss.aimPoint(V_AIM);
       else V_AIM.set(ctx.world.bossX, BOSSES.coreY, ctx.world.bossZ);
       tx = V_AIM.x; tz = V_AIM.z; have = true;
@@ -881,7 +960,8 @@ export class Troops {
     SCAN.flame = f.present;
     SCAN.crush = a.present;
     if (zombies === null || !this._hasForEach || zombies.alive === 0 || (!SCAN.flame && !SCAN.crush)) {
-      if (SCAN.flame) this._flamerActive = false;
+      // 1.4.0: with no zombie alive _stepFlamer has decided (a provider's units in reach keep the jet open)
+      if (SCAN.flame && zombies !== null && zombies.alive > 0) this._flamerActive = false;
       return;
     }
     if (SCAN.flame) {

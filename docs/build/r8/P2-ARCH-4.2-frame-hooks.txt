@@ -1,0 +1,16 @@
+ARCHITECTURE.md §4.2 "Frame" — 1.4.0 additions by P2 (on top of P0's draft)
+=============================================================================
+
+A. beginFrame: in 'aim' mode the drag / keys / stick integrate into input.aimTargetX (clamped ±range) instead of targetX;
+   the keyboard lead / release rule (KB_LEAD) belongs to 'steer' only.
+B. _stepAll(STEP), before level.step:
+     if (aim mode) input.aimX follows input.aimTargetX (lerpExp at SQUAD.aim.follow, ≤ maxSpeed·STEP)
+     input.activityM += |active target − its value at the last step|      (targetX, or aimTargetX in 'aim')
+   then level → squad → troops → weapons → zombies → crowd → boss → gates → pickups → hold as before.
+   squad.step: a 'wall' formation holds x at 0 and ignores the lane lock; a formation change eases the records over
+   SQUAD.formations.wall.easeS (smoothstep) instead of the slot lerp.
+E. render.update → _updateCamera: after the count dolly and the framing constraint, a camera rig (render.setRig) blends the
+   follow pose to the rig's absolute pose and FOV (eased, unscaled time; a portrait rig with wallFrac derives its pitch from
+   the current FOV); title rig, game-over orbit, dolly and shake follow.
+G. audio.update: after the cue queue, while the state is 'playing', every 'audio:loop' whose period elapsed is re-played
+   (play(), so every limiter applies); in any other state the loops wait and re-play at once on resume.

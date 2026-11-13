@@ -10,7 +10,8 @@
 //
 // Rules honoured (§14): no console.log, no Math.random, every browser API guarded, private fields `_`,
 // all tuning numbers from data.js (the two persistence literals below are flagged DATA-MISSING).
-import { UPGRADES } from './data.js';
+// r8 (P1T) schema v2 (additive; a 1.3.0 build keeps it, tools/check-save.js): rec.t / metric / prev, modes, two settings.
+import { UPGRADES, LEVEL_TYPES } from './data.js';
 import { storage, warnOnce, clamp } from './util.js';
 
 // ---------------------------------------------------------------------------------------------
@@ -19,8 +20,8 @@ import { storage, warnOnce, clamp } from './util.js';
 
 /** localStorage key — ARCHITECTURE §12 "gaterush.v1". */
 const SAVE_KEY = 'gaterush.v1';
-/** Current schema version (ARCHITECTURE §12 `v: 1`). */
-const SAVE_VERSION = 1;
+/** Current schema version (ARCHITECTURE §12 `v: 1`; r8: 2). */
+const SAVE_VERSION = 2;
 // DATA-MISSING: SAVE.flushDebounceMs — ARCHITECTURE §6.15 / §12 "flush() is debounced 250 ms"
 const FLUSH_DEBOUNCE_MS = 250;
 // DATA-MISSING: SAVE.maxLevelKey — sanity cap for level ids accepted into data.levels (campaign loops past LEVELS.count)
@@ -30,6 +31,13 @@ const MAX_LEVEL_KEY = 9999;
 const PROFILE_FIELD = Object.freeze({ squad: 'startSquad', fireRate: 'fireRate', damage: 'damage', coinMult: 'coinMult', bossDamage: 'bossDamage' });
 /** Upgrade ids in UPGRADES order (the only five that exist; iterating UPGRADES is the contract). */
 const UPGRADE_IDS = Object.freeze(Object.keys(UPGRADES));
+
+/** r8 (P1T, D34): the type keys of save.modes and rec.t — never the base (night's is 'standard'). */
+const TYPE_KEYS = Object.freeze(Object.keys(LEVEL_TYPES).filter((k) => LEVEL_TYPES[k] && typeof LEVEL_TYPES[k].base === 'string'));
+/** r8: a modes entry's counters, and the bests a record keeps per type (rec.prev). */
+const MODE_FIELDS = Object.freeze(['runs', 'clears', 'kills', 'bestKills', 'metAtFrontier']);
+const BESTS = Object.freeze(['bestSurvivors', 'bestScore', 'bestCoins', 'metric']);
+const newMode = () => MODE_FIELDS.reduce((m, f) => { m[f] = 0; return m; }, {});
 
 /** Quality values a save may hold (QUALITY_TIERS.order + 'auto'); anything else → 'auto'. */
 const QUALITY_VALUES = Object.freeze(['auto', 'low', 'med', 'high']);
@@ -49,6 +57,8 @@ export function defaultSave(now) {
   const t = Number.isFinite(now) ? now : 0;
   const upgrades = {};
   for (let i = 0; i < UPGRADE_IDS.length; i++) upgrades[UPGRADE_IDS[i]] = 0;
+  const modes = {};
+  for (let i = 0; i < TYPE_KEYS.length; i++) modes[TYPE_KEYS[i]] = newMode();
   return {
     v: SAVE_VERSION,
     createdAt: t,
@@ -56,12 +66,14 @@ export function defaultSave(now) {
     coins: 0,
     upgrades,                                    // ranks 0..UPGRADES[id].ranks
     highestUnlocked: 1,                          // highest playable level
-    levels: {},                                  // "1": { stars, bestSurvivors, bestScore, bestCoins, clears }
+    levels: {},                                  // "1": { stars, bestSurvivors, bestScore, bestCoins, clears, t, metric, prev? }
+    modes,                                       // r8: per type key; metAtFrontier = highestUnlocked at its first run (0 = none)
     endless: { bestDistance: 0, bestScore: 0, runs: 0 },
     hints: {},                                   // id: true
     // round 5 (lead decision): music defaults to 70 (was 80). Only a profile without a stored music value gets it: the
     // additive fill (fillDefaults) never overwrites a stored value, so a player's saved 80 (or any other) is kept
-    settings: { sound: 100, music: 70, haptics: true, quality: 'auto', reducedMotion: null, hcGates: false, largeText: false, sensitivity: 1 },
+    settings: { sound: 100, music: 70, haptics: true, quality: 'auto', reducedMotion: null, hcGates: false, largeText: false, sensitivity: 1,
+                nightBright: false, leftHanded: false },   // r8: night brightness 'Bright', the mirrored HOLD buttons
     stats: { runs: 0, kills: 0, gatesPassed: 0, coinsEarned: 0, playSeconds: 0 },
     lastRunIncome: 0,
   };
@@ -121,6 +133,21 @@ const MIGRATIONS = [
   function v0toV1(data, defaults) {
     fillDefaults(data, defaults);
   },
+  // r8 (P1T): every record was earned as 'standard' (metric = its best survivors); modes.standard takes the clears, met at L1
+  function v1toV2(data, defaults) {
+    fillDefaults(data, defaults);
+    let clears = 0;
+    const keys = Object.keys(data.levels);
+    for (let i = 0; i < keys.length; i++) {
+      const rec = data.levels[keys[i]];
+      if (!isPlainObject(rec)) continue;
+      if (typeof rec.t !== 'string') rec.t = 'standard';
+      if (!Number.isFinite(rec.metric)) rec.metric = uint(rec.bestSurvivors, 0);
+      clears += uint(rec.clears, 0);
+    }
+    const m = data.modes.standard;
+    if (isPlainObject(m) && !(m.metAtFrontier > 0)) { m.clears = clears; m.runs = Math.max(uint(m.runs, 0), clears); m.metAtFrontier = 1; }
+  },
 ];
 
 /**
@@ -173,7 +200,22 @@ function sanitize(d, defaults, now) {
     rec.bestScore = uint(rec.bestScore, 0);
     rec.bestCoins = uint(rec.bestCoins, 0);
     rec.clears = uint(rec.clears, 0);
+    // r8: the type key (a newer build's string is kept), the metric, the previous type's bests
+    if (typeof rec.t !== 'string' || !rec.t) rec.t = 'standard';
+    rec.metric = uint(rec.metric, rec.bestSurvivors);
+    if (rec.prev !== undefined && !isPlainObject(rec.prev)) delete rec.prev;
+    else if (rec.prev) {
+      if (typeof rec.prev.t !== 'string' || !rec.prev.t) rec.prev.t = 'standard';
+      for (let b = 0; b < BESTS.length; b++) rec.prev[BESTS[b]] = uint(rec.prev[BESTS[b]], 0);
+    }
     if ((rec.stars >= 1 || rec.clears >= 1) && n > cleared) cleared = n;
+  }
+
+  // r8: modes — every counter a non-negative integer (a newer build's keys are kept)
+  if (!isPlainObject(d.modes)) d.modes = cloneDefault(defaults.modes);
+  for (let i = 0; i < TYPE_KEYS.length; i++) {
+    const m = isPlainObject(d.modes[TYPE_KEYS[i]]) ? d.modes[TYPE_KEYS[i]] : (d.modes[TYPE_KEYS[i]] = {});
+    for (let f = 0; f < MODE_FIELDS.length; f++) m[MODE_FIELDS[f]] = uint(m[MODE_FIELDS[f]], 0);
   }
 
   // round-2 QA UI-24: highestUnlocked is what recordLevel can have produced — the level after the largest cleared
@@ -205,6 +247,8 @@ function sanitize(d, defaults, now) {
   s.reducedMotion = (s.reducedMotion === null || s.reducedMotion === undefined) ? null : !!s.reducedMotion;
   s.hcGates = !!s.hcGates;
   s.largeText = !!s.largeText;
+  s.nightBright = !!s.nightBright;                // r8
+  s.leftHanded = !!s.leftHanded;
   const sens = num(s.sensitivity, defaults.settings.sensitivity);
   s.sensitivity = sens > 0 ? sens : defaults.settings.sensitivity;
 
@@ -226,6 +270,8 @@ function coerceSetting(key, value, defaults) {
     case 'haptics':
     case 'hcGates':
     case 'largeText':
+    case 'nightBright':
+    case 'leftHanded':
       return !!value;
     case 'reducedMotion':
       return (value === null || value === undefined) ? null : !!value;
@@ -422,29 +468,73 @@ export class SaveStore {
     this._commit('upgrade');
   }
 
-  /** Keeps per-level bests; a clear (stars ≥ 1) counts and unlocks level + 1. */
+  /**
+   * Keeps per-level bests; a clear (stars ≥ 1) counts and unlocks level + 1. r8 (P1T, D21): a clear as another r.typeKey than the
+   * record's moves its bests (score included) to rec.prev; rec.metric = the best r.metric; modes[typeKey] counts the clear.
+   */
   recordLevel(level, r) {
     const n = uint(level, 0);
     if (n < 1 || n > MAX_LEVEL_KEY) return;
     const res = isPlainObject(r) ? r : {};
     const stars = clamp(uint(res.stars, 0), 0, 3);
+    const tk = typeof res.typeKey === 'string' && res.typeKey ? res.typeKey : 'standard';
     const levels = this._data.levels;
     const key = String(n);
     let rec = levels[key];
     if (!isPlainObject(rec)) {
-      rec = { stars: 0, bestSurvivors: 0, bestScore: 0, bestCoins: 0, clears: 0 };
+      rec = { stars: 0, bestSurvivors: 0, bestScore: 0, bestCoins: 0, clears: 0, t: tk, metric: 0 };
       levels[key] = rec;
     }
+    if (stars >= 1 && rec.t !== tk) {
+      rec.prev = { t: rec.t };
+      for (let b = 0; b < BESTS.length; b++) { rec.prev[BESTS[b]] = uint(rec[BESTS[b]], 0); rec[BESTS[b]] = 0; }
+      rec.t = tk;
+    }
     rec.stars = Math.max(uint(rec.stars, 0), stars);
-    rec.bestSurvivors = Math.max(uint(rec.bestSurvivors, 0), uint(res.survivors, 0));
-    rec.bestScore = Math.max(uint(rec.bestScore, 0), uint(res.score, 0));
-    rec.bestCoins = Math.max(uint(rec.bestCoins, 0), uint(res.coins, 0));
+    if (rec.t === tk) {                          // a run in another type never touches the record's bests
+      rec.bestSurvivors = Math.max(uint(rec.bestSurvivors, 0), uint(res.survivors, 0));
+      rec.bestScore = Math.max(uint(rec.bestScore, 0), uint(res.score, 0));
+      rec.bestCoins = Math.max(uint(rec.bestCoins, 0), uint(res.coins, 0));
+      rec.metric = Math.max(uint(rec.metric, 0), uint(res.metric !== undefined ? res.metric : res.survivors, 0));
+    }
     if (stars >= 1) {
       rec.clears = uint(rec.clears, 0) + 1;
       const next = Math.min(MAX_LEVEL_KEY, n + 1);
       if (next > this._data.highestUnlocked) this._data.highestUnlocked = next;
+      const m = this._modeOf(tk);
+      if (m) m.clears = uint(m.clears, 0) + 1;
     }
     this._commit('level');
+  }
+
+  /** r8 (P1T, D21): `level` played as `typeKey` pays the replay rate — cleared in that type, or listed in `skip` (default
+   *  LEVEL_TYPES.retypeRewardSkip); a re-typed level's first new-type clear pays full. */
+  isReplay(level, typeKey, skip) {
+    const n = uint(level, 0);
+    const rec = this._data.levels[String(n)];
+    if (!isPlainObject(rec) || !(uint(rec.clears, 0) > 0)) return false;
+    return rec.t === (typeKey || 'standard') || (Array.isArray(skip) ? skip : LEVEL_TYPES.retypeRewardSkip).indexOf(n) !== -1;
+  }
+
+  /** r8 (P1T, D34): a run of `typeKey` starts — the first one records the frontier (highestUnlocked). Returns modes[typeKey]. */
+  meetType(typeKey) {
+    const m = this._modeOf(typeKey);
+    if (m && !(m.metAtFrontier > 0)) {
+      m.metAtFrontier = Math.max(1, uint(this._data.highestUnlocked, 1));
+      this._commit('mode');
+    }
+    return m;
+  }
+
+  /** r8 (P1T): a finished run of `typeKey` (won or lost) with `kills` kills. */
+  recordModeRun(typeKey, kills) {
+    const m = this._modeOf(typeKey);
+    if (!m) return;
+    const k = uint(kills, 0);
+    m.runs = uint(m.runs, 0) + 1;
+    m.kills = uint(m.kills, 0) + k;
+    m.bestKills = Math.max(uint(m.bestKills, 0), k);
+    this._commit('mode');
   }
 
   /** Endless bests (distance in whole metres, score) and runs++. */
@@ -572,6 +662,14 @@ export class SaveStore {
 
   _syncProfile() {
     if (this.ctx) this.ctx.profile = this.profile();
+  }
+
+  /** r8: modes[typeKey] (made when a stale save lacks it); null for an unknown key. */
+  _modeOf(typeKey) {
+    if (TYPE_KEYS.indexOf(typeKey) === -1) return null;
+    const modes = isPlainObject(this._data.modes) ? this._data.modes : (this._data.modes = {});
+    if (!isPlainObject(modes[typeKey])) modes[typeKey] = newMode();
+    return modes[typeKey];
   }
 
   /** Schedule a write and announce the change. */

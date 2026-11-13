@@ -17,14 +17,16 @@ import { AudioSystem } from './audio.js';
 import { Fx } from './fx.js';
 import { Squad } from './squad.js';
 import { Zombies } from './zombies.js';
+import { CrowdSystem } from './crowd.js';
 import { BossSystem } from './boss.js';
 import { Gates } from './gates.js';
 import { Pickups } from './pickups.js';
 import { Weapons } from './weapons.js';
 import { Troops } from './troops.js';
+import { HoldSystem } from './hold.js';
 import { LevelRunner } from './level.js';
 
-const VERSION = '1.3.0';            // ARCHITECTURE §3 ctx.version (= package.json version; round-7 release 1.3.0, sw.js v8)
+const VERSION = '1.4.0';            // ARCHITECTURE §3 ctx.version (= package.json version; round-8 release 1.4.0, sw.js v9)
 const RNG_BOOT_SEED = 1;            // §4.1 step 1: boot RNG for the title idle scene
 const RNG_FX_FORK = 7;              // §3: ctx.rngFx = ctx.rng.fork(7) — cosmetics never perturb gameplay
 const MAX_LEVEL_PARAM = 999;        // ?level= sanity cap (the campaign loops beyond LEVELS.count, §6.16)
@@ -63,8 +65,9 @@ const SYSTEMS_ALONE_MS = 100;
 // work into slices (`initSteps` left, `initStep()` runs one) that main runs one per frame after its init — the boss
 // rigs (≈ 45–60 ms each at 4×; 266 = the set) and the level generator's JIT warm-up (≈ 75 ms at 4×; level 1 → 76)
 const SYSTEMS = Object.freeze([
-  ['fx', Fx, 136], ['squad', Squad, 28], ['zombies', Zombies, 9], ['boss', BossSystem, 266],
-  ['gates', Gates, 33], ['pickups', Pickups, 16], ['weapons', Weapons, 8], ['troops', Troops, 13], ['level', LevelRunner, 76],
+  ['fx', Fx, 136], ['squad', Squad, 28], ['zombies', Zombies, 9], ['crowd', CrowdSystem, 10], ['boss', BossSystem, 266],
+  ['gates', Gates, 33], ['pickups', Pickups, 16], ['weapons', Weapons, 8], ['troops', Troops, 13], ['hold', HoldSystem, 10],
+  ['level', LevelRunner, 76],
 ]);
 
 /** The shared context; module-level so showFatal can reach ctx.ui / ctx.events once they exist. */
@@ -127,11 +130,12 @@ function installErrorHooks() {
 
 // ---------------------------------------------------------------------------------------------
 // URL parameters (§13): ?debug=1 ?level=N ?seed=N ?quality=low|med|high ?nomusic=1 ?reset=1 ?endless=1
+// r8 (P1T): ?type=<type key> (with ?debug=1) plays every campaign level as that type
 // ---------------------------------------------------------------------------------------------
 
 /** Parses location.search into ctx.config (isArtifact is filled in after #app resolves). */
 export function parseParams(search) {
-  const cfg = { debug: false, level: null, seed: null, quality: null, nomusic: false, endless: false, reset: false, isArtifact: false };
+  const cfg = { debug: false, level: null, seed: null, quality: null, nomusic: false, endless: false, reset: false, isArtifact: false, type: null };
   let params = null;
   try { params = new URLSearchParams(search || ''); } catch (_) { return cfg; }
   const flag = (key) => {
@@ -149,6 +153,8 @@ export function parseParams(search) {
   const q = (params.get('quality') || '').toLowerCase();
   if (q === 'low' || q === 'med' || q === 'high') cfg.quality = q;
   else if (q === 'medium' || q === 'mid') cfg.quality = 'med';
+  const type = params.get('type');
+  if (type) cfg.type = type;
   return cfg;
 }
 
@@ -312,10 +318,11 @@ export async function boot() {
     version: VERSION,
     config: parseParams(typeof location !== 'undefined' ? location.search : ''),
     app, canvas,
-    rng: null, rngFx: null, world: null, run: null, quality: null, events: null, save: null, profile: null,
+    rng: null, rngFx: null, rngShot: null, world: null, run: null, quality: null, events: null, save: null, profile: null,
     ui: null, render: null, models: null, audio: null, engine: null,
     time: null, state: null, input: null, debug: null,
-    fx: null, squad: null, zombies: null, boss: null, gates: null, pickups: null, weapons: null, troops: null, level: null,
+    fx: null, squad: null, zombies: null, crowd: null, boss: null, gates: null, pickups: null, weapons: null, troops: null, hold: null,
+    level: null,
   };
   ctx.config.isArtifact = app.dataset.shell === 'artifact';   // both shells put data-shell on #app (§3)
   ctx.rng = new Rng(RNG_BOOT_SEED);
@@ -431,8 +438,12 @@ export async function boot() {
   // of its own — ≈ 0.2 s at 4× — instead of after hideBoot in the same frozen frame as the prewarm's end)
   if (typeof window !== 'undefined') window.__game = ctx;
   if (ctx.config.endless) ctx.level.startEndless(ctx.config.seed === null ? undefined : ctx.config.seed);
-  else if (ctx.config.level !== null) ctx.level.start(ctx.config.level, ctx.config.seed === null ? undefined : ctx.config.seed);
-  else ctx.level.quitToTitle();
+  else if (ctx.config.level !== null) {
+    // r8 (P1T, D8): ?level=N waits behind the boot screen until it is ready (no compile, no generation in play)
+    const seed = ctx.config.seed === null ? undefined : ctx.config.seed;
+    await ctx.level.prepareFor(ctx.config.level, seed);
+    ctx.level.start(ctx.config.level, seed);
+  } else ctx.level.quitToTitle();
   progress(PROGRESS.done);
   await yieldFrame();   // paint the full bar before the first scene frame
 

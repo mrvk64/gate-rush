@@ -1,0 +1,15 @@
+GDD §9.3 STARS — 1.4.0 changes (draft by P1; P10 folds this into docs/GDD.md §9.3)
+=====================================================================================
+
+Replace the first sentence with:
+1★ boss killed. 2★ survivors R ≥ 0.5·E_boss(L). 3★ R ≥ three(L)·E_boss(L), with three = 0.80 on L1–5 (the teaching levels keep
+1.3.0's), 0.90 on L6–9 and 0.95 from L10 (data.STARS.threeByLevel / data.starThree(L)). Stars already earned are kept.
+
+Replace the round-7 helper sentence with:
+starNeed(target, k, L, threeFrac) — ceil(0.5·target) for 2★ and ceil(three·target) for 3★, three = threeFrac when a level
+type gives one (HORDE: 0.9 of E_hold) else starThree(L) — is the one helper behind the award, the results line and the title
+caption ("LEVEL 12 · ★★★ at 309 survivors" now reads 0.95·E_boss), so the number shown can never disagree with the stars given.
+The FIELD GUIDE's stars line reads "★★★ 80–95 % (it rises to L10)".
+
+Score (D45, for the Horde type): the RUN formula plus the hold's terms SCORE.hold { lineHeld 500, stagger 100 } (P1 adds
+the data; the Horde mode awards them).

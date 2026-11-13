@@ -1,0 +1,118 @@
+ARCHITECTURE.md — 1.4.0 draft by P3 (Horde generator and tools-side simulator); the release folds it into the .md
+=================================================================================================================
+(revised in P3 fix round 1: boss at x 0, D30 crates literal with off-centre drops, patterns never repeat, boss HP signature,
+validateHoldSection validates the run part, firstMeet / assist read from the spec; fix round 2: L4 ns 1,820, no centre
+opener after the debut, live hpExpAbove 0.25, drops at 2.0-3.0 m, the debut without brutes / spitters, the debut-flag check)
+
+§1 FILE MANIFEST (replace P0's js/holdgen.js row; add the tools row)
+
+| `js/holdgen.js` | P3 | Pure Horde generator (no THREE, no DOM; imports only `util.js` and `data.js`), imported ONLY by `levelgen.js`. `holdSpec(L, seed, opts)` → `{ run, hold, eTarget }`; `generateHoldScript(runScript, spec)` → a new script with `{ type: 'hold', at, spec: spec.hold }` appended (a 'boss' event in the run is dropped: the hold's boss replaces it; `at` = that boss's `at`, else the run's length). Deterministic: one mulberry32 stream seeded (seed·7919 + L). | 1.4.0 |
+| `tools/holdsim.js` | P3 | Node-only HORDE hold simulator (never shipped, never reached from js/): `simulateHold`, `buildSpawns`, `holdOf`, `runPhaseLines`, `runPartOf`, `validateHoldSection` (D37), `RULES`, `BOTS`, `C_RATIO`. The port of horde-v2's holdsim2 onto the game's data (holdgen's spec, data.expectedRanksOf, util hold math). | 1.4.0 |
+
+§6.x js/holdgen.js (new section)
+
+holdSpec(L, seed, opts) — opts { debut, boss, variant } all optional; debut defaults to L === HORDE_GEN.debut.level (level.js
+passes the LEVEL_TYPES.horde.debut verdict; the two must be equal — validateHoldSection errors when a script's debut flag
+differs from L === HORDE_GEN.debut.level). Below L4 (reachable only through ?type=horde&debug=1) the pattern bag is L4's.
+- run (the generateRunSteps options, D39): { gates (HORDE_GEN.run.gates: 4 at L4, 5 on L9-22, 6 from L23), eEnd = ref = E_hold,
+  noDiv / noTwoRed / noLesser (the debut run phase), crate 'item.kit' (the guaranteed kit crate), kitsLane 'item.kit2' and
+  kitsLaneFrom 13 (the purple KITS ×2 lane), fixed { lim 0.80, win 0.84, shops ['expected', 'max'], from 4, repairFrom 4 } }.
+- hold (stored in the script's hold event; everything that does not depend on how the level is played):
+  L, seed, eBoss, eHold = round5(0.75·eBossOf(L)), debut, variant;
+  pExp (fire × damage of data.expectedRanksOf(L)), profileExp (LEAK_MODEL.profileExpByLevel at L), surplusExp, design
+  (= E_hold·FIRE.rateBase·pExp·FIRE.accuracy), hz (the unit HP scale at C = E_hold and the expected shop:
+  rho(L)·design·spawnEnd / Σ N·baseHp);
+  surges [{ t, pattern, n, window, double, lag }], trickle (count), spawnEnd (last surge start + 5.5 s), mix [walker, runner,
+  crawler], brutes, spitters (both 0 on the debut, whatever the level), spitKills, climbK;
+  boss { id (data.bossIdOf), factor (HORDE_GEN.boss.factor × the archetype's BOSSES hpMult — the plan's hold HP factor),
+  bdExp (the expected shop's bossDamage multiplier), split (Twins: hpSplit, else 1), at (last surge start + 2 s), enrageS (30
+  on the debut, null = HORDE's 20 s), attacks (false on the debut) }. A single boss spawns at x 0, the Twins at ±2.2 m
+  (plan 9.1); the spec carries no x;
+  supply [{ t (s), x (m) }] — drop times at 35 % / 70 % of the spawn time; x = ±(2.0…3.0) m, the side and offset from the
+  spec stream: a drop never lands in or touching a lane parked at the centre (lane half-width 1.25 m + the 0.4 m crate
+  half-size = 1.65 m), so opening one always takes a lane move (D30). The model opens a crate when its centre is within
+  1.25 m of the lane centre for 1.0 s; any test up to footprint overlap keeps a centre-parked lane off every drop; airstrike (L ≥ 32), coinPerKill, firstMeet { threat, surge1NeedsDecisions, laterNeedsAction }, assist
+  { kitsPerStep, capPerStep } — hold.js reads firstMeet / assist HERE (the single source is HORDE_GEN through the spec; HORDE
+  carries no copy).
+- Patterns (plan 5.2): never the same pattern twice in a row. Surge 1 from HORDE_GEN.patterns.opener (a flank, the pincer or
+  the runner rush: after the debut never the centre, which a lane parked at the centre holds by itself), surge 2 from second
+  (always a flank or the pincer), later surges from the level's bag; the debut is centre, then a flank, then a bag pattern
+  that differs from the flank. A stampede / siege variant makes its LAST surge its runner rush / brute push (never surge 2,
+  which stays a flank or pincer), unless the surge before it already was one.
+- eTarget = E_hold.
+Live quantities are applied by hold.js at the dig-in with the util hold math (below); the generator never sees the squad.
+
+§6.1 util.js — 'Hold math' section (new; pure, shared by hold.js, holdgen.js and tools/holdsim.js)
+- holdHpScale(hz, p, pExp, exp, surplusExp) = hz·shopComp(p, pExp, exp, surplusExp) / pExp^exp — the live shop's unit HP scale
+  (horde-v2's (p / pExp)^exp at or below the expected shop; the whole surplus above it, D26).
+- holdLiveScale(r, HORDE_GEN.live), r = C / E_hold at the dig-in: the surge COUNTS × min(cap 2, r^expAbove) for r ≥ 1, × 1 below.
+- holdLiveHp(r, HORDE_GEN.live): the unit HP × max(floor 0.4, r)^exp for r < 1 (A9: the relief horde-v2 took off the counts;
+  what is on screen never shrinks), × r^hpExpAbove for r ≥ 1 (A4 key, 0.25: with the counts' r^0.75 the crowd's HP grows as
+  r^1.0 above E_hold, so a bigger squad meets a proportionally bigger crowd).
+- holdBossHp(eBoss, factor, r, p, bd, bdExp, HORDE_GEN.boss) = round(0.38·24·eBoss·factor·clamp(r^ratioExp, 0.6, 2)·
+  clamp(p^(0.9·min(1, r)), 1, 10)·bdExp^0.1·bd^0.9). ratioExp is 0.6 below E_hold and ratioExpAbove (A4 key, 1.0) above it;
+  p = (fireRate / rateBase)·damage of the live shop (horde-v2's m), bd = its bossDamage, bdExp = spec.boss.bdExp. The squad's
+  boss damage carries bd (plan 9.1 hit rule: profile.bossDamage); the bdExp^0.1·bd^0.9 term keeps an expected shop on
+  horde-v2's tuned boss TTK (horde-v2 had no boss-damage rank on either side) and nets a surplus (bd / bdExp)^0.1, as the
+  run's shop scale. Twins: each takes boss.split.
+- holdClimbK(eHold, HORDE_GEN.climb) = clamp(330 / E_hold, 1, 2).
+- holdFocusRate(f, 0.5) = 0.5 + 0.5·f for focus level f ∈ [0, 1] (dwell / 0.8 s).
+hold.js (P6) at the dig-in: hzShop = holdHpScale(hz, p, pExp, profileExp, surplusExp); countMult = holdLiveScale(r);
+hpLive = holdLiveHp(r). Unit HP = max(1, baseHp[type]·hzShop) × hpLive × (its surge eased ? spec.firstMeet.threat : 1):
+the floor applies to the shop-scaled HP only, so the A9 relief and the ease still act where it binds (L4); boss minions take
+max(1, baseHp·hzShop). An eased surge's units and the trickle that follows it spawn weaker, never fewer (D29 per surge, A9).
+The debut hold spawns no boss-phase brutes (the Hulk's 25 % brutes are dropped; its runners and walkers stay).
+
+§6.x tools/holdsim.js (new section)
+- simulateHold(scriptOrHold, bot, seed, opts): one hold at 30 Hz, deterministic per arguments. opts: cRatio | C, cVar, ranks,
+  firstMeet + runDecisions (D29), easeAll (every surge eased: the threat-0.85-on-every-surge bound), kitsExtra (D35 assist
+  steps), runKits, stored, sep, boss, bossHpMult, runS, trace; experiments: live / threat / bossRules overrides, relief and
+  ease ({ hp, win } exponents: where the below-E_hold factor and the threat act — unit HP and / or the surge spawn windows),
+  countEase (horde-v2's count relief, comparisons only), crateMoved (the pre-fix D30 reading), supplyX (horde-v2's drop x),
+  bossX, bossHpRun (the plan formula with m = the run's p·bd and no bdExp term). Returns won, stars, reason, C0 → C, hold /
+  level seconds, kills, peak alive, surge peaks within 40 m, wall / boss statistics, holdActions, holdSurgeWindows,
+  windupWindows, eased [3], easedBy [3] ('' | 'lane' | 'repair' | 'crate'), actionsBy { lane, repair, crate },
+  assistEligible, eligibleWithoutCrates.
+- Bots: passive, oscillator, aimer, aimerR (decent), human (skilled), strong (expert), swipeOnce (one 6.8 m drag at the
+  dig-in, then the lane rests at centre), swipePerSurge (a 2.5 m drag 2 s before each surge spawn), steerRunIdleHold (a
+  steered run's arrival and run decisions, then a passive hold).
+- Hold actions (D30, literal): a 3 s ring of lane-target travel sampled per tick; a window at each surge spawn and each boss
+  wind-up start counts one action when the target travelled ≥ 2 m, a repair was made or a supply crate was opened in the 3 s
+  before it. Every opened crate counts; drops land off the centre lane (holdgen), so a hands-off hold never opens one.
+- buildSpawns(hold, countMult, rand, surgeMult, winMult): the unit timetable [{ t, type, x, tx, s, p0, tr }] (s = the surge
+  whose ease the unit follows, p0 = its surge part's start, tr = 1 for trickle units). hold.js ports it with ctx.rng
+  (patterns: flank 80 % to the end section, sweeps by spawn phase, split alternating, brute push / crawler carpet / spitter
+  battery on one section per surge, double surges on the opposite flank after the lag).
+- runPhaseLines(L, script, ref): the run phase's fixed lines (levelgen.fixedLines) at the expected shop and at rank 10 with the
+  D26 wave compensation (DPS × p / shopComp(p, …, LEAK_MODEL.surplusExp), as levelgen's fixedCheck), as fractions of ref,
+  plus the greedy design line at the stop.
+- runPartOf(script): the run phase of a Horde script as levelgen generated it — its events with the run's boss (levelgen.
+  runCurve's bossId / bossHp, in the generator's shape) back at the stop, for levelgen.validateLevel: it deep-equals the
+  run script the generator returned (36/36 scripts checked), so the validator sees exactly the generated run phase.
+- validateHoldSection(script, { runs 3, runErrors }): the D37 report — E_hold, N, rho, the HP table, peak alive vs 2,048 + 256,
+  the fixed lines at both shops, the run phase's validator errors (validateLevel(runPartOf(script)) unless the caller passes
+  runErrors), passive (threat 1.0, the script's own seed, at max(0.7, the expected line)), aimerR and human over `runs` seeds
+  (a count: the report never depends on machine speed). ERRORS: expected line > 0.90·E_hold, passive clears, the run phase
+  invalid (any validator error — its E-trace outside the generator's ±traceTolerance band, a shape error, or an unknown item
+  until P1T adds 'item.kit' / 'item.kit2'), rank-10 line > 1.25·E_hold, peak alive > 2,304. WARNINGS: expected line > 0.82,
+  rank-10 line > 0.95, aimerR or human fails. Also an ERROR: the spec's debut flag ≠ (L === HORDE_GEN.debut.level). Cost
+  about 4-5.5 s per level in node (runs 3; the verifier's figure on a loaded machine) — P1T times validate-levels --type horde.
+- RULES: the runtime rule values the model assumes (PLAN horde 'Fixed values'); they must equal HORDE (P6). Not modelled: the
+  runtime's 0.5 s of clear gap before a breached section rebuilds (the model rebuilds once no unit is in the gap), so in-engine
+  rebuilds come slightly later than in the model.
+- Port parity: with countEase (pre-A9 counts), bossDamage rank 0 and horde-v2's crate x, the port reproduced plan r2's
+  holdsim2-r2 exactly before the fix round (108/108 holds; the verifier's extension 216/216 on all 12 levels).
+
+§9 DATA REGIONS — HORDE_GEN (P3)
+eHoldShare 0.75; rho lerp [[4, 0.505], [30, 0.73], [60, 0.865], [120, 0.955]]; surplusExp 1.0; baseHp walker 2 / runner 1.5 /
+crawler 1.5 / brute 24 / spitter 8; surges { count 3, firstAt 2, gap 20, jitter 3, antiRhythm 1.2, window [3.0, 5.5], shares
+[1.20, 1.25, 1.30], trickle 0.12, ns lerp [[4, 1820], [5, 2250], [30, 2400], [60, 2700]] (L4: horde-v2's 2,000 × 0.651 /
+0.717 — at the 1.4.0 L4 expected shop every fodder unit is on the 1-HP floor), double { from 19, chance 0.4,
+lateFrom 35, lateChance 0.6, split 0.55, lag [4.0, 6.5] } }; patterns { bag (step), opener [flankL, flankR, pincer, runnerRush], second [flankL, flankR, pincer], flank 0.8 }; variants
+{ from 20, list, stampedeRunners 0.12, siege 1.5, swarm 1.25 }; mix (step); counts { brutes, spitters, spitKills }; live { exp
+0.75, expAbove 0.75 (A4 key), hpExpAbove 0.25 (A4 key), floor 0.4, cap 2 }; firstMeet { threat 0.85, surge1NeedsDecisions 3,
+laterNeedsAction true }; assist { kitsPerStep 1, capPerStep 1, maxSteps 4 }; climb { ref 330, lo 1, hi 2 }; supply { at [0.35,
+0.70], x [2.0, 3.0], count (step), airstrikeFrom 32, airstrikeKits 3 }; boss { hpFrac 0.38, hpPerE 24, spawnAfter 2, factor,
+ratioExp 0.6, ratioExpAbove 1.0 (A4 key at its top), ratioMin 0.6, ratioMax 2, mExp 0.9, mMax 10 }; debut { level 4,
+enrageS 30 }; coins { scale, lateRef, n1, lineHeldPerL 10, kitRefund 10 }; run { gates (step), fixed, debut, crate, kitsLane,
+kitsLaneFrom }.

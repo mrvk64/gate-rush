@@ -13,7 +13,7 @@
 //               r170, the Google Fonts CSS and font files) copies the previous version's entries forward and fetches
 //               only what is missing (best effort), so the new worker is offline-ready the moment it takes over.
 //   • takeover  (a) the next launch after every old page closed — the browser activates the waiting worker before it
-//               serves the new navigation; or (b) the title's "Update ready — tap to reload" pill (js/ui.js): the page
+//               serves the new navigation; or (b) the title's "Update — tap to reload" pill (js/ui.js): the page
 //               posts { type: 'SKIP_WAITING' }, this worker activates and claims the page, and the page reloads on
 //               controllerchange into the new build. Nothing is swapped under a running session.
 //               The pill only shows when the waiting worker's build differs from the build the page runs: the page asks
@@ -44,9 +44,11 @@
 //   v7 → v8: release 1.3.0, the round-7 build (the no-GPU playtest: real-time play and render-scale rungs on slow machines,
 //            menus that answer at once, one wallet, the boss tutorial, lessons that wait for their gate, the FIELD GUIDE,
 //            the balance package, scrolling lists and fullscreen in SETTINGS). v7 shipped in the 1.2.2 dist/.
+//   v8 → v9: release 1.4.0 (round 8: harder campaign F12, boss enrage, HORDE and NIGHT levels, save v2). v8 shipped in the
+//            1.3.0 dist/.
 'use strict';
 
-const VERSION = 'v8';
+const VERSION = 'v9';
 const APP_CACHE = 'gaterush-' + VERSION;          // §15.4 cache names gaterush-<VERSION> / gaterush-cdn-<VERSION>
 const CDN_CACHE = 'gaterush-cdn-' + VERSION;
 const CACHE_PREFIX = 'gaterush-';
@@ -85,6 +87,10 @@ const PRECACHE = [
   './js/audio.js',
   './js/ui.js',
   './js/save.js',
+  './js/crowd.js',
+  './js/hold.js',
+  './js/holdgen.js',
+  './js/night.js',
 ];
 
 // The three.js r170 files the game imports through the import map (three + the addons and their own

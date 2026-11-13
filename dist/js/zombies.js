@@ -31,7 +31,7 @@ import {
   InstancedMesh, InstancedBufferAttribute, DynamicDrawUsage, PlaneGeometry, IcosahedronGeometry,
   MeshStandardMaterial, Color,
 } from 'three';
-import { clamp } from './util.js';
+import { clamp, warnOnce } from './util.js';
 import { WORLD, ZOMBIES, WAVE_PATTERNS, ECONOMY, TROOPS, FIRE, PALETTE, RENDER, JUICE } from './data.js';
 import { CharacterInstances } from './models.js';
 
@@ -554,6 +554,12 @@ export class Zombies {
   spawn(type, x, z, hp, opts) {
     const t = TYPE_INDEX[type];
     if (t === undefined) return -1;
+    // 1.4.0: a hold's units belong to the crowd — a spawn during one is counted and warned
+    const hold = this.ctx.hold;
+    if (hold && hold.active === true) {
+      noteDropped(this.ctx, 'zombies.spawnInHold');
+      warnOnce('zombies.spawnInHold', 'zombies.spawn() during a hold');
+    }
     if (this._freeTop[t] <= 0) { noteDropped(this.ctx, 'zombies.' + type); return -1; }
     const inst = this._inst[t];
     const i = inst.alloc();
@@ -1059,12 +1065,13 @@ export class Zombies {
     }
   }
 
-  /** Debug / tools iteration over the alive set: fn(id, type, x, z, hp). Killing the current zombie inside fn is safe. */
+  /** Debug / tools iteration over the alive set: fn(id, type, x, z, hp, yaw, vx, vz, pitch) (1.4.0: + yaw; r8 night: + the
+   *  velocity and lean render poses with, so night's eye sprites stay on the heads). Killing the current zombie inside fn is safe. */
   forEachAlive(fn) {
-    const X = this._x, Z = this._z, H = this._hp, state = this._state, type = this._type;
+    const X = this._x, Z = this._z, H = this._hp, state = this._state, type = this._type, Y = this._yaw;
     for (let s = 0; s < CAP; s++) {
       if (state[s] !== S_ALIVE) continue;
-      fn(makeId(s, this._gen[s]), TYPES[type[s]], X[s], Z[s], H[s]);
+      fn(makeId(s, this._gen[s]), TYPES[type[s]], X[s], Z[s], H[s], Y[s], this._vx[s], this._vz[s], this._pitch[s]);
     }
   }
 

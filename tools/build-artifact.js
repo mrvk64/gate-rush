@@ -11,7 +11,8 @@
 // <html>, <head>, <body>, manifest, icons, theme-color or service-worker script.
 //
 // Also parses sw.js's PRECACHE list and fails if any js/*.js file is missing
-// from it (§15.4). Zero dependencies, node ≥ 18.
+// from it (§15.4), and (1.4.0) fails if index.html's modulepreload list misses one (both shells preload the
+// whole module graph; a stale preload only warns). Zero dependencies, node ≥ 18.
 //
 // Usage: node tools/build-artifact.js [--in index.html] [--out artifact.html]
 //                                     [--sw sw.js] [--js js] [--no-sw-check] [--quiet]
@@ -227,6 +228,18 @@ function checkServiceWorker(opts) {
   if (!opts.quiet) process.stdout.write(`build-artifact: sw.js PRECACHE covers all ${jsFiles.length} files in ${jsDirName}/\n`);
 }
 
+/** 1.4.0: every js/*.js file has a <link rel="modulepreload" href="js/…"> in index.html (copied into the artifact). */
+function checkModulePreloads(preloads, opts) {
+  const jsFiles = fs.existsSync(opts.js) ? fs.readdirSync(opts.js).filter((f) => f.endsWith('.js')).sort() : [];
+  const jsDirName = path.relative(path.dirname(opts.in), opts.js).replace(/\\/g, '/') || 'js';
+  const hrefs = new Set(preloads.map((t) => attr(t, 'href')).filter(Boolean).map((h) => h.replace(/^\.\//, '')));
+  const missing = jsFiles.filter((f) => !hrefs.has(`${jsDirName}/${f}`));
+  if (missing.length) fail(`index.html has no <link rel="modulepreload"> for: ${missing.map((f) => `${jsDirName}/${f}`).join(', ')}`);
+  const stale = [...hrefs].filter((h) => h.startsWith(`${jsDirName}/`) && !jsFiles.includes(h.slice(jsDirName.length + 1)));
+  if (stale.length) warn(`index.html preloads files that do not exist: ${stale.join(', ')}`);
+  if (!opts.quiet) process.stdout.write(`build-artifact: modulepreload covers all ${jsFiles.length} files in ${jsDirName}/\n`);
+}
+
 // ---------------------------------------------------------------------------
 // Output sanity (the artifact shell is injected into a host skeleton)
 // ---------------------------------------------------------------------------
@@ -301,6 +314,7 @@ function main() {
   assertArtifactClean(out);
 
   checkServiceWorker(opts);
+  checkModulePreloads(preloads, opts);
 
   fs.writeFileSync(opts.out, out, 'utf8');
   if (!opts.quiet) {

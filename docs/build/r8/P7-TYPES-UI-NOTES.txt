@@ -1,0 +1,62 @@
+GATE RUSH 1.4.0 — TYPES UI (P7). Draft for docs/ARCHITECTURE.md §10 and the GDD UI chapters (P10 folds it in).
+=====================================================================================================
+LEVELS
+- Tile badge top-left (.tile-type): HORDE orange disc with crossed planks, NIGHT violet disc with a crescent, BLACKOUT the crescent
+  with a lightning slash (a night level in NIGHT CITY: L14, L45). Greyscale while locked. All CSS-drawn, no glyph.
+- Night tile: navy, 1 px #6E86C8 rim, two star dots. Locked night tiles keep the locked look.
+- D21 ring: a white ring with a glow in the type's colour on a cleared level whose rec.t differs from the level's type key, until its
+  first clear in the new type (save.recordLevel writes rec.t). LEVEL_TYPES.retypeRewardSkip opts a level out.
+- Legend line 2 (#levels-legend2): a chip per type the map plays, plus NEW WAY TO PLAY while some tile wears the ring.
+- Accessible name: "Level 14 · BLACKOUT · new way to play · NIGHT CITY".
+
+TITLE AND RESULTS
+- Caption "★★★ at N": starNeed(eTargetOf(L), 3, L, starThreeOf(L, key)).
+- PLAY and NEXT wear the badge of the level they start; accessible names "Play · HORDE", "Next · NIGHT".
+- Complete: a typed clear has a "LEVEL 43" kicker over its title (LINE HELD, NIGHT CLEARED). Horde adds "N ZOMBIES DOWN", a Line held chip
+  (breakdown.bonusMode) and SCORE n in the survivors line. Night splits its premium out of the stars' chip ("Night bonus +16"). The
+  chips still add up to the payout. The goal in the line uses eTarget and the type's 3★ fraction, and only a best earned in this type
+  compares (a re-typed level's first clear is no "new best").
+- Game over: a Horde run lost at the barricade (level:failed stat present) reads LINE OVERRUN (cause 'overrun') or SQUAD LOST, then
+  "SURGE k/3 · x OF y ZOMBIES · Coins kept +N" ("x ZOMBIES DOWN" when the mode reports no total). A Horde run lost before the barricade
+  reads as a run. Coaching line (#gameover-tip): 'MOVE YOUR FIRE AND REPAIR THE WALL' after a hold with < LEVELS.curve.assist.holdActions
+  counted actions; 'STEER TO PICK YOUR GATES' after a fail that did not count (D30).
+
+BRIEFING
+- level:start asks for it when: not endless, STRINGS.types.brief has the key, the level's own stage type is that key (a ?type= override
+  never shows it), hint 'mode.<key>' is not done, and the URL is not ?debug=1 without ?typesPreview=1 (so smoke and the harness are
+  never stopped by it). update() pauses on the first playing frame: engine.pause({ brief: key }), state 'paused', screen 'brief'.
+- GOT IT, Enter, Space, Esc and P all leave it. Only trusted input marks the hint. Android Back keeps it paused.
+- The HUD stays visible under it; hints queued for the run are kept.
+
+KICKER
+- district:change modeKey / modeColor: the small district tag gets a kicker in the type's colour, lightened for contrast: HORDE, NIGHT or
+  BLACKOUT. The big DISTRICT card keeps its own kicker.
+
+ENRAGE HUD
+- boss:fight enrageAt starts #boss-clock at the boss bar's top-right, on ctx.time.levelTime (stops with the game, slows with a slow-mo).
+  Red for the last 5 s. boss:enrage swaps it for the ENRAGED tag; the first time ever, the lesson HINTS['boss.enrage'] (names a stored
+  weapon when one is stored). Campaign bosses only: not on a mini-boss or in endless.
+- Where the clock stands. Portrait and tall landscape: in the name's row, at the right end. --bc-room (the width of its widest face, ENRAGED, in
+  its own type) stays free on the right and the same width stands on the left, so a short name stays centred; only the left spacer gives way,
+  so "COLOSSUS PRIME" moves left as far as it must and is never cut. Short landscape (<= 500 px tall): under the track's right end, so the r7
+  rules for the name there (left-aligned under 640 px wide, running past the bar up to the coin pill) work as in 1.3.0.
+- A change to the clock's type, padding or the ENRAGED text must keep --bc-room in step: typesui --views bossnames measures every boss name,
+  both faces, 11 viewports, normal and Large text, in Lilita One.
+- 512 x 297 (200 % zoom) keeps r7's bound at the coin pill: with a 5-digit wallet COLOSSUS PRIME loses 2.7 px, 27 px with Large text, and with
+  no clock the same. The row checks that the clock adds nothing there.
+
+FIELD GUIDE
+- Section LEVEL TYPES (type.horde, type.night): "???" and MEET IT ON LEVEL n (nextLevelOfType from the frontier) until the type is first
+  played; level:start marks the row. A type this build does not play hides its row, and a section with no row hides its heading.
+
+SETTINGS
+- Left-handed: always shown. Night brightness (Normal / Bright): shown once the map plays night and highestUnlocked >= the night debut.
+  P5's night reads settings:change nightBright.
+
+?typesPreview=1
+- The type views (grid, legend, caption, badges, Field Guide, settings) use the 1.4.0 stage map. What a level plays is unchanged, except
+  with ?debug=1&type=<key> as before. harness/p7/typesui.mjs drives every view and emits the hud:* events for the HUD kit demo.
+
+SIZE
+- The fixed DOM and copy of these views live in index.html, not in STRINGS (the js/ allowance, D46): legend line 2, the briefing's kicker and
+  GOT IT, the two settings labels, the anchors pool, the bar's dividers, the enrage clock.

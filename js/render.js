@@ -33,6 +33,8 @@
 // Members beyond §6.3 that other modules use (docs/build/CALLSITES.md): callStats {main, shadow, post,
 // total} (engine debug overlay), add(obj)/remove(obj) (scene helpers), digitAtlas/glow/icons getters and
 // glyphUV()/iconUV() shortcuts onto the TextureFactory, blobShadows (the Low-tier disc mesh).
+// 1.4.0 hooks (ARCH §3, no-ops until used): setRig, addWarmable / removeWarmable, the second icon row, lightsVersion.
+// r8 night (P5): render.night (js/night.js), setNight, programsReady / preparePrograms, variant-aware compile / warm-up / tier change.
 import {
   WebGLRenderer, WebGLRenderTarget, Scene, PerspectiveCamera, Color, Fog, Vector2, Vector3, Vector4,
   Mesh, InstancedMesh, CircleGeometry, PlaneGeometry, MeshBasicMaterial, CanvasTexture, DynamicDrawUsage,
@@ -47,13 +49,15 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { OutputShader } from 'three/addons/shaders/OutputShader.js';
 import { clamp, lerp, lerpExp, ease, mulberry32, isIOS, warnOnce } from './util.js';
-import { WORLD, QUALITY_TIERS, RENDER, PALETTE, GATE_RULES, JUICE, STRINGS, WEAPONS, GEAR, DISTRICTS } from './data.js';
+import { WORLD, QUALITY_TIERS, RENDER, PALETTE, GATE_RULES, JUICE, STRINGS, WEAPONS, GEAR, DISTRICTS, NIGHT, NIGHT_DISTRICTS } from './data.js';
 import { detectTier, maxAutoTierFor, isSoftwareGpu } from './engine.js';
 import { MaterialLibrary } from './materials.js';
 import { Environment } from './environment.js';
+import { installNightChunks, NightSystem, applyVariant, variantFor } from './night.js';
 
 export { MaterialLibrary } from './materials.js';
 export { Environment } from './environment.js';
+export { NIGHT_UNIFORM, EYE_FRAG } from './night.js';
 
 // ---------------------------------------------------------------------------------------------
 // Constants
@@ -108,6 +112,11 @@ const COMPILE_STAND = {
   traverse(cb) { cb(this); },
   traverseVisible(cb) { cb(this); },
 };
+/** r8 night: every material of `ms` (one or an array) to night variant v. */
+function varyMaterials(ms, v) {
+  if (Array.isArray(ms)) { for (let i = 0; i < ms.length; i++) applyVariant(ms[i], v); } else applyVariant(ms, v);
+}
+
 /** Loads `o`'s program-relevant fields (material `over` when given) into COMPILE_STAND and returns it. */
 function compileStandIn(o, over, parent) {
   const s = COMPILE_STAND;
@@ -614,9 +623,11 @@ const BOLT_ASPECT = 0.62;        // shape constant: bolt width / height
 const BOLT_FILL_H = 0.8;         // shape constant: bolt height / padded cell height (≈ the old font bolt; advance 0.6 em)
 const TEXT_PRESENTATION = '︎';   // variation selector 15: monochrome (text) glyph instead of a colour emoji
 // Icon atlas layout: RENDER.icons.order cells of (textures.icons width / count) px, square, along the top
-// row of the canvas (512 / 16 = 32 px; the 64 px canvas height leaves the second row transparent so mip
-// levels never bleed vertically). Icons are drawn in a 32-unit design space centred on the cell.
+// row of the canvas (512 / 16 = 32 px; the row under each icon row stays transparent so mip levels never
+// bleed vertically; 1.4.0: RENDER.icons.row2 is the third, cells ICON_COUNT + col). Icons are drawn in a 32-unit
+// design space centred on the cell.
 const ICON_COUNT = RENDER.icons.order.length;
+const ICON_ROW2 = RENDER.icons.row2 || [];
 const ICON_CELL = Math.floor(RENDER.textures.icons[0] / ICON_COUNT);
 const ICON_DESIGN = 32;          // shape constant: design-space size the pictograms below are drawn in
 const ICON_INSET = 0.5;          // shape constant: half-texel UV inset against neighbour bleed
@@ -742,13 +753,14 @@ export class TextureFactory {
   /** UVs of an item icon cell (square); `id` is an item id ('weapon.shotgun') or an icon key ('shotgun').
    *  Unknown id → empty rect. */
   iconUV(id, out) {
-    const col = this._iconCol(id);
-    if (col < 0) { out.u0 = 0; out.v0 = 0; out.u1 = 0; out.v1 = 0; return; }
+    const cell = this._iconCol(id);
+    if (cell < 0) { out.u0 = 0; out.v0 = 0; out.u1 = 0; out.v1 = 0; return; }
     const W = RENDER.textures.icons[0], H = RENDER.textures.icons[1];
+    const col = cell % ICON_COUNT, y0 = cell < ICON_COUNT ? 0 : 2 * ICON_CELL;   // 1.4.0: row2
     out.u0 = (col * ICON_CELL + ICON_INSET) / W;
     out.u1 = ((col + 1) * ICON_CELL - ICON_INSET) / W;
-    out.v1 = 1 - ICON_INSET / H;                      // top row of the canvas (flipY)
-    out.v0 = 1 - (ICON_CELL - ICON_INSET) / H;
+    out.v1 = 1 - (y0 + ICON_INSET) / H;               // canvas row 0 is the top (flipY)
+    out.v0 = 1 - (y0 + ICON_CELL - ICON_INSET) / H;
   }
 
   /** PNG data URL of one icon at px × px for DOM pills (cached per id + size); '' when unavailable. The
@@ -763,7 +775,7 @@ export class TextureFactory {
     let url = '';
     try {
       const c = makeCanvas(size, size), g = ctx2d(c);
-      this._paintIcon(g, RENDER.icons.order[col], size / 2, size / 2, size / ICON_DESIGN);
+      this._paintIcon(g, col < ICON_COUNT ? RENDER.icons.order[col] : ICON_ROW2[col - ICON_COUNT], size / 2, size / 2, size / ICON_DESIGN);
       url = c.toDataURL('image/png');
     } catch (_) { url = ''; }
     this._iconCache.set(key, url);
@@ -988,9 +1000,13 @@ export class TextureFactory {
     if (this._recs.length) this.verify();
   }
 
+  /** Cell of an item id / icon key: its column in order, ICON_COUNT + its column in row2 (1.4.0), or −1. */
   _iconCol(id) {
     const key = RENDER.icons.ofItem[id] !== undefined ? RENDER.icons.ofItem[id] : id;
-    return RENDER.icons.order.indexOf(key);
+    const c = RENDER.icons.order.indexOf(key);
+    if (c >= 0) return c;
+    const c2 = ICON_ROW2.indexOf(key);
+    return c2 >= 0 ? ICON_COUNT + c2 : -1;
   }
 
   _tex(canvas, o) {
@@ -1387,7 +1403,7 @@ export class TextureFactory {
     star(W - H / 2, H / 2, 6, 18, 6, 16);
   }
 
-  // icons 512×64: RENDER.icons.order pictograms in square ICON_CELL cells along the top row
+  // icons 512×128: RENDER.icons.order pictograms in square ICON_CELL cells along the top row, RENDER.icons.row2 in the third
   _paintIcons(c) {
     const g = ctx2d(c);
     resetCtx(g, c);
@@ -1397,6 +1413,13 @@ export class TextureFactory {
       g.save();
       g.beginPath(); g.rect(i * ICON_CELL, 0, ICON_CELL, ICON_CELL); g.clip();
       this._paintIcon(g, order[i], i * ICON_CELL + ICON_CELL / 2, ICON_CELL / 2, s);
+      g.restore();
+    }
+    const y2 = 2 * ICON_CELL;                                  // 1.4.0: row2
+    for (let i = 0; i < ICON_ROW2.length; i++) {
+      g.save();
+      g.beginPath(); g.rect(i * ICON_CELL, y2, ICON_CELL, ICON_CELL); g.clip();
+      this._paintIcon(g, ICON_ROW2[i], i * ICON_CELL + ICON_CELL / 2, y2 + ICON_CELL / 2, s);
       g.restore();
     }
   }
@@ -1424,6 +1447,11 @@ export class TextureFactory {
     const seam = (x0, y0, x1, y1) => { g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.strokeStyle = outline; g.lineWidth = ICON_SEAM / unit; g.stroke(); };
     // a sub-frame: offset, rotation, uniform scale k (outline widths compensate)
     const frame = (dx, dy, rot, k, fn) => { g.save(); g.translate(dx, dy); g.rotate(rot); g.scale(k, k); const u = unit; unit = u * k; fn(); unit = u; g.restore(); };
+    // 1.4.0: a toolbox (handle, box, lid band) with a white wrench, at (dx, dy) × k
+    const box = (dx, dy, k, hex) => frame(dx, dy, 0, k, () => {
+      rr(-6, -13, 12, 7, 2.5, METAL); rr(-15, -8, 30, 21, 3, hex); rr(-15, -8, 30, 6, 2, METAL_DK);
+      frame(0, 5.5, -0.5, 1, () => { rr(-10, -1.6, 15, 3.2, 1.2, HI); circle(8, 0, 3.6, HI); });
+    });
     const draw = {
       // pump shotgun: orange stock, receiver and pump grip; gunmetal barrel over a darker magazine tube
       shotgun() {
@@ -1527,6 +1555,26 @@ export class TextureFactory {
         poly([-15, -6, 7, -6, 15, 0, 15, 6, -15, 6], PALETTE.soldier.helmet);
         circle(-9, 7.5, 4.5, METAL_DK); circle(0, 7.5, 4.5, METAL_DK); circle(9, 7.5, 4.5, METAL_DK);
         fs(PALETTE.troop.apcLight); g.fillRect(11.5, -1, 2.5, 3);
+      },
+      // 1.4.0 row2: repair kit (a toolbox with a white wrench), two kits (item purple), airstrike (a jet from above dropping a
+      // bomb), flare (a red stick, flame and halo), supply drop (a crate under a parachute)
+      kit() { box(0, 0, 1, PALETTE.ui.primary); },
+      kit2() { box(-4.5, 5.5, 0.62, PALETTE.gate.item.tint); box(4.5, -5.5, 0.62, PALETTE.gate.item.tint); },
+      airstrike() {
+        frame(2, -2, Math.PI / 4, 1, () => poly([0, -16, 3, -9, 3, 1, 15, 8, 15, 11, 3, 8, 3, 12, 7, 15, 7, 16.5, 0, 15, -7, 16.5, -7, 15, -3, 12, -3, 8, -15, 11, -15, 8, -3, 1, -3, -9], METAL));
+        frame(-9.5, 9.5, Math.PI / 4, 1, () => rr(-2.6, -5, 5.2, 10, 2.6, WEAPONS.rocket.color));
+      },
+      flare() {
+        g.beginPath(); g.arc(5, -6, 10.5, 0, 6.2832); fs(rgbaCss(PALETTE.fx.flame, 0.35)); g.fill();
+        frame(0, 0, 0.6, 1, () => rr(-2.8, -4, 5.6, 19, 1.5, PALETTE.ui.danger));
+        g.beginPath(); g.moveTo(3.5, -15.5); g.bezierCurveTo(10, -8, 9.5, -3, 6, -1); g.bezierCurveTo(2.5, 1, -1, -2, 0, -6); g.closePath(); paint(PALETTE.fx.flame);
+        circle(4.3, -4.8, 2.3, PALETTE.fx.spark);
+      },
+      supply() {
+        g.beginPath(); g.moveTo(-14, -4); g.quadraticCurveTo(-14, -16, 0, -16); g.quadraticCurveTo(14, -16, 14, -4); g.quadraticCurveTo(0, -9, -14, -4); paint(PALETTE.ui.primary);
+        seam(-12, -4.5, -6, 2); seam(12, -4.5, 6, 2);
+        rr(-8, 2, 16, 13.5, 1.5, PALETTE.crate.body);
+        seam(-8, 8.75, 8, 8.75);
       },
       // coins: a gold coin with an inner rim and a glint
       coins() {
@@ -1656,6 +1704,21 @@ export class RenderSystem {
     this._fovP = 0.5; this._fovP = 55; this._fovL = 0.5; this._fovL = 42;
     this._camX = 0.5; this._camX = 0; this._lookX = 0.5; this._lookX = 0;
     this._idleOn = false; this._idleBlend = 0.5; this._idleBlend = 0;
+    // 1.4.0: camera rig (blend 0 run … 1 rig, target, tween s, definition, name), warmables, lights version
+    this._rig = 0.5; this._rig = 0; this._rigTarget = 0;
+    this._rigTween = 0.5; this._rigTween = RENDER.rigs.hold.tween;
+    this._rigDef = RENDER.rigs.hold; this._rigName = 'run';
+    this.warmables = [];
+    this.lightsVersion = 0;
+    // r8 night (P5): the night system (its meshes join the scene at the first prepare), the night tables' packs, the ready keys
+    // (_progKey), the run in flight, a context generation
+    this.night = null;
+    this._nPacks = NIGHT_DISTRICTS.map((d) => packDistrict(d, new Float64Array(DS_N), dc));
+    this._progReady = new Set();
+    this._progPrep = null;
+    this._ctxGen = 0;
+    this.lastPrep = null;   // { key, compileMs, drawMs } (tools)
+    this._onLevelStart = () => { if (this._rigTarget !== 0 || this._rig !== 0) { this._rigName = 'run'; this._rigTarget = 0; this._rig = 0; } };
     this._countDolly = 0.5; this._countDolly = 0;                                     // VIS-3 eased √V − √ref
     this._frameBack = 0.5; this._frameBack = 0; this._framePitch = 0.5; this._framePitch = 0;                // VIS-3 eased framing correction (m, rad)
     this._frameBackT = 0.5; this._frameBackT = 0; this._framePitchT = 0.5; this._framePitchT = 0;
@@ -1737,6 +1800,7 @@ export class RenderSystem {
       throw new Error(STRINGS.noWebGL2);
     }
     this.renderer = renderer;
+    installNightChunks();                                     // before any program compiles
     renderer.outputColorSpace = SRGBColorSpace;
     renderer.toneMapping = ACESFilmicToneMapping;
     renderer.toneMappingExposure = RENDER.exposure;
@@ -1783,6 +1847,8 @@ export class RenderSystem {
     await yieldPaint();
     this.env = new Environment(ctx);
     this.env.build();
+    this.night = new NightSystem(ctx);
+    this.night.build();
     this._envUpdate = typeof this.env.update === 'function';
     this._installCallProbe();
     this._progress(0.95);
@@ -1799,6 +1865,7 @@ export class RenderSystem {
     if (ev) {
       this._unsubs.push(ev.on('quality:change', this._onQuality));
       this._unsubs.push(ev.on('settings:change', this._onSettings));
+      this._unsubs.push(ev.on('level:start', this._onLevelStart));   // 1.4.0: back to the follow preset
     }
     this._inited = true;
     this.dirty = true;
@@ -1869,8 +1936,8 @@ export class RenderSystem {
       warnOnce('render.district', 'setDistrict: not a district object');
       return;
     }
-    const i = DISTRICTS.indexOf(d);
-    let to = i >= 0 ? this._dPacks[i] : null;
+    const i = DISTRICTS.indexOf(d), ni = i < 0 ? NIGHT_DISTRICTS.indexOf(d) : -1;   // r8 night: the night tables are packed once too
+    let to = i >= 0 ? this._dPacks[i] : (ni >= 0 ? this._nPacks[ni] : null);
     if (!to) {
       try { to = packDistrict(d, this._dCustom, this._dColor); } catch (err) {
         warnOnce('render.districtPack', 'setDistrict: district values incomplete: ' + (err && err.message));
@@ -1938,6 +2005,7 @@ export class RenderSystem {
   _applyDistrictState(snap) {
     const c = this._cur;
     const L = this.lights;
+    this.lightsVersion++;                                     // 1.4.0
     if (L.sun) {
       L.sun.color.setRGB(c[DS_SUN_COL], c[DS_SUN_COL + 1], c[DS_SUN_COL + 2]);
       if (L.sun.intensity !== c[DS_SUN_I]) L.sun.intensity = c[DS_SUN_I];
@@ -1956,7 +2024,8 @@ export class RenderSystem {
       fog.color.setRGB(c[DS_FOG], c[DS_FOG + 1], c[DS_FOG + 2]);
       if (r) r.setClearColor(fog.color, 1);
     }
-    if (r && r.toneMappingExposure !== c[DS_EXPOSURE]) r.toneMappingExposure = c[DS_EXPOSURE];
+    const ex = c[DS_EXPOSURE] + this._nightExposure();       // r8 night: + NIGHT.lowExposure on the canvas tiers
+    if (r && r.toneMappingExposure !== ex) r.toneMappingExposure = ex;
     const frame = this.ctx.time ? this.ctx.time.frame : -2;
     if (snap || this._bloomHold !== frame) {
       this._bloomStrength = c[DS_BLOOM_S];
@@ -2024,9 +2093,10 @@ export class RenderSystem {
     if (!hemi) return;
     const c = this._cur;
     const it = ease.inOutCubic(this._idleBlend);
-    hemi.intensity = lerp(c[DS_HEMI_I], c[DS_HEMI_TITLE], it);
+    const hi = lerp(c[DS_HEMI_I], c[DS_HEMI_TITLE], it);
+    if (hi !== hemi.intensity) { hemi.intensity = hi; this.lightsVersion++; }
     const az = c[DS_SUN_TAZ] * DEG * it;
-    if (az !== this._sunAz) this._setSunAzimuth(az);
+    if (az !== this._sunAz) { this._setSunAzimuth(az); this.lightsVersion++; }
   }
 
   /** Rotates the district light offset (_baseOff, = RENDER.sun.offset in District 1) by `az` (rad) about +Y into _sunOff
@@ -2059,6 +2129,7 @@ export class RenderSystem {
       if (this.size.w > 0 && this.size.h > 0) this._applySize(this.size.w, this.size.h, false);
     }
     this._sizeDirty = false;
+    if (this.night && this.night.on) this.night.update(this.ctx.time.unscaledDt);   // r8 night: the camera is final
     this._flushBlobs();
     const info = r.info.render;
     const c0 = info.calls;
@@ -2285,6 +2356,7 @@ export class RenderSystem {
     if (this.size.w > 0 && this.size.h > 0) this._applySize(this.size.w, this.size.h, false);
     this._committedKey = RenderSystem._programKey(p);
     this._committedParams = p;
+    if (this.night && this.night.on) r.toneMappingExposure = this._cur[DS_EXPOSURE] + this._nightExposure();   // r8: the composer may have changed
     this.dirty = true;
   }
 
@@ -2292,24 +2364,32 @@ export class RenderSystem {
    *  target state is compiled off the frame and committed when ready; a newer request supersedes an older one. */
   _requestTier(p) {
     const key = RenderSystem._programKey(p);
-    if (key === this._committedKey) {
+    // r8 night: the target tier's variant must be compiled too; a same-key change (FULL ⇄ LITE) is immediate only when it is ready
+    const N = this.night, nv = N && N.on ? this.variantForLevel(true) : 0;
+    if (key === this._committedKey && (!N || nv === N.variant || this._progReady.has(key + '|' + nv))) {
       this._cancelPendingTier();
       this._applyTierState(p);
+      if (N && nv !== N.variant) N.setVariant(nv);
       return;
     }
     const pend = this._pendingTier;
-    if (pend && pend.key === key) { pend.params = p; return; }    // already preparing this program state
+    if (pend && pend.key === key && pend.variant === nv) { pend.params = p; return; }    // already preparing this program state
     this._cancelPendingTier();
     const token = ++this._tierToken;
-    this._pendingTier = { key, params: p, token };
+    this._pendingTier = { key, params: p, token, variant: nv };
     let prep;
-    try { prep = this._prepareTier(p); } catch (err) {
+    try { prep = this._prepareTier(p, nv); } catch (err) {
       warnOnce('render.tierPrep', 'tier pre-compile failed: ' + (err && err.message ? err.message : String(err)));
       prep = null;
     }
     const commit = () => { if (this._pendingTier && this._pendingTier.token === token) this._commitPendingTier(); };
+    const gen = this._ctxGen;
     if (prep && typeof prep.then === 'function') {
-      prep.then(commit, (err) => {
+      prep.then(() => {
+        commit();
+        // r8 night: marked here, the fallback may commit first; a night change compiled the tier's day programs too (_prepareTier)
+        if (this._committedKey === key && gen === this._ctxGen) this._progReady.add(key + '|' + nv).add(key + '|0');
+      }, (err) => {
         warnOnce('render.tierPrep', 'tier pre-compile failed: ' + (err && err.message ? err.message : String(err)));
         commit();
       });
@@ -2332,6 +2412,8 @@ export class RenderSystem {
     if (!pend || !this.renderer) return;
     this._cancelPendingTier();
     this._applyTierState(pend.params);
+    // r8 night: the prepared variant, shown at once while the night is still on
+    if (this.night && this.night.on && pend.variant !== this.night.variant) this.night.setVariant(pend.variant);
     // three renders the shadow maps BEFORE it sets up the frame's lights, so the first shadow pass after a switch
     // would still see the old light state (no shadow) and link stale-keyed depth programs; an object-less compile()
     // against the scene refreshes that light state now
@@ -2363,14 +2445,18 @@ export class RenderSystem {
    *  sees only WARM_LAYER (lights carry that layer too, so program keys match; the shadow pass draws the chunk's
    *  casters), into the 1×1 warm target on composer tiers, into a 1×1 scissored corner of the canvas on Low (overdrawn
    *  by the next frame). Every touched visible / frustumCulled / count / layer value is restored right after each chunk.
-   *  Resolves when the list is done or a newer run supersedes this one; onProgress(0..1) after each frame. Allocates
-   *  (boot / tier change / context restore only). */
-  _warmDrawChunked(list, budgetMs, onProgress) {
-    const token = ++this._warmChunkToken;
+   *  Resolves when the list is done or a newer run supersedes this one (1.4.0: an `own` run, addWarmable's, neither
+   *  supersedes nor is superseded; a dead `own` run stops); onProgress(0..1) after each frame. r8 night: `variant` ≥ 0 draws in that night variant (the
+   *  shown one back right after each chunk); `full`: the whole list in ONE draw into the real target at full viewport, then the
+   *  shown frame over it in the same task (nothing flashes): the driver's first-use work lands here, not on the first frame of
+   *  play. Allocates (boot / tier change / context restore / prepare only). */
+  _warmDrawChunked(list, budgetMs, onProgress, own, variant, full) {
+    const token = own ? 0 : ++this._warmChunkToken;
+    const N = this.night, nv = N && variant >= 0 ? variant : -1;
     let idx = 0;
     return new Promise((resolve) => {
       const step = () => {
-        if (token !== this._warmChunkToken || !this.renderer) { resolve(); return; }
+        if ((token !== 0 && token !== this._warmChunkToken) || !this.renderer || (own && own.dead)) { resolve(); return; }
         const r = this.renderer;
         if (!this._warmCam) this._warmCam = new PerspectiveCamera();
         const cam = this._warmCam;
@@ -2379,7 +2465,7 @@ export class RenderSystem {
         const t0 = performance.now();
         do {
           const saved = [];
-          const end = Math.min(list.length, idx + WARM_CHUNK);
+          const end = full ? list.length : Math.min(list.length, idx + WARM_CHUNK);
           for (; idx < end; idx++) {
             // an entry is a renderable, or (round 5) a { mesh, geometry } pair: the mesh drawn once with that geometry
             // temporarily assigned (env.districtWarmList: every prop slot × every alternative district kind)
@@ -2399,9 +2485,10 @@ export class RenderSystem {
           const scTest = r.getScissorTest();
           r.getViewport(vp); r.getScissor(sc);
           try {
-            r.setRenderTarget(toCanvas ? null : this._getWarmTarget());
-            if (toCanvas) { r.setViewport(0, 0, 1, 1); r.setScissor(0, 0, 1, 1); r.setScissorTest(true); }
-            r.render(this.scene, cam);
+            r.setRenderTarget(toCanvas ? null : (full ? this.composer.readBuffer : this._getWarmTarget()));
+            if (toCanvas && !full) { r.setViewport(0, 0, 1, 1); r.setScissor(0, 0, 1, 1); r.setScissorTest(true); }
+            if (nv >= 0 && nv !== N.variant) { const shown = N.variant; N.setVariant(nv); try { r.render(this.scene, cam); } finally { N.setVariant(shown); } }
+            else r.render(this.scene, cam);
           } catch (err) {
             warnOnce('render.warmChunk', 'warm-up draw failed: ' + (err && err.message ? err.message : String(err)));
           } finally {
@@ -2416,6 +2503,7 @@ export class RenderSystem {
             }
           }
         } while (idx < list.length && budgetMs > 0 && performance.now() - t0 < budgetMs);
+        if (full) { if (N) N.endWarm(); try { this.draw(); } catch (_) { /* the next frame draws */ } }
         this.dirty = true;
         if (typeof onProgress === 'function') { try { onProgress(list.length > 0 ? idx / list.length : 1); } catch (_) { /* cosmetic */ } }
         if (idx < list.length) nextFrame(step); else resolve();
@@ -2428,10 +2516,11 @@ export class RenderSystem {
    *  light state is swapped to the target for the synchronous part of compileAsync and restored in the same
    *  call, so the old tier keeps drawing until the returned promise resolves. A composer the target needs is
    *  built now but stays inactive (draw() ignores it) until the commit. */
-  _prepareTier(p) {
+  _prepareTier(p, nv) {
     const toComposer = p.bloom !== 'off';
     if (toComposer) this._configureComposer(p, false);
-    return this._compileChunked(p, toComposer);
+    // r8 night: in variant nv, then the day's: leaving the night on this tier must not compile on the title
+    return this._compileChunked(p, toComposer, null, null, null, nv).then(() => nv > 0 && this._compileChunked(p, toComposer, null, null, null, 0));
   }
 
   /**
@@ -2442,14 +2531,16 @@ export class RenderSystem {
    * synchronous compile() call and restored right after, so the old tier keeps drawing. A frame stops after
    * TIER_COMPILE.newPerFrame new programs or TIER_COMPILE.budgetMs of work (shader translation runs on the GPU
    * process and stalls its next frame, so it is spread). Without KHR_parallel_shader_compile each new program is
-   * linked inside its own chunk (the stall is spread too). Resolves when every new program reports ready.
+   * linked inside its own chunk (the stall is spread too). Resolves when every new program reports ready. r8 night: `variant`
+   * ≥ 0 compiles the main-pass items in that variant, the shown one back in the same call; a dead `run` stops it.
    */
-  _compileChunked(p, toComposer, limits, onProgress) {
+  _compileChunked(p, toComposer, limits, onProgress, root, variant, run) {
     const L = limits || TIER_COMPILE;
+    const nv = this.night && variant >= 0 ? variant : -1;
     const report = (f) => { if (typeof onProgress === 'function') { try { onProgress(f); } catch (_) { /* cosmetic */ } } };
     const r = this.renderer;
     const items = [];                        // [object, materialOverride|null, kind] triples (kind: 0 main, 1 depth, 2 pass, 3 screen)
-    this.scene.traverse((o) => {
+    const gather = (o) => {
       if (!(o.isMesh || o.isPoints || o.isLine || o.isSprite) || !o.material) return;
       items.push(o, null, 0);
       // a mesh with a customDepthMaterial (character pools) casts on every shadow tier, but zombies / troops flip
@@ -2471,8 +2562,9 @@ export class RenderSystem {
         }
         if (dm) items.push(o, dm, 1);
       }
-    });
-    if (toComposer && this.composer) {
+    };
+    (root || this.scene).traverse(gather);                     // 1.4.0: addWarmable compiles its object only
+    if (toComposer && this.composer && !root) {
       const ps = this._passScenes();
       for (let i = 0; i < ps.off.children.length; i++) items.push(ps.off.children[i], null, 2);
       for (let i = 0; i < ps.screen.children.length; i++) items.push(ps.screen.children[i], null, 3);
@@ -2483,8 +2575,9 @@ export class RenderSystem {
     const tmp = new Scene();
     let idx = 0;
     const self = this;
+    const stop = () => !self.renderer || (run && run.dead);
     const step = (resolve) => {
-      if (!self.renderer) { resolve(); return; }
+      if (stop()) { resolve(); return; }
       const t0 = performance.now();
       let made = 0;
       const sun = self.lights.sun;
@@ -2502,9 +2595,11 @@ export class RenderSystem {
           // pass draws with a fog-less scene (scene fog is part of every program key) → fog is hidden for depth items
           const fog = self.scene.fog;
           if (kind === 1) self.scene.fog = null;
+          const vm = nv >= 0 && kind === 0 ? o.material : null, shown = vm ? self.night.variant : 0;
+          if (vm) varyMaterials(vm, nv);
           try { r.compile(tmp, self.camera, kind >= 2 ? tmp : self.scene); } catch (err) {
             warnOnce('render.tierCompile', 'tier pre-compile item failed: ' + (err && err.message ? err.message : String(err)));
-          } finally { self.scene.fog = fog; }
+          } finally { self.scene.fog = fog; if (vm) varyMaterials(vm, shown); }
           const progs = r.info.programs;
           for (let i = progs.length - 1; i >= 0 && !known.has(progs[i]); i--) {
             known.add(progs[i]); fresh.push(progs[i]); made++;
@@ -2525,7 +2620,7 @@ export class RenderSystem {
       // for all of them in the first frame after the commit)
       let touched = 0;
       const poll = () => {
-        if (!self.renderer) { resolve(); return; }
+        if (stop()) { resolve(); return; }
         let n = 0;
         const tp = performance.now();
         // round-3 boot polish: also bounded by L.budgetMs (at least one program per tick) — each first getUniforms()
@@ -2702,6 +2797,114 @@ export class RenderSystem {
     if (sun && sun.shadow) sun.shadow.map = null;                  // three re-creates it on the next shadow render
   }
 
+  /** 1.4.0 (ARCH §3, §6): compiles obj's programs (obj under the scene, hidden or not) a few per frame, draws it once out of
+   *  sight and lists it in render.warmables; as part of the scene it is in every later tier change / restore warm-up. r8 (P8):
+   *  `run` { dead }, set dead by the caller, stops it between chunks. */
+  addWarmable(obj, run) {
+    if (!obj || !obj.isObject3D || !this.renderer) return Promise.resolve();
+    if (this.warmables.indexOf(obj) < 0) this.warmables.push(obj);
+    const q = this.ctx.quality;
+    const list = [];
+    obj.traverse((o) => { if ((o.isMesh || o.isPoints || o.isLine || o.isSprite) && o.material) list.push(o); });
+    return this._compileChunked(this._committedParams || (q && q.params) || QUALITY_TIERS.med, !!(this.composer && this._composerOn), TIER_COMPILE, null, obj, -1, run)
+      .then(() => this._warmDrawChunked(list, WARMUP_DRAW_MS, null, run || true))
+      .catch((err) => { warnOnce('render.warmable', 'warmable warm-up failed: ' + (err && err.message ? err.message : String(err))); });
+  }
+
+  removeWarmable(obj) {
+    const i = this.warmables.indexOf(obj);
+    if (i >= 0) this.warmables.splice(i, 1);
+  }
+
+  // ---- r8 night (P5, PLAN night TECH 3): program readiness and the night switch ----
+
+  /** '<committed tier program key>|<variant>' (default: the variant shown now). */
+  _progKey(v) { return (this._committedKey || '?') + '|' + (v === undefined || v === null ? (this.night ? this.night.variant : 0) : v); }
+
+  /** True when variant v of every scene program is compiled AND warm-drawn on the committed tier (level.ready, D8). */
+  programsReady(v) { return this._progReady.has(this._progKey(v)); }
+
+  /** The program variant a level needs on this device now: 0 by day, else the tier's (night.forced: the bench). */
+  variantForLevel(night) {
+    if (!night) return 0;
+    const q = this.ctx.quality, N = this.night;
+    return N && N.forced > 0 ? N.forced : variantFor(q && q.tier, q && q.software);
+  }
+
+  /**
+   * Compiles (chunked; the shown variant keeps drawing) and warm-draws variant v of every scene program on the committed tier:
+   * the night meshes joined first, the eye draw primed with one pair, then one
+   * full-viewport frame in the real target. level.prepareFor awaits it behind the spinner on every way into a night level;
+   * `idle` (a menu's prefetch) spreads the compile thinner and dies at a real prepare of another key, any run at setNight for another
+   * level (its request is gone): it stops between chunks, its key unready, and the next prepare finishes it. A ready key resolves at once, a live run of the same key is shared,
+   * anything else waits for the run in flight. Resolves programsReady(v).
+   */
+  preparePrograms(v, onProgress, idle) {
+    const key = this._progKey(v);
+    if (this._progReady.has(key) || !this.renderer) return Promise.resolve(this._progReady.has(key));
+    const cur = this._progPrep;
+    if (cur) {
+      if (cur.key === key && !cur.dead) return cur.p;
+      if (cur.idle && !idle) cur.dead = true;
+      return cur.p.then(() => this.preparePrograms(v, onProgress, idle));
+    }
+    const gen = this._ctxGen, N = this.night, t0 = performance.now();
+    const run = this._progPrep = { key, idle, dead: false, p: null };
+    const lost = () => !this.renderer || gen !== this._ctxGen || run.dead;
+    const p = run.p = (async () => {
+      if (v > 0 && N) N.attach(this.scene);
+      await this._compileChunked(this._committedParams, !!(this.composer && this._composerOn), idle ? TIER_COMPILE : WARMUP_COMPILE, onProgress, null, v, run);
+      if (lost()) return false;
+      const list = [];
+      this.scene.traverse((o) => { if ((o.isMesh || o.isPoints || o.isLine || o.isSprite) && o.material) list.push(o); });
+      const t1 = performance.now();
+      if (v > 0 && N) N.prime();
+      await this._warmDrawChunked(list, WARMUP_DRAW_MS, null, run, v);
+      if (!lost()) await this._warmDrawChunked(list, 0, null, run, v, true);
+      if (N) N.endWarm();
+      await new Promise((r) => nextFrame(() => nextFrame(r)));   // the GPU drains here, not on the first frame of play
+      if (lost()) return false;
+      if (this._progKey(v) === key) this._progReady.add(key);   // the tier did not change meanwhile
+      this.lastPrep = { key, compileMs: Math.round(t1 - t0), drawMs: Math.round(performance.now() - t1) };
+      return this._progReady.has(key);
+    })();
+    const done = () => { if (this._progPrep === run) this._progPrep = null; };
+    p.then(done, done);
+    return p;
+  }
+
+  /**
+   * level._applyDistrict's night switch, after its setDistrict: on → the district's night table (a BLACKOUT district's street lamps
+   * die), the tier's variant (prepared by level.prepareFor, else a warning) and the light rig; off → the day table and programs.
+   * A tier change in flight re-prepares for the variant; a prepare for any other level dies before play. Idempotent; seconds 0 snaps.
+   */
+  setNight(on, seconds) {
+    const N = this.night;
+    if (!N) return;
+    const pre = this._progPrep;
+    if (pre && !(on && pre.key === this._progKey(this.variantForLevel(true)))) pre.dead = true;
+    const d = this._dTarget, j = NIGHT_DISTRICTS.indexOf(d);
+    if (on) {
+      const i = j >= 0 ? j : DISTRICTS.indexOf(d);
+      if (i < 0) { warnOnce('render.nightDistrict', 'setNight: no night table for this district'); return; }
+      const v = this.variantForLevel(true);
+      if (!this.programsReady(v)) warnOnce('render.nightUnprepared', 'night shown before render.preparePrograms');
+      N.enable(true, v, NIGHT.blackout.districts.indexOf(DISTRICTS[i].id) >= 0);
+      this.setDistrict(NIGHT_DISTRICTS[i], seconds);
+      const pend = this._pendingTier;
+      if (pend && pend.variant !== v) this._requestTier(pend.params);
+      if (N.blackout && this.env) this.env.blackout(NIGHT.blackout.seconds);
+    } else {
+      N.enable(false);
+      if (j >= 0) this.setDistrict(DISTRICTS[j], seconds);
+    }
+    if (this.renderer) this.renderer.toneMappingExposure = this._cur[DS_EXPOSURE] + this._nightExposure();
+    this.lightsVersion++;
+  }
+
+  /** r8 night: the canvas tiers' exposure lift (no bloom there). */
+  _nightExposure() { return this.night && this.night.on && !(this.composer && this._composerOn) ? NIGHT.lowExposure : 0; }
+
   // -------------------------------------------------------------------------------------------
   // Shader warm-up (VIS-2, chunked since round-2 QA VIS-17): compile and draw everything before it is first needed
   // -------------------------------------------------------------------------------------------
@@ -2778,6 +2981,7 @@ export class RenderSystem {
       warnOnce('render.warmupDraw', 'warm-up frame failed: ' + (err && err.message ? err.message : String(err)));
     }
     this.dirty = true;
+    this._progReady.add(this._progKey());   // r8 night: boot / restore covered the variant shown
     report(1);
   }
 
@@ -2809,6 +3013,32 @@ export class RenderSystem {
   // -------------------------------------------------------------------------------------------
   // Camera theatre (§6.3, GDD §7 / J18)
   // -------------------------------------------------------------------------------------------
+
+  /** 1.4.0 (ARCH §3): 'run' or a RENDER.rigs name — the camera blends there over s s (default its tween; 0 snaps) and the fog
+   *  to its near / far (the district's for 'run'). level:start snaps back to 'run'. */
+  setRig(name, s) {
+    const def = name === 'run' ? null : RENDER.rigs[name];
+    if (name !== 'run' && !def) { warnOnce('render.rig.' + name, 'setRig: unknown rig "' + name + '"'); return; }
+    if (def) this._rigDef = def;
+    const sec = Number.isFinite(s) && s >= 0 ? s : this._rigDef.tween;
+    this._rigName = name;
+    this._rigTarget = def ? 1 : 0;
+    this._rigTween = sec;
+    if (!(sec > 0)) this._rig = this._rigTarget;
+    const env = this.env;
+    if (env && typeof env.setFog === 'function') {
+      const q = this.ctx.quality;
+      const fogFar = q && q.params ? q.params.fogFar : WORLD.fog.far;
+      const d = this._dTarget;
+      try {
+        if (def && def.fog) env.setFog(def.fog.near, def.fog.far * fogFar / WORLD.fog.far, sec);
+        else if (!def && d && d.fog) env.setFog(d.fog.near, fogFar * finiteOr(d.fog.farScale, 1), sec);
+      } catch (_) { /* best effort */ }
+    }
+    this.dirty = true;
+  }
+
+  get rig() { return this._rigName; }
 
   /** Boss intro dolly: out (ease) → hold → back (ease) on the theatre clock (real time that holds while paused, VIS-18);
    *  no-op under reduced motion. */
@@ -2867,7 +3097,10 @@ export class RenderSystem {
 
   /** Title idle scene: the camera blends to the WORLD.camera.title rig (VIS-3: the marching squad between the logo and
    *  PLAY; RENDER.idleCameraDrop is the fallback when that key is absent), tweened over WORLD.camera.presetTween. */
-  idleCamera(on) { this._idleOn = !!on; }
+  idleCamera(on) {
+    this._idleOn = !!on;
+    if (this._idleOn && this._rigTarget !== 0) { this._rigName = 'run'; this._rigTarget = 0; }   // 1.4.0: eases out with the title blend
+  }
 
   /** VIS-3: target pull-back (m, along the view line) and extra pitch (rad) for the framing constraint; writes
    *  _frameBackT / _framePitchT (no allocation, a few trig calls + a short bisection when pitch is not enough). */
@@ -2970,6 +3203,19 @@ export class RenderSystem {
       py += vy / vl * back; pz += vz / vl * back;
       const pitch = Math.atan2(py - ly, pz - lz) + this._framePitch * fw;
       ly = py - (pz - lz) * Math.tan(pitch);
+    }
+
+    // 1.4.0 rig (setRig): its absolute pose and FOV by the preset blend; the dolly / framing above are the follow preset's
+    this._rig = approach(this._rig, this._rigTarget, snap || !(this._rigTween > 0) ? 1 : udt / this._rigTween);
+    const rt = ease.inOutCubic(this._rig);
+    if (rt > 0) {
+      const RP = this._rigDef.portrait, RL = this._rigDef.landscape;
+      // portrait wallFrac: the pitch that puts the ground at wallZ at wallFrac of the height with this aspect's FOV
+      const rly = RP.wallFrac > 0 ? RP.pos[1] - (RP.pos[2] - RP.look[2]) * Math.tan(Math.atan2(RP.pos[1], RP.pos[2] - RP.wallZ)
+        - Math.atan((2 * RP.wallFrac - 1) * Math.tan(this._fovP * DEG * 0.5))) : RP.look[1];
+      px = lerp(px, lerp(RP.pos[0], RL.pos[0], pt), rt); py = lerp(py, lerp(RP.pos[1], RL.pos[1], pt), rt); pz = lerp(pz, lerp(RP.pos[2], RL.pos[2], pt), rt);
+      lx = lerp(lx, lerp(RP.look[0], RL.look[0], pt), rt); ly = lerp(ly, lerp(rly, RL.look[1], pt), rt); lz = lerp(lz, lerp(RP.look[2], RL.look[2], pt), rt);
+      fov = lerp(fov, lerp(this._fovP, verticalFov(RL.hFovDeg, cam.aspect, RL.fovClamp), pt), rt);
     }
 
     // title idle rig (VIS-3 (3)): blend to WORLD.camera.title so the marching squad sits between logo and PLAY; the
@@ -3312,7 +3558,7 @@ export class RenderSystem {
     if (!r) return;
     r.outputColorSpace = SRGBColorSpace;
     r.toneMapping = ACESFilmicToneMapping;
-    r.toneMappingExposure = this._cur[DS_EXPOSURE];               // round 5: the current district state, not RENDER
+    r.toneMappingExposure = this._cur[DS_EXPOSURE] + this._nightExposure();   // round 5: the current district state, not RENDER
     r.info.autoReset = false;
     r.shadowMap.enabled = true;
     if (this._shadowType >= 0) r.shadowMap.type = this._shadowType;
@@ -3320,6 +3566,8 @@ export class RenderSystem {
     const pend = this._pendingTier;
     this._cancelPendingTier();                                     // its prepared composer / programs belonged to the lost context
     this._dropLostContextObjects();
+    this._progReady.clear();   // r8 night: every program died with the context; warmup re-marks
+    this._ctxGen++;   // the variant on screen (a prepare in flight marks nothing)
     const s = this.size;
     if (s.w > 0 && s.h > 0) {
       r.getSize(_v2);
@@ -3366,6 +3614,7 @@ export class RenderSystem {
       if (this._blobOwnMat) { this._blobOwnMat.dispose(); this._blobOwnMat = null; }
       this.blobShadows = null;
     }
+    if (this.night) { this.night.dispose(); this.night = null; }
     if (this.env && typeof this.env.dispose === 'function') { try { this.env.dispose(); } catch (_) { /* ignore */ } }
     if (this.materials && typeof this.materials.dispose === 'function') { try { this.materials.dispose(); } catch (_) { /* ignore */ } }
     if (this.textures) this.textures.dispose();

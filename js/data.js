@@ -156,12 +156,20 @@ export const SQUAD = deepFreeze({
     // CORE-8: landscape (aspect ≥ WORLD.camera.portraitBelow) uses W_eff = min(W, landscapeWidthFactor · H) in k = 8 / (0.62 · W_eff):
     // the landscape camera shows the road at the squad ≈ H-proportional, not W-proportional (GDD §3.2)
     landscapeWidthFactor: 0.7,
+    tapMaxPx: 10, tapMaxMs: 300,   // 1.4.0: engine's tap classifier (a press released this soon, this close → input.tap)
   },
   // Walk cycle uniforms for models.makeCharacterMaterial('soldier') — GDD §3.1 / ARCH D18.
   limb: { uFreq: 2.2, uLegAmp: 0.55, uArmAmp: 0.3, uArmRest: 1.2, uBobAmp: 0.03, uRecoil: 0.06 },
   invulnOnPass: 0.6,            // s of invulnerability after any gate pass
   countCap: 9999,
   label: { y: 2.6, yPerSqrt: 0.08, z: 0.8, px: 72, outlinePx: 3 },   // billboard at (x, 2.6 + 0.08·√V, 0.8); 72 px; 3 px outline (extra key)
+  // 1.4.0 (horde DESIGN 4.1): squad.setFormation('wall') — cols columns over x ±3.4, rows behind a front row at world z frontZ
+  // (barricade face −3.9); rows at z ≤ stepBackZ on the stepY firing step (muzzles 1.40 clear the 1.1 m planks); easeS to get there;
+  // the count label at label (x, y, z): over the rear rows, clear of the wall and the screen's bottom edge
+  formations: { wall: { cols: 21, spacing: 0.34, rowPitch: 0.34, frontZ: -2.3, stepY: 0.45, stepBackZ: -1.0, easeS: 1.5, label: [0, 0.4, 0] } },
+  // 1.4.0 (horde CONTROLS): engine.setInputMode('aim') — lane target ±range, k m per (steer.kFraction · W_eff) px, aimX follow
+  // rate and maxSpeed m/s, keys keySpeed m/s; a drag starts only below dragTop of the screen height (taps anywhere)
+  aim: { range: 3.4, k: 6.8, follow: 18, maxSpeed: 14, keySpeed: 12, dragTop: 0.35 },
 });
 
 // ==== FIRE ===================================================================================
@@ -246,7 +254,7 @@ export const GATE_RULES = deepFreeze({
   //   K_M = clamp(stepFraction.intake·I, capBlock·Icap / S(cap−M), capReach·Icap / S(cap−M−1)), ≥ stepMin·M,
   //   S(n) = Σ_{j<n} (M+j)/M — x(M+1) reachable by an on-curve squad, x(cap−1) needs ≈ capReach of a full window at
   //   the 40/s cap, x(cap) is never reachable in one window (> capBlock·Icap).
-  mult: { base: 2, base3FromLevel: 6, stepMin: 12, stepFraction: { intake: 0.9, capReach: 1.02, capBlock: 1.1 }, cap: 5, punch: 1.35,
+  mult: { base: 2, base3FromLevel: 11, stepMin: 12, stepFraction: { intake: 0.9, capReach: 1.02, capBlock: 1.1 }, cap: 5, punch: 1.35,
           // (new) QA LVL-27 (GDD §4.2 / §4.4): the first step never costs more than openReach of what the whole squad lands in the
           // armed window (0.9·min(40, E·f)·t_w) — a generated x step is always reachable (it was 167 vs 78 hits on L6)
           openReach: 0.9 },
@@ -267,21 +275,21 @@ export const GATE_RULES = deepFreeze({
     max: 0xFFD166,
   },
   generation: {
-    layoutWeights: { early: { pair: 75, single: 25, triple: 0 }, mid: { pair: 70, single: 15, triple: 15 }, tripleFromLevel: 7 },  // L4–6: triple weight folded into pair
+    layoutWeights: { early: { pair: 85, single: 15, triple: 0 }, mid: { pair: 72, single: 8, triple: 20 }, tripleFromLevel: 8 },  // L4–7: triple weight folded into pair
     patterns: [
       { id: 'plusPlus',  w: [30, 20, 15], a: [0.25, 0.6], bOfA: [0.5, 0.8] },              // +A | +B: A = round(E·U(a)), B = round(A·U(bOfA)); smaller value on the lane with fewer zombies ahead
       { id: 'plusMult',  w: [30, 25, 25], aOfE: [0.7, 1.3] },                              // +A | xM: A = round(E·(M−1)·U(aOfE))
-      { id: 'minusDiv',  w: [15, 20, 20], aOfE: [0.7, 1.3], aMaxH: 1.3, divThreeFrom: 8 },  // −A | ÷D: A = round(E·(1 − 1/D)·U(aOfE)), A ≤ 1.3·H; D = 3 from L8
+      { id: 'minusDiv',  w: [15, 20, 20], aOfE: [0.7, 1.3], aMaxH: 1.3, divThreeFrom: 11 },  // −A | ÷D: A = round(E·(1 − 1/D)·U(aOfE)), A ≤ 1.3·H; D = 3 from L11
       { id: 'multMinus', w: [15, 15, 15], a: [0.3, 0.5], flipMaxH: 0.8 },                  // xM | −A: A = round(E·U(a)); flippable iff A ≤ 0.8·H
       { id: 'plusMinus', w: [10, 10, 10], bMaxH: 0.8, bOfE: 0.3, aPlus: 4 },               // +A | −B: B = round(min(0.8·H, 0.3·E)), A = floor(B/2) + 4
       { id: 'itemPlus',  w: [0, 10, 15], aOfE: 0.35, aScale: [0.5, 1.3] },                 // item | +A: A = round(0.35·E·U(aScale)) (aScale: the generator's tuned draw, round 5 from levelgen)
     ],
     single: { plusOnlyThrough: 2, aOfE: 0.2, w: { plus: 50, mult: 30, minus: 20 }, minusMaxH: 0.9 },
     triple: { bOfE: 0.4 },                                   // [+A, xM, −B], B = round(0.4·E), exactly one red lane
-    mult3: { fromLevel: 6, chance: 0.25 },                   // x3 base 25 % from L6
+    mult3: { fromLevel: 11, chance: 0.25 },                  // x3 base 25 % from L11
     // QA LVL-5 (GDD §10 "New" column): the level that introduces a gate feature shows it on one gate (exempt from the
-    // gain re-roll / variant sweep): L6 an x3 lane, L7 a triple event, L8 a ÷3 lane; the validator fails an intro level without it
-    newFeature: { mult3: 6, triple: 7, div3: 8 },
+    // gain re-roll / variant sweep); the validator fails an intro level without it. r8 teaching (D9): L8 triple, L11 x3 + ÷3
+    newFeature: { mult3: 11, triple: 8, div3: 11 },
     rules: { noDivBeforeM: 150, noDivLevels: 3, twoRedsFrom: 4, lesserEvilFrom: 3, guardAheadM: 12, maxedHitsFrac: 0.6, breakevenBand: 0.3 },
     bands: [[1, 3], [4, 9], [10, 99]],                       // level bands indexing pattern.w
     rounding: [[30, 1], [100, 5], [Infinity, 10]],           // extra: round to 1 below 30, 5 below 100, 10 above (= util.roundDesign)
@@ -305,6 +313,17 @@ export const GATE_RULES = deepFreeze({
     // centre, full intake, fresh profile) reaches the boss with at most noSteerMax·E_boss (the generator prefers such attempts;
     // the validator warns above it)
     noSteerMax: 0.85,
+    // r8 difficulty: a non-pick lane's full-intake outcome ≤ gap(L) × the pick's (levelgen.applyGap); all-red pairs keep their values
+    // before lesserFrom and on lesserSkip (L5: the decent bot lost 3 of 8 with the lesser gap)
+    gap: { fromLevel: 3, minE: 12, lesserFrom: 3, lesserSkip: [5], max: [[3, 0.6], [9, 0.62], [20, 0.64], [60, 0.64]] },
+    // r8 (D27, OG): the opener's gap again at max(E, the start squad) of these shops ('max' = rank 10); [] = off
+    openerGapShops: ['expected', 'max'],
+    // r8 difficulty: the fixed-position lines (never steers / held left / held right, full intake) at the expected shop and rank 10
+    // (from maxFrom) against levelgen.bossOutcome (boss DPS × bossEff, generous): a line above min(cap, rWin − margin)·E_boss costs
+    // noSteerPenalty + penaltyPerExcess × the excess, winPenalty more when it clears the boss in the model (the long budget)
+    fixedLines: { fromLevel: 3, penaltyPerExcess: 10,
+      shops: ['expected', 'max'], maxFrom: 6, margin: 0.05, cap: 0.65, bossEff: 1.4, bossWalkS: 1.5, winPenalty: 5, softStopAt: 8,
+      maxWeight: 0.5, repairFrom: 6, repairPasses: 2 },   // rank 10 weighs half; a fixed WIN gets the side repair (repairSides) from L6
     // (round 5, from levelgen's former DATA-MISSING literals) the DESIGN line lands designHits·H on the lane it picks by face value
     // (QA LVL-1: later gates are sized and wave HP solved on it; GDD §4.4's 0.6·H left the full-intake line above 1.6·E_boss on L20+)
     designHits: 0.75,
@@ -343,7 +362,7 @@ export const ZOMBIES = deepFreeze({
              hittableZ: -8,                                                   // below bullet height (0.95) until z > -8 or lunging
              pack: [6, 10],                                                   // packs of 6-10
              limb: { uFreq: 2.6, uLegAmp: 0.6, uArmAmp: 0.6, uArmRest: 1.45, uBobAmp: 0.05, uRecoil: 0 }, shadow: false },
-  brute:   { baseHp: 30, speed: 0.8, bite: 3, coins: 15, height: 2.8, radius: 0.90, hpBar: 'always',   unlock: 4, pool: 16,  slotBase: 220,
+  brute:   { baseHp: 30, speed: 0.8, bite: 3, coins: 15, height: 2.8, radius: 0.90, hpBar: 'always',   unlock: 6, pool: 16,  slotBase: 220,
              charge: { dist: 8, speed: 3.5,                                    // charge 3.5 m/s inside 8 m
                        lateral: 1.5, animSpeed: 1.5 },                        // extra: m/s homing toward squad x while charging; limb-swing multiplier
              // the telegraph shows from 12 m (ringZ) and fills 0.8 s, then a swing every 1.0 s. r7 INT: ringR retired — the mark is the
@@ -404,7 +423,7 @@ export const LEAK_MODEL = deepFreeze({
   // below it (C < E) meets them × max(floor, C / E)^exp (level._lowSideMult; E = the design count at spawn, boss minions E_boss):
   // ×0.57 at 0.5·E, ×0.79 at 0.75·E, ×0.43 from 0.35·E down. 1 at / above the curve, in endless, on the authored L1 and for the
   // generator / validator (they keep C = E). Before it a 0.3–0.6·E squad lost 18–37 % per wave and spiralled (r7 balance:2)
-  lowSide: { exp: 0.8, floor: 0.35 },
+  lowSide: { exp: 0.5, floor: 0.6 },   // r8: ×0.71 at 0.5·E (was exp 0.8 floor 0.35: ×0.57) — an under-curve squad gets less help
   coverage: { slotArea: 0.1, aspect: 1.6, halfWidthCap: 1.8, slack: 0.5, min: 0.75, homing: ['runner', 'crawler', 'spitter'] },
   // per-type window calibration (QA LVL-4, re-fitted in QA LVL-15 against the wave lab, docs/build/qa2/fix-level/lab: the HP
   // multiple of the old solve at which a type leaks its band was walker ≈ 4.5, runner ≈ 1.7, crawler ≈ 2.1 (of the old
@@ -428,13 +447,17 @@ export const LEAK_MODEL = deepFreeze({
   // (new) QA LVL-15: live solves (level.js) multiply wave / guard / run-up / minion HP by p^profileExp, p = (profile.fireRate
   // / FIRE.rateBase)·profile.damage — shop upgrades still shorten waves, never down to zero bites (generator / validator: p = 1)
   profileExp: 0.5,
+  profileExpByLevel: [[30, 0.5], [60, 0.53], [260, 0.56]],   // r8: past L30 the waves answer more of the shop
+  // r8 (D26): campaign live HP × util.shopComp(p, pExp(L), profileExp(L), surplusExp) — above the expected shop the surplus is
+  // answered with this exponent (0 = off, F12); the generator's rank-10 fixed lines use it too
+  surplusExp: 1.0,
   // (new) round-3 QA LVL-15 (GDD §6.3): the campaign squad's kill capacity per level relative to the band calibration
   // [[L, mult], …] (piecewise-linear, levelgen.levelCalib) — fitted so an on-curve squad with the ranks a player who spends
   // every coin owns leaks inside its band (docs/build/r3-balance.md); generated campaign waves and guards only
   // round 5: L13–L30 fitted the same way (docs/build/r5-level-balance.md; on-curve lab, ranks of a greedy-shop smart campaign)
   calibByLevel: [[2, 0.33], [3, 0.5], [4, 0.7], [5, 1.1], [6, 0.95], [7, 1.1], [8, 1.45], [9, 1.8], [10, 0.8], [11, 0.9], [12, 1.0],
     [13, 1.2], [14, 1.16], [15, 1.25], [16, 1.25], [17, 1.28], [18, 1.44], [19, 1.57], [20, 1.29], [21, 1.28], [22, 1.32], [23, 1.43],
-    [24, 1.31], [25, 1.32], [26, 1.27], [27, 1.42], [28, 1.47], [29, 1.43], [30, 1.53]],
+    [24, 1.31], [25, 1.32], [26, 1.27], [27, 1.42], [28, 1.47], [29, 1.43], [30, 1.53], [60, 1.75], [260, 1.85]],   // r8: rising past L30 (a steeper rise walled the bots off past L100)
   // (new) round-3 QA LVL-15: the waves and guards in the first earlyRamp of a campaign level meet the bare squad (no special or
   // troop yet): their calibration ramps from the base calib to the full band × level factor over that stretch
   earlyRamp: 0.4,
@@ -449,6 +472,9 @@ export const WAVE_WEIGHTS = deepFreeze([
   { L: 8,  w: [42, 25, 12, 11, 10] },
   { L: 12, w: [36, 26, 12, 14, 12] },
   { L: 20, w: [30, 28, 12, 16, 14] },
+  { L: 30, w: [26, 28, 12, 18, 16] },   // r8: the mix keeps getting heavier past L20
+  { L: 45, w: [22, 28, 12, 19, 19] },
+  { L: 60, w: [19, 28, 12, 20, 21] },
 ]);
 
 // GDD §6.2 patterns. line: even across x in ±3.5, same z; column: single file at a lane x, 2 m apart;
@@ -493,7 +519,12 @@ export const LEAK_BANDS = deepFreeze([
   { L: [1, 3],    band: [0.10, 0.15] },
   { L: [4, 9],    band: [0.15, 0.22] },
   { L: [10, 19],  band: [0.22, 0.28] },
-  { L: [20, 999], band: [0.28, 0.32] },
+  { L: [20, 30],   band: [0.28, 0.32] },
+  { L: [31, 45],   band: [0.28, 0.32] },   // r8: past L30 the leak band keeps rising
+  { L: [46, 60],   band: [0.28, 0.32] },   // r8: D36 knob (skilled 69/96 at 0.29-0.33)
+  { L: [61, 120],  band: [0.29, 0.33] },   // r8v2: +0.01 per 60 levels past L60 (+0.01 per 20 killed the decent and
+  { L: [121, 180], band: [0.30, 0.34] },   // skilled bots from L65)
+  { L: [181, 9999], band: [0.31, 0.35] },
 ]);
 
 // ==== BOSSES =================================================================================
@@ -507,7 +538,7 @@ export const LEAK_BANDS = deepFreeze([
 // Extra keys: baseModel/scale (models.buildBossRig), charge speed/duration, stomp telegraph, rigHeight,
 // phaseThresholds, hpChunk, plates, hpRound, intro.roadLerp, death.resultsAfterMs.
 export const BOSSES = deepFreeze({
-  hpPerE: 20,
+  hpPerE: 24,
   // (new) QA LVL-14 (GDD §7, §0 Boss): the table HP is scaled at spawn by the arriving squad and the shop, never below the
   // table: countScale = clamp((C / E_boss)^exp, 1, maxMult); shopScale = clamp(m^exp, 1, maxMult) with
   // m = (fireRate / FIRE.rateBase)·damage·bossDamage (1.0 at base ranks). TTK falls strictly with m, and with C from E_boss up; below
@@ -517,8 +548,8 @@ export const BOSSES = deepFreeze({
   // Round 7 (r7, GDD §7): minMult < 1 lets the count scale go below the table in the campaign, clamp((C / E_boss)^exp, minMult,
   // maxMult): ×0.74 at 0.6·E_boss, ×0.6 from 0.43·E_boss down — the table is no longer a floor there, so a squad under the curve
   // stops fighting 25–43 s of slams and stomps (level._fireBoss / _bossHpScale). An endless mini-boss keeps 'never below the table'
-  squadScale: { exp: 0.6, maxMult: 2.0, minMult: 0.6 },
-  shopScale: { exp: 0.9, maxMult: 10.0 },
+  squadScale: { exp: 0.6, maxMult: 2.0, minMult: 1.0 },   // r8: the table is the floor again
+  shopScale: { exp: 0.9, maxMult: 10.0, fade: false },   // r8: no C/E fade of the shop exponent in the campaign (endless keeps it)
   // Round 7 (r7, GDD §7 "fight floor"): a campaign boss met by a squad at or above fromRatio·E_boss lives at least
   // tMin = (milestone ? milestoneMin : min) · m^−shopExp seconds against the squad's DPS C·fireRate·damage·bossDamage·acc (GDD §3.3):
   // HP = max(HP, round50(DPS · tMin)), m = the shop multiplier of shopScale (a better shop still wins faster, at the r5 rate).
@@ -530,13 +561,18 @@ export const BOSSES = deepFreeze({
   // round50(DPS · weakMin · m^−shopExp) — keeps an under-curve squad with a late shop from erasing the boss in 4–8 s (minMult
   // and the faded shop exponent left the model fight 4.7–6.3 s at 0.5·E_boss on L21–L30; now 8.7–9.8 s, binding from L13);
   // the band fades in from it. 11 (balance harness: 10.5 left a 7.9 s worst-lane fight, 12 took L17 Twins to 19 s)
-  ttkBand: { acc: 0.8, min: 12, milestoneMin: 16, shopExp: 0.1, fromRatio: 0.9, fadeWidth: 0.1, weakMin: 11 },
+  ttkBand: { acc: 0.8, min: 12, milestoneMin: 16, shopExp: 0.1, fromRatio: 0.9, fadeWidth: 0.1, weakMin: 11,
+    // r8v2 (B1): a squad under the curve meets ≥ t·mult·(E/C)^k s of fight: HP ≥ round50(DPS(E)·t·mult·(E/C)^(k−1)), DPS(E) =
+    // E·f·d·bd·acc, mult = the table's finale / Prime multiple, C/E ≥ minRatio; t 0 = off
+    // r8: tAt { L: t } overrides t (D17); effStatic multiplies the floor at the spawn of a run without its counted gate decisions
+    // (LEVELS.curve.assist) and for bossOutcome's fixed lines (D18 / A2) — 1.0: the P1 audit fixed the sniper's cap instead
+    under: { fromLevel: 3, t: 11.5, tAt: { 3: 9.5, 5: 10.5 }, k: 3, minRatio: 0.3, tFrom: 60, tPer: 0.005, tCap: 12.5, effStatic: 1.0 } },   // r8v2: t rises past L60
   milestoneMult: 1.25,
   milestones: [5, 10, 15, 20, 25, 30],
   hpRound: 50,
   rotation: ['hulk', 'hulk', 'hulk', 'hulk', 'spitterQueen', 'hulk', 'hulk', 'spitterQueen', 'hulk', 'juggernaut',
-             'spitterQueen', 'hulk', 'juggernaut', 'spitterQueen', 'colossus', 'juggernaut', 'hulkTwins', 'spitterQueen', 'juggernaut', 'colossusPrime',
-             'hulk', 'spitterQueen', 'juggernaut', 'colossus', 'hulkTwins', 'spitterQueen', 'juggernaut', 'colossus', 'hulkTwins', 'colossusPrime'],   // index = L − 1
+             'spitterQueen', 'hulk', 'juggernaut', 'spitterQueen', 'colossus', 'hulkTwins', 'juggernaut', 'spitterQueen', 'juggernaut', 'colossusPrime',
+             'hulk', 'spitterQueen', 'juggernaut', 'colossus', 'hulkTwins', 'spitterQueen', 'juggernaut', 'colossus', 'hulkTwins', 'colossusPrime'],   // index = L − 1 (r8: Twins L16)
   approachZ: -45,                                 // walks out of the fog at 45 m
   holdZ: [-12, -10, -8],                          // hold distance per phase (own speed = −roadSpeed)
   twinOffsetX: 3.0,                               // twins stand at x ±3.0 (clamped to the road)
@@ -584,7 +620,11 @@ export const BOSSES = deepFreeze({
     sacPulseHz: 1.1, sacPulseMin: 0.55, sacPulseMax: 1.1,   // extra: GDD §7 Spitter Queen 'pulsing sacs' — body glow × 0.55…1.1 at 1.1 Hz
     sacGain: 0.5,                                 // extra (QA ENE-14): sac glow gain on top of the pulse (eyes stay 1.5): peak ≈ #C7E84B, below the bloom threshold
   },
-  valve: { after: 45, z: -3, perSec: 3 },         // safety valve: advance to 3 m after 45 s, chew 3 soldiers/s
+  // safety valve: advance to 3 m after 45 s, chew 3 soldiers/s (endless / mini-bosses). r8 campaign ENRAGE: after 20 s (26 s on
+  // a finale) the boss chews round(chew·(1 + rampPerSec·n)) in second n, chew = max(perSec, round(perSecFrac·E_boss)); slow
+  // archetypes add extraByArchetype s, in full from extraFull·E_boss and none below extraFrom·E_boss (r8v2: Twins won 3 of 15)
+  valve: { after: 45, z: -3, perSec: 3, campaign: { after: 20, afterMilestone: 26, perSecFrac: 0.05, rampPerSec: 1.0,
+    extraByArchetype: { colossus: 6, colossusPrime: 6, hulkTwins: 8 }, extraFrom: 0.8, extraFull: 0.95 } },
   intro: { dollyOut: 1.0, hold: 0.6, back: 0.8, roar: 0.8, nameCard: 1.5, invuln: 2.6, fightAfter: 2.4, roadLerp: 1.0 },   // s
   minionBurst: { every: 4, count: 6 },            // phase-1 walker bursts
   lastHorde: 10,                                  // phase-3 horde size
@@ -600,7 +640,7 @@ export const BOSSES = deepFreeze({
       // centre moves within ±WORLD.steerRange (2.1 m): at r 3 no position with |x| < 0.9 m could escape. 1.8 = 2.1 − a 0.3 m
       // margin, the widest ring every road position can steer out of inside the 0.8 s telegraph (r7 balance:0)
       phases: [
-        { until: 0.6,  attack: 'slam', interval: 5, kills: 3, killsPerLevel: 0.5, radius: 1.8, telegraph: 0.8 },
+        { until: 0.6,  attack: 'slam', interval: 5, kills: 3, campaignKillsPct: 0.05, min: 3, killsPerLevel: 0.5, radius: 1.8, telegraph: 0.8 },   // r8: campaign 5 % of C
         { until: 0.25, onEnter: [{ attack: 'charge', killsPct: 0.08, min: 3, width: 2.5, telegraph: 1.2, speed: 6, duration: 1.0 }, { spawn: { runner: 6 } }],
           attack: 'slam', interval: 5, kills: 3, killsPerLevel: 0.5, radius: 1.8, telegraph: 0.8 },
         { until: 0,    onEnter: [{ spawn: { brute: 2 } }], attack: 'slam', interval: 3, kills: 3, killsPerLevel: 0.5, radius: 1.8, telegraph: 0.8 },
@@ -609,9 +649,9 @@ export const BOSSES = deepFreeze({
     spitterQueen: {
       name: 'SPITTER QUEEN', baseModel: 'spitter', scale: 2.6,   // bloated, 4 arms, pulsing sacs
       phases: [
-        { until: 0.6,  attack: 'spit3', interval: 2.5, kills: 1, kills2FromLevel: 10, preview: 1.0 },
-        { until: 0.25, onEnter: [{ attack: 'rain', splashes: 8, duration: 3 }], attack: 'spit3', interval: 2.5, kills: 1, kills2FromLevel: 10, preview: 1.0 },
-        { until: 0,    onEnter: [{ spawn: { crawler: 10 } }], attack: 'spit3', interval: 1.6, kills: 1, kills2FromLevel: 10, preview: 1.0 },
+        { until: 0.6,  attack: 'spit3', interval: 2.5, kills: 1, kills2FromLevel: 10, campaignKillsPct: 0.02, preview: 1.0 },
+        { until: 0.25, onEnter: [{ attack: 'rain', splashes: 8, duration: 3 }], attack: 'spit3', interval: 2.5, kills: 1, kills2FromLevel: 10, campaignKillsPct: 0.02, preview: 1.0 },
+        { until: 0,    onEnter: [{ spawn: { crawler: 10 } }], attack: 'spit3', interval: 1.6, kills: 1, kills2FromLevel: 10, campaignKillsPct: 0.02, preview: 1.0 },
       ],
     },
     juggernaut: {
@@ -659,7 +699,7 @@ export const WEAPONS = deepFreeze({
              tracer: [3.4, 2.6, 0.35], shake: 0.03, color: 0xFFE84A, sting: 'sting_minigun',          // rate ×3 → 3× gate hits/s; "thin yellow tracers" (blue ≈ 0 so ACES keeps it yellow)
              tracerScale: 0.6,                                                                        // extra: tracer cross-section × 0.6 (thinner than the rifle's, GDD §8.1)
              flashScale: 0.8, spinFrom: 1 },                                                        // extra: thin rapid flashes; rate multiplier at t = 0 of the spin-up (ramps to rateMult)
-  rocket:  { id: 'weapon.rocket',  unlock: 9,  duration: 8,  every: 0.6, speed: 22, splash: 2.5, dpsSeconds: 1.0, rifleKeep: 0.5, gateHits: 8,
+  rocket:  { id: 'weapon.rocket',  unlock: 10, duration: 8,  every: 0.6, speed: 22, splash: 2.5, dpsSeconds: 1.0, rifleKeep: 0.5, gateHits: 8,
              trauma: 0.3, fovKick: 4, maxRange: 30, pool: 8, color: 0xFF6A2A, sting: 'sting_rocket',    // 1 rocket / 0.6 s from the blob centre
              // extra (weapons.js visuals / tests): launch flare scale, launch height above the helmets (m), swept-test radius (m),
              // ARCH §6.11/§7 splash reach onto an armed panel ("within 1.8 m (x) and 1.0 m (z)"), smoke-trail cadence (s) and
@@ -671,7 +711,7 @@ export const WEAPONS = deepFreeze({
              // smoke.colorIdx = FX_COLOR.dust (index 8 of fxmaterials.js FX_COLORS = PALETTE.fx.dust; WPN-10: data key instead of a weapons.js mirror)
              smokeEvery: 0.03, smoke: { size: 0.8, life: 1.2, spread: 0.35, rise: 0.6, colorIdx: 8 },
              tailM: 0.33, flame: { len: 1.2, radius: 0.16, hdr: [3.0, 1.4, 0.35] }, meshScale: 1.6, spin: 9 },
-  railgun: { id: 'weapon.railgun', unlock: 13, duration: 6,  every: 1.2, halfWidth: 0.4, dpsSeconds: 3.0, rifleKeep: 0.5, gateHits: 10, flash: 0.08,
+  railgun: { id: 'weapon.railgun', unlock: 12, duration: 6,  every: 1.2, halfWidth: 0.4, dpsSeconds: 3.0, rifleKeep: 0.5, gateHits: 10, flash: 0.08,
              tracer: [2.0, 3.6, 4.0], color: 0x9FDCFF, sting: 'sting_rail',                           // bolt through the whole road, 0.8 m wide
              // extra (weapons.js visuals): bolt flare scale, bolt visual life (s), lightning polyline segments / lateral jitter (m) /
              // re-roll interval (s), core radius and arc thickness (m), arc HDR gain (× tracer), J21 80 ms screen-flash opacity,
@@ -693,9 +733,9 @@ export const WEAPONS = deepFreeze({
 // GDD §8.2; ARCHITECTURE §6.11 / §8.4. duration Infinity = until consumed / rest of level (no HUD pill).
 export const GEAR = deepFreeze({
   armor:   { id: 'gear.armor',   unlock: 2,  platesCap: 50, costBrute: 3, costSpit: 1, absorbs: ['bite', 'spit'], duration: Infinity, color: 0x2E9BFF },   // plates = min(C, 50)
-  magnet:  { id: 'gear.magnet',  unlock: 4,  radius: 5.0, baseRadius: 1.2, duration: Infinity, color: 0xC77DFF },                                          // second magnet pays PICKUPS.duplicateCoins
-  chip:    { id: 'gear.chip',    unlock: 7,  duration: 20, rateBonus: 0.4, tracerTint: [1.5, 3.6, 4.0], color: 0x4AF0FF },                                 // fire rate +40 %, tracers tint cyan
-  booster: { id: 'gear.booster', unlock: 11, duration: 20, dmgBonus: 0.5, numberColor: 0xFFB02E, color: 0xFFB02E,                                         // damage +50 % (not gate hits), orange numbers
+  magnet:  { id: 'gear.magnet',  unlock: 16, radius: 5.0, baseRadius: 1.2, duration: Infinity, color: 0xC77DFF },                                          // second magnet pays PICKUPS.duplicateCoins
+  chip:    { id: 'gear.chip',    unlock: 20, duration: 20, rateBonus: 0.4, tracerTint: [1.5, 3.6, 4.0], color: 0x4AF0FF },                                 // fire rate +40 %, tracers tint cyan
+  booster: { id: 'gear.booster', unlock: 17, duration: 20, dmgBonus: 0.5, numberColor: 0xFFB02E, color: 0xFFB02E,                                         // damage +50 % (not gate hits), orange numbers
              tracerScale: 1.7 },                                                                                                                         // extra: GDD §8.2 "thicker tracers"
 });
 
@@ -709,9 +749,9 @@ export const TROOPS = deepFreeze({
             bossCapFrac: 0.05 },                                                                                                    // (new) round-3 verify (r3-balance-audit §5): a boss shot is at most 5 % of the boss's max HP (before profile.bossDamage) — the wave hz carries endless's design multiple and pressure, the mini-boss HP does not, and one uncapped shot took 95–110 % of an endless mini-boss (and up to ≈ 80 % of the L5 table HP)
   medic:  { id: 'troop.medic',  unlock: 6,  every: 4, pct: 0.02, min: 1, capPerLevel: 60, slot: 'centre', scale: 1.4 },            // +max(1, ceil(0.02·C)) while C < E(z), ≤ 60 per level
   flamer: { id: 'troop.flamer', unlock: 8,  coneDeg: 25, range: 13, dps: 6, burnBonus: 0.2, burnSeconds: 2, slot: 'front', emitPerSec: 30, scale: 1.4 },    // 6·hz·d DPS in a 25° cone, never below 25 % of a zombie's base HP (round-2 CHR-12: 15 → 6 + the HP floor in troops.js — the trooper took ≈ 70 % of kills; the cone burns and softens, bullets kill; the trooper took ≈ 70 % of kills; GDD §8.3 support role); range 7 → 13 m (GDD §8.3 amendment: the 7 m cone never engaged, CHR-8); flame particles 30/s (extra)
-  drone:  { id: 'troop.drone',  unlock: 10, rate: 4, dpsFraction: 0.05, hover: 5.2, slot: 'above', scale: 1.4,                     // 4 shots/s, 5 % of squad DPS each, runners first; hover 3 → 5.2 m (round-2 CHR-9: above the count label)
+  drone:  { id: 'troop.drone',  unlock: 15, rate: 4, dpsFraction: 0.05, hover: 5.2, slot: 'above', scale: 1.4,                     // 4 shots/s, 5 % of squad DPS each, runners first; hover 3 → 5.2 m (round-2 CHR-9: above the count label)
             tracerDropM: 8 },                                                                                                       // extra: drone tracers descend to FIRE.bullet.y over 8 m (cosmetic; hit tests are XZ)
-  apc:    { id: 'troop.apc',    unlock: 12, poolBase: 20, poolPerLevel: 2, width: 2.4, length: 3.4, ahead: 3.5, explodeRadius: 3, explodeDpsSeconds: 2, slot: 'ahead',
+  apc:    { id: 'troop.apc',    unlock: 21, poolBase: 20, poolPerLevel: 2, width: 2.4, length: 3.4, ahead: 3.5, explodeRadius: 3, explodeDpsSeconds: 2, slot: 'ahead',
             crushRadius: 1.4, crushOffsetZ: -1.7,                                                                                   // pool 20 + 2·L bites; crush circle per ARCH §7 (extra keys)
             crushDamage: 9999, removeReason: 'destroyed', scale: 1.0 },                                                             // extra: ARCH §6.6/§7 damageInCircle(…, 9999, 'crush'); troop:remove.reason at pool 0; scale 1 keeps the mesh = the width × length hit box; ahead 2.5 → 3.5 m (round-2 CHR-9: clears the label and the front rows)
   // extra: troops.js feel / animation literals (troops.js reads this object as its ANIM; round-2 cross-group: the old
@@ -750,8 +790,10 @@ export const TROOPS = deepFreeze({
 });
 
 // GDD §8.3 pickup schedule: index = L − 1; the level's newly unlocked special is guaranteed, after which it joins the bag.
-export const PICKUP_SCHEDULE = deepFreeze(['weapon.shotgun', 'gear.armor', 'weapon.minigun', 'gear.magnet', 'troop.sniper', 'troop.medic', 'gear.chip',
-  'troop.flamer', 'weapon.rocket', 'troop.drone', 'gear.booster', 'troop.apc', 'weapon.railgun', 'weapon.laser']);
+// r8 teaching ladder (D9 + A14): null = no pickup debut; each special's `unlock` = its index + 1 (validate-levels).
+export const PICKUP_SCHEDULE = deepFreeze(['weapon.shotgun', 'gear.armor', 'weapon.minigun', null, 'troop.sniper', 'troop.medic', null,
+  'troop.flamer', null, 'weapon.rocket', null, 'weapon.railgun', null, 'weapon.laser', 'troop.drone', 'gear.magnet', 'gear.booster', null, null,
+  'gear.chip', 'troop.apc']);
 
 // ==== PICKUPS ================================================================================
 // GDD §8 delivery, §9.1 coin lines/crates; ARCHITECTURE §6.10 / §8.4.
@@ -785,7 +827,10 @@ export const PICKUPS = deepFreeze({
   weaponSlots: 2,
   items: ['weapon.shotgun', 'weapon.minigun', 'weapon.rocket', 'weapon.railgun', 'weapon.laser',
           'gear.armor', 'gear.magnet', 'gear.chip', 'gear.booster',
-          'troop.sniper', 'troop.medic', 'troop.flamer', 'troop.drone', 'troop.apc', 'coins'],   // extra: every grantable item id
+          'troop.sniper', 'troop.medic', 'troop.flamer', 'troop.drone', 'troop.apc', 'coins',
+          'item.kit', 'item.kit2'],                                    // extra: every grantable item id (r8: + the kit items)
+  // r8 (P1T): kind 'event' — pickups emits item:grant, level.js adds the kits to run.kits for the hold (HORDE_GEN.run's items)
+  eventItems: { 'item.kit': { kind: 'event', kits: 1 }, 'item.kit2': { kind: 'event', kits: 2 } },
 });
 
 // ==== UPGRADES / ECONOMY / STARS / SCORE =====================================================
@@ -835,19 +880,28 @@ export const ECONOMY = deepFreeze({
   breakdownOf: { kill: 'kills', gate: 'gates', max: 'gates', pile: 'piles', crate: 'piles', boss: 'boss', duplicate: 'piles', refund: 'piles', bonus: 'bonus' },
 });
 
-// GDD §9.3 stars: 1★ boss killed, 2★ survivors ≥ 0.5·E_boss, 3★ ≥ 0.8·E_boss.
-export const STARS = deepFreeze({ two: 0.5, three: 0.8 });   // round-3 QA LVL-22 (GDD §9.3): 3★ at 0.8·E_boss (was 0.75)
+// GDD §9.3 stars: 1★ boss killed, 2★ survivors ≥ 0.5·E_boss, 3★ ≥ three(L)·E_boss.
+// r8v2: three(L) = 0.8 on L1–5, 0.9 on L6–9, 0.95 from L10 (threeByLevel = [[toLevel, frac], …])
+export const STARS = deepFreeze({ two: 0.5, three: 0.95, threeByLevel: [[5, 0.8], [9, 0.9]] });
+/** r8v2: the run's 3★ fraction of E_boss at campaign level L (STARS.threeByLevel, else STARS.three). */
+export function starThree(L) {
+  const t = STARS.threeByLevel;
+  if (t && Number.isFinite(L)) for (let i = 0; i < t.length; i++) if (L <= t[i][0]) return t[i][1];
+  return STARS.three;
+}
 
 /**
  * Round 7 (r7, explain:0): survivors needed at the boss kill for k stars on a level whose E_boss is `eBoss` — 0 for 1★
- * (the boss kill alone), ceil(STARS.two·E_boss) for 2★, ceil(STARS.three·E_boss) for 3★ (the −1e-9 keeps an exact product
+ * (the boss kill alone), ceil(STARS.two·E_boss) for 2★, ceil(starThree(L)·E_boss) for 3★ (r8v2: L = the campaign level; no L
+ * = STARS.three) (the −1e-9 keeps an exact product
  * from rounding up). level._commitWon awards the stars with it and the results / title captions print it, so the
  * threshold shown can never disagree with the stars awarded (same result as `survivors ≥ k·E_boss` for every reachable
  * pair: E_boss 5…600 in steps of 5 × survivors 0…700).
+ * r8: eBoss = the run's target (a type's eTarget); threeFrac > 0 replaces starThree(L) (HORDE 0.9).
  */
-export function starNeed(eBoss, k) {
+export function starNeed(eBoss, k, L, threeFrac) {
   if (!(k > 1) || !(eBoss > 0)) return 0;
-  return Math.ceil((k >= 3 ? STARS.three : STARS.two) * eBoss - 1e-9);
+  return Math.ceil((k >= 3 ? (threeFrac > 0 ? threeFrac : starThree(L)) : STARS.two) * eBoss - 1e-9);
 }
 
 // GDD §9.3 score = kill·Σ kill coins + peak·peakSquad + survivor·R + flipped·gatesFlipped + noRedLoss (if none lost to red);
@@ -856,6 +910,8 @@ export const SCORE = deepFreeze({
   kill: 10, peak: 15, survivor: 20, flipped: 200, noRedLoss: 500,
   endless: { metre: 1, kill: 10, gate: 25, miniBoss: 500, streakSeconds: 60, streakMult: 2,
              pressure: true },   // (new) round-3 QA LVL-17 (GDD §10.1): every endless score term × the chunk's pressure factor (surviving pressure pays)
+  // r8 (D45): the Horde hold's score terms (LINE HELD, each boss stagger)
+  hold: { lineHeld: 500, stagger: 100 },
 });
 
 // ==== LEVELS =================================================================================
@@ -924,7 +980,14 @@ export const LEVELS = deepFreeze({
     waveAfterGateM: 20,                                // wave 20 m past each gate's arrival
     pickupRange: [0.35, 0.85],                         // specials placed at 35–85 % of the length
     roadLerpRate: 3,                                   // roadSpeed = lerpExp(roadSpeed, target, 3, dt)
-    loopAfter: 30,                                     // beyond L30 the curve uses L = 30 with seed 1000 + L
+    // r8v2: the shop ranks owned at L1–L30 (rank 10 after; expectedRanksOf)
+    expectedShop: [[0,0,0,0,0], [1,0,0,0,0], [1,0,1,0,0], [2,0,1,1,0], [2,0,1,1,0], [2,1,1,1,0], [3,1,1,1,0], [3,2,2,1,0], [3,2,2,2,2],
+      [4,2,2,3,2], [4,2,3,3,2], [5,3,3,3,2], [5,3,4,3,2], [5,4,4,3,3], [5,4,5,3,4], [6,5,5,3,4], [6,5,5,6,4], [6,5,5,6,5],
+      [6,5,5,7,6], [7,6,6,7,6], [7,6,6,8,6], [7,7,6,8,7], [8,7,7,8,7], [8,7,7,9,8], [8,8,8,9,8], [9,8,8,9,8], [9,8,8,10,8],
+      [9,8,8,10,9], [9,9,8,10,9], [10,9,9,10,9]],
+    post: { from: 30, eBossPer: 10, eBossCap: 900, speedFrom: 999, speedPer: 0, speedCap: 12, popPer: 0.15, popCap: 28, runupPer: 0.5, runupCap: 45, hpPerEPer: 0, cycleFrom: 21, cycleLen: 10,
+      // r8v2: past L60 slowly: E_boss +5 / level to 1 300 (P9: bites are absolute, a bigger squad outlasted them hands-off), population +0.05 to 32, run-up +0.1 to 50
+      late: { from: 60, eBossPer: 5, eBossCap: 1300, popPer: 0.05, popCap: 32, runupPer: 0.1, runupCap: 50 } },
     introAheadM: 60,                                   // QA LVL-12: a new type's solo introduction spawns 60 m before its first mixed wave (GDD §6.2)
     staleEventSkipM: 40,                               // QA LVL-11: script events more than 40 m behind the distance (a debug jump) are consumed unspawned, except runup / boss
     // (new) QA LVL-35 / round-1 LVL-12 (GDD §6.2): a solo introduction is searched within ±introSearchM of its target spawn;
@@ -934,6 +997,13 @@ export const LEVELS = deepFreeze({
     // (new) QA LVL-21 (GDD §10): after assistAfterFails consecutive failures of the same level in a session, the next
     // attempt starts with + ceil(assistStartFrac·E_boss) soldiers (reset on a clear)
     assistAfterFails: 2, assistStartFrac: 0.08,   // round-3 QA LVL-21: 0.25 → 0.08 (the old assist handed a failing player 3★)
+    // r8 (D30 / A1): a failed run joins it with ≥ max(minDecisions, minShare·events reached) counted gate decisions (one per
+    // event: target travel ≥ minTravelM or a lane change while active; level.activity); the hold keys are the Horde's.
+    // P1M (A1, D48): 1 m counts 99-100 % of decent / skilled failed runs (2 m: 74-81 %); minShare = half the decent p10 share
+    assist: { perEvent: true, minTravelM: 1, minDecisions: 3, minShare: 0.32, holdActions: 3, holdSurges: 2, windowS: 3 },
+    // r8 (D28): a Horde run phase (levelgen.runCurve): lenBase + lenPerGate·(gates − 1) m, runup zombies, fixed-line defaults
+    runPhase: { lenBase: 140, lenPerGate: 100, runup: 5,
+      fixed: { lim: 0.8, win: 0.84, from: 4, repairFrom: 4 } },
     // (new) round-3 QA LVL-21 (GDD §10): the assist escalates for at most assistMaxSteps further failures and is announced with
     // assistHint(n) (hint:show id 'assist', every assisted attempt); RETRY after a failure plays a fresh layout: seed
     // seedBase + L + retrySeedStep·(consecutive failures)
@@ -943,7 +1013,7 @@ export const LEVELS = deepFreeze({
     // '−' lane shows at most `multi` (pair / triple) or `single` of the live count, on the design grid (util.roundDesign), never
     // below GATE_RULES.generation.minValue (level._capRedLanes). keepFlipCap: the capped lane still flips up to its authored
     // value (shooting a red gate blue keeps its full payoff — the lead's amendment); false = flipCap clamped to the cap (r7 v14)
-    redCap: { multi: 0.5, single: 0.4, keepFlipCap: true },
+    redCap: { multi: 0.75, single: 0.5, keepFlipCap: true, scope: 'single' },   // r8: single-gate events only
     traceTolerance: 0.15,                              // extra: the cautious E-trace must end within ±15 % of E_boss (ARCH §6.17)
     // (round 5, from levelgen's former DATA-MISSING literals) the weak (0.3·H) line must reach the boss with ≥ cautiousFloor·E_boss
     // (validator warning) and with ≥ weakLineFail·E_boss (error, QA LVL-27); the crate hint row trails its crate's spawn by
@@ -962,10 +1032,12 @@ export const LEVELS = deepFreeze({
       gainBand: { early: [1.2, 1.45], mid: [1.15, 1.25], near: [1.1, 1.1], last: [1.05, 1.05] },
       surviveMult: 2, uSteps: 20,
       weakAttempts: 32,                // round 5: attempt budget while the best attempt's weak line is still under cautiousFloor
+      shrinkSteps: 40,                 // r8 (D31): the most grid steps shrinkGreedy takes
     },
   },
   endless: {
     chunk: 300,                                        // m per chunk, difficulty index D = 1, 2, 3 …
+    bandMaxLevel: 45,                                  // r8v2: endless reads LEAK_BANDS at most at L45 (its 1.3.0 band)
     speed: { base: 9, per: 0.15, cap: 12 },            // min(12, 9 + 0.15·D)
     e: { base: 150, growth: 1.06, cap: 600 },          // E(z) = min(600, 150·1.06^D)
     gates: [3, 2], gatesSwitch: 4,                     // 3 gate events per chunk while D ≤ 4, then 2
@@ -979,6 +1051,10 @@ export const LEVELS = deepFreeze({
     // highMult·E = the ceiling the + lanes never carry the squad past (keep rule below)
     rubber: { low: 10, lowBase: 8, lowFrac: 0.3, highMult: 2 },
     crates: 1, coinLines: 1,                           // extra: specials (crates) and coin lines per endless chunk (levelgen)
+    layoutWeights: { early: { pair: 75, single: 25, triple: 0 }, mid: { pair: 70, single: 15, triple: 15 } },   // r8 (D22): endless's gate layouts, the 1.3.0 weights (the campaign's moved with F12)
+    // r8: endless's specials in unlock order — the 1.3.0 PICKUP_SCHEDULE (the campaign's moved with the teaching ladder, D22)
+    pickups: ['weapon.shotgun', 'gear.armor', 'weapon.minigun', 'gear.magnet', 'troop.sniper', 'troop.medic', 'gear.chip',
+      'troop.flamer', 'weapon.rocket', 'troop.drone', 'gear.booster', 'troop.apc', 'weapon.railgun', 'weapon.laser'],
     wavePoolShare: 4,                                  // extra (QA LVL-17 / round 5d): a wave carries ≤ 1/4 of every type's pool — four waves share the road; round 5d: a type's excess moves into the other types' headroom under the same shares (levelgen.capWaveToPoolShare)
     // (new) round 5d (pool-safe by construction, docs/build/r5d-endless.md): the pool slots per type every endless wave and gate guard
     // leaves free — the rotation's minion union (BOSSES.minionBurst.count walkers, the Hulk's 6 runners / 2 brutes, the Queen's 10
@@ -1035,19 +1111,66 @@ export const LEVELS = deepFreeze({
   },
 });
 
+/** r8: the level whose boss (rotation entry, milestone) campaign level L uses — L ≤ 30 itself, then L21–L30 repeating. */
+export function bossCycleLevel(L) {
+  const p = LEVELS.curve.post;
+  const n = Math.max(1, Math.floor(Number.isFinite(L) ? L : 1));
+  if (!p || n <= p.from) return n;
+  return p.cycleFrom + ((n - p.cycleFrom) % p.cycleLen);
+}
+
+/** r8v2: campaign boss of level L — L ≤ 30 the rotation; past L30 a finale cycles the six finale bosses, the rest loop L21–L29. */
+export function isFinale(L) { const n = Math.max(1, Math.floor(Number.isFinite(L) ? L : 1)); return n % 5 === 0; }
+export function bossIdOf(L) {
+  const n = Math.max(1, Math.floor(Number.isFinite(L) ? L : 1));
+  const p = LEVELS.curve.post;
+  if (!p || n <= p.from) return BOSSES.rotation[Math.min(n, BOSSES.rotation.length) - 1];
+  if (n % 5 === 0) return BOSSES.rotation[5 * (((n / 5) - 1) % 6 + 1) - 1];
+  return BOSSES.rotation[bossCycleLevel(n) - 1];
+}
+/** r8v2: the shop ranks [squad, fireRate, damage, coinMult, bossDamage] a player owns at level L (LEVELS.curve.expectedShop, then 10). */
+export function expectedRanksOf(L) {
+  const t = LEVELS.curve.expectedShop;
+  const n = Math.max(1, Math.floor(Number.isFinite(L) ? L : 1));
+  if (!t || n > t.length) return [10, 10, 10, 10, 10];
+  return t[n - 1];
+}
+
 /**
  * Round 7 (r7, explain:0, the title caption's ★★★ threshold): E_boss of campaign level L before its script exists — the
- * authored level's own value (L1: 140), else GDD §10's E_boss(L) = min(cap, round5(base·growth^(L−1))) with L past
- * LEVELS.curve.loopAfter on the L30 curve. The same formula as levelgen.curve(L).eBoss (data.js imports nothing, so the
- * rounding is written out; node check: identical for L = 1…60).
+ * authored level's own value, else levelgen.curve(L).eBoss written out (data.js imports nothing; validated on L1–300).
  */
 export function eBossOf(L) {
   const n = Math.max(1, Math.floor(Number.isFinite(L) ? L : 1));
   const a = LEVELS.authored[n];
   if (a && a.eBoss > 0) return a.eBoss;
   const c = LEVELS.curve, e = c.eBoss;
-  const Lc = Math.min(n, c.loopAfter);
-  return Math.min(e.cap, Math.round(e.base * Math.pow(e.growth, Lc - 1) / e.round) * e.round);
+  const e0 = Math.min(e.cap, Math.round(e.base * Math.pow(e.growth, Math.min(n, c.post ? c.post.from : n) - 1) / e.round) * e.round);
+  if (!(c.post && n > c.post.from)) return e0;
+  return Math.min(c.post.eBossCap, e0 + c.post.eBossPer * (n - c.post.from)) + lateRise(n, 'eBoss');
+}
+/** r8v2: the extra enrage seconds of `archetype` at r = C / E_boss (valve.campaign extraByArchetype, extraFrom → extraFull). */
+export function enrageExtra(vc, archetype, r) {
+  const ex = vc && vc.extraByArchetype ? (vc.extraByArchetype[archetype] || 0) : 0;
+  if (!(ex > 0)) return 0;
+  const a = vc.extraFrom >= 0 ? vc.extraFrom : 0.8, b = vc.extraFull > a ? vc.extraFull : 1;
+  return ex * Math.min(1, Math.max(0, (r - a) / (b - a)));
+}
+/** r8v2: the boss under-curve floor's seconds at level L (BOSSES.ttkBand.under t, +tPer per level past tFrom, capped at tCap; r8: tAt). */
+export function bossUnderT(L) {
+  const uf = BOSSES.ttkBand && BOSSES.ttkBand.under;
+  if (!uf || !(uf.t > 0) || L < (uf.fromLevel | 0)) return 0;   // off before under.fromLevel (L3; P9, A17 / A18)
+  if (uf.tAt && uf.tAt[L] > 0) return uf.tAt[L];
+  if (!(uf.tPer > 0) || !(L > uf.tFrom)) return uf.t;
+  return Math.min(uf.tCap > uf.t ? uf.tCap : uf.t, uf.t + uf.tPer * (L - uf.tFrom));
+}
+/** r8v2: the post-L60 addition to a curve quantity ('eBoss' | 'pop' | 'runup'): min(lateCap − cap, per·(L − late.from)), 0 before. */
+export function lateRise(L, key) {
+  const p = LEVELS.curve.post, lt = p && p.late;
+  if (!lt || !(L > lt.from)) return 0;
+  const per = lt[key + 'Per'], cap = lt[key + 'Cap'], cap0 = p[key + 'Cap'];
+  if (!(per > 0) || !(cap > cap0)) return 0;
+  return Math.min(cap - cap0, per * (L - lt.from));
 }
 
 // ==== QUALITY_TIERS ==========================================================================
@@ -1144,6 +1267,15 @@ export const RENDER = deepFreeze({
   // hemisphere fill intensity, and the sun swung this far about +Y (deg) from RENDER.sun.offset toward the camera side,
   // so the marching squad's backs (the title camera looks over them) are lit instead of black silhouettes
   title: { hemi: 1.8, sunAzimuthDeg: 175 },
+  // 1.4.0 (horde DESIGN 2): render.setRig camera rigs — portrait keeps the preset's horizontal FOV and, with wallFrac, derives
+  // the look height so the ground at z wallZ (the barricade's centre line) sits at wallFrac of the height on every aspect;
+  // landscape hFovDeg (vertical clamped to fovClamp); fog far × params.fogFar / WORLD.fog.far; tween s. Sections (2 m) are
+  // 77 px at 320×568, 95 at 390×844, 58 at 585×340 (HOLD SCREEN: wall 69-73 %, sections ≥ 76 / 57 px)
+  rigs: {
+    hold: { portrait: { pos: [0, 10.8, 10.3], look: [0, 0, -11], wallZ: -3.5, wallFrac: 0.715 },
+            landscape: { pos: [0, 9.7, 15.9], look: [0, 0, -12], hFovDeg: 50, fovClamp: [30, 50] },
+            fog: { near: 58, far: 100 }, tween: 1.5 },
+  },
   gateFrameEmissive: 1.6, lowTierEmissiveBoost: 0.3,
   letterboxPct: 8,                        // boss intro bars
   dollyPos: [0, 7, 7],                    // boss intro dolly position (look at the boss core)
@@ -1199,7 +1331,7 @@ export const RENDER = deepFreeze({
     manhole: { max: 2, chance: 0.42, x: [1.0, 2.6], r: 0.4, lift: 0.012 },
   },
   textures: {
-    road: [512, 1024], digitAtlas: [1024, 256], glow: [128, 128], smoke: [256, 256], windows: [256, 256], particle: [64, 64], muzzle: [128, 64], dust: [32, 32], icons: [512, 64],
+    road: [512, 1024], digitAtlas: [1024, 256], glow: [128, 128], smoke: [256, 256], windows: [256, 256], particle: [64, 64], muzzle: [128, 64], dust: [32, 32], icons: [512, 128],
     // r7 (perf-render:5): 1500 → 500 ms. Since round 6 an atlas painted with the fallback face is re-drawn once the font
     // lands ('loadingdone' / verify), so the long wait only delayed a first load on a slow link
     font: 'Lilita One', fontWaitMs: 500,
@@ -1212,7 +1344,9 @@ export const RENDER = deepFreeze({
   },
   icons: {
     order: ['shotgun', 'minigun', 'rocket', 'rail', 'laser', 'armor', 'chip', 'booster', 'magnet', 'sniper', 'medic', 'flame', 'drone', 'apc', 'coins', 'star'],   // 16 cells of 32 px
-    ofItem: { 'weapon.shotgun': 'shotgun', 'weapon.minigun': 'minigun', 'weapon.rocket': 'rocket', 'weapon.railgun': 'rail', 'weapon.laser': 'laser',
+    row2: ['kit', 'kit2', 'airstrike', 'flare', 'supply'],
+    ofItem: { 'item.kit': 'kit', 'item.kit2': 'kit2', 'weapon.shotgun': 'shotgun',   // 1.4.0: row2 (kits, the airstrike, flare, supply)
+              'weapon.minigun': 'minigun', 'weapon.rocket': 'rocket', 'weapon.railgun': 'rail', 'weapon.laser': 'laser',
               'gear.armor': 'armor', 'gear.chip': 'chip', 'gear.booster': 'booster', 'gear.magnet': 'magnet',
               'troop.sniper': 'sniper', 'troop.medic': 'medic', 'troop.flamer': 'flame', 'troop.drone': 'drone', 'troop.apc': 'apc', coins: 'coins' },
   },
@@ -1832,6 +1966,9 @@ export const MUSIC = deepFreeze({
     // music rate. Same notes, filter and envelope, so the same sound; until the render is done the notes are built live.
     pad:   { src: 'triangle', voices: 2, detuneCents: 6, filter: { type: 'lowpass', f: 1200 }, gain: 0.22, attackMs: 350, releaseMs: 500, prerender: true },
     drone: { src: 'sawtooth', note: 33, filter: { type: 'lowpass', f: 220 }, gain: 0.25, lfo: { f: 0.25, depth: 0.1 } },   // A1 low drone (boss)
+    // 1.4.0 low brass (hold): the bar chord's root + fifth `octave` down, held a bar; a swell bar: gain × swell, attack swellMs
+    brass: { src: 'sawtooth', voices: 2, detuneCents: 8, octave: -12, filter: { type: 'lowpass', f: 650, q: 0.9 }, gain: 0.2,
+             attackMs: 180, releaseMs: 450, swell: 1.8, swellMs: 1200 },
   },
   modes: {
     none:  {},
@@ -1839,6 +1976,7 @@ export const MUSIC = deepFreeze({
     level: { drums: 'full', bass: true, lead: true, pad: 0.6 },            // full
     runup: { drums: 'full' },                                              // drums only
     boss:  { drums: 'half', bass: true, bassOctave: -12, lead: true, drone: true },   // half-time, bass −1 octave, low drone
+    hold:  { drums: 'full', bass: true, bassOctave: -12, brass: 1, pad: 0.35 },          // 1.4.0: drums + low brass
   },
 });
 
@@ -1898,6 +2036,14 @@ export const JUICE = deepFreeze({
   telegraph: { bruteReachM: 1.7, bruteInnerM: 0.55, bruteArcHalfDeg: 68 },
   powerup: { edgeGlow: 0.3, pillBlinkHz: 2, pillBlinkLast: 2 },           // extra: J13 / J14
   fovKick: { rocket: 4, seconds: 0.25 },                                  // extra: J21 FOV kick +4°
+  // 1.4.0: 'fx:burst' presets (particle kind, count, speed ×, FX colour name) and 'fx:decal' kinds (arrow = the chevron stripe)
+  kinds: {
+    burst: { kill: { kind: 'blood', n: 3, speed: 0.8 }, climb: { kind: 'dust', n: 6, speed: 1 }, wallHit: { kind: 'dust', n: 4, speed: 0.7 },
+             breach: { kind: 'dust', n: 14, speed: 1.4 }, repair: { kind: 'gold', n: 12, speed: 0.9 }, blast: { kind: 'spark', n: 30, speed: 2.2, color: 'rocket' } },
+    decal: { ring: 'ring', arc: 'arc', arrow: 'lane' },
+  },
+  // 1.4.0: fx coalesces 'crowd:kills' — flushHz blood bursts of perKill per kill (≤ cap), a coin flight every coinEvery s
+  crowdKills: { flushHz: 10, perKill: 3, cap: 24, coinEvery: 0.5 },
   ui: {                                                                   // extra: GDD §14 / ARCH §10.3 timings
     screenFadeMs: 160, hudHz: 10, debugHz: 4,
     resizeDebounceMs: 120,   // CORE-10: resize / orientation burst → render.resize at once (leading edge) and again this long after the last event (GDD §14)
@@ -1963,6 +2109,625 @@ export const JUICE = deepFreeze({
   },
 });
 
+// ==== r8 TYPE REGIONS (1.4.0) ===============================================================
+// One export per region and owner, >= 3 comment lines apart. *_TEXT { hints, strings, codex: { sections, cards, entries,
+// titles, unlock, legacy } } and *_AUDIO (cues), every key optional, reach HINTS, STRINGS, CODEX, AUDIO_CUES by spread
+// lines; base keys win (check-codex reports a shadowed key).
+//
+// ---- LEVEL_TYPES + LEVEL_ROTATION + helpers (P1T) ----
+// The type keys (PLAN campaign; D2, D16, D21, D34, D35): base picks the generator and ModeSystem, night the (runtime) modifier;
+// debut = its first level (softeners, first meeting); assist: 'soldiers' at the start or 'kits' for the mode; runShare = the
+// run's part of a failed run's fraction; enabled = the stage flag (P8): a disabled base plays standard keeping its night, a combo
+// its base by day unless combos. First played at a frontier ≥ debut + meetAfter = a first meeting until the first clear.
+// retypeRewardSkip: re-typed levels whose first new-type clear pays the replay rate ([] unless the owner asks).
+export const LEVEL_TYPES = deepFreeze({
+  standard: { base: 'standard', night: false, debut: 1, color: PALETTE.ui.primary, badge: '', bonusMult: 1, enabled: true, assist: 'soldiers' },
+  horde: { base: 'horde', night: false, debut: 4, color: 0xFF7A2F, badge: 'planks', bonusMult: 1.25, enabled: true, assist: 'kits', starThree: 0.9, runShare: 0.4 },
+  night: { base: 'standard', night: true, debut: 7, color: 0x6E5CF0, badge: 'crescent', bonusMult: 1.1, enabled: true, assist: 'soldiers' },
+  // 1.5.0 (their slots play standard / night / horde in 1.4.0)
+  chase: { base: 'chase', night: false, debut: 12, color: 0x2FB8FF, badge: 'chevrons', bonusMult: 1.15, enabled: false, assist: 'soldiers' },
+  escort: { base: 'escort', night: false, debut: 18, color: 0x3FD07A, badge: 'truck', bonusMult: 1.15, enabled: false, assist: 'plates' },
+  nightHorde: { base: 'horde', night: true, debut: 47, color: 0xFF7A2F, badge: 'planks', bonusMult: 1.3, enabled: false, assist: 'kits', starThree: 0.9, runShare: 0.4 },
+  nightChase: { base: 'chase', night: true, debut: 53, color: 0x2FB8FF, badge: 'chevrons', bonusMult: 1.2, enabled: false, assist: 'soldiers' },
+  nightEscort: { base: 'escort', night: true, debut: 58, color: 0x3FD07A, badge: 'truck', bonusMult: 1.2, enabled: false, assist: 'plates' },
+  combos: false, meetAfter: 5, retypeRewardSkip: [],
+});
+// The map: a code per district slot, cycle 1 (L1–30) and 2 (L31–60); from cycle k ≥ 3 district d takes slots 2–4 of cycle 2's
+// ((d − 1 + k − 2) mod 6) + 1 (night on nightSlot when it has none) and its finale is N in nightFinales, S elsewhere. A leading N
+// is the night modifier.
+export const LEVEL_ROTATION = deepFreeze({
+  cycle1: [['S', 'S', 'S', 'H', 'S'], ['S', 'N', 'S', 'H', 'S'], ['S', 'C', 'H', 'N', 'S'], ['S', 'N', 'E', 'H', 'S'], ['S', 'C', 'H', 'E', 'S'], ['S', 'C', 'E', 'H', 'S']],
+  cycle2: [['S', 'H', 'C', 'E', 'S'], ['S', 'C', 'N', 'H', 'S'], ['S', 'E', 'H', 'C', 'N'], ['S', 'NH', 'E', 'C', 'S'], ['S', 'H', 'NC', 'E', 'S'], ['S', 'C', 'NE', 'H', 'N']],
+  nightSlot: 3, nightFinales: [3, 6],
+  codes: { S: 'standard', H: 'horde', C: 'chase', E: 'escort' },
+});
+const COMBO_OF = { horde: 'nightHorde', chase: 'nightChase', escort: 'nightEscort' };
+const TYPE_MEMO = new Map();
+/** The map's code of campaign level n (LEVEL_ROTATION). */
+function rotationCode(n) {
+  const R = LEVEL_ROTATION, per = R.cycle1[0].length, nd = R.cycle1.length;
+  const slot = (n - 1) % per, d = Math.floor((n - 1) / per) % nd, k = Math.floor((n - 1) / (per * nd)) + 1;
+  if (k <= 2) return (k === 1 ? R.cycle1 : R.cycle2)[d][slot];
+  if (slot === 0) return 'S';
+  if (slot === per - 1) return R.nightFinales.indexOf(d + 1) !== -1 ? 'N' : 'S';
+  const pat = R.cycle2[(d + k - 2) % nd];
+  let night = false;
+  for (let i = 1; i < per - 1; i++) if (pat[i].charAt(0) === 'N') night = true;
+  return !night && slot === R.nightSlot - 1 ? (pat[slot] === 'S' ? 'N' : 'N' + pat[slot]) : pat[slot];
+}
+/** A key's stage flag: on[key] (tools: --typesOn) or LEVEL_TYPES[key].enabled. */
+function typeOn(key, on) { return on && on[key] !== undefined ? !!on[key] : !!LEVEL_TYPES[key].enabled; }
+/** The type key a map code plays as (the staged fallback). */
+function keyOfCode(code, on) {
+  const night = code.charAt(0) === 'N';
+  let base = LEVEL_ROTATION.codes[(night ? code.slice(1) : code) || 'S'];
+  if (base !== 'standard' && !typeOn(base, on)) base = 'standard';
+  if (!night || !typeOn('night', on)) return base;
+  if (base === 'standard') return 'night';
+  return (on && on.combos !== undefined ? on.combos : LEVEL_TYPES.combos) && typeOn(COMBO_OF[base], on) ? COMBO_OF[base] : base;
+}
+/**
+ * Campaign level L's type: frozen { key, base, night, slot (1–5), cycle, finale (slot 5), code }. override: a key played instead
+ * (?type= with ?debug=1); on: tools only, { key: bool, combos } for the stage flags. Memoized without either.
+ */
+export function levelTypeOf(L, override, on) {
+  const n = Math.max(1, Math.floor(Number.isFinite(L) ? L : 1));
+  const ov = typeof override === 'string' && LEVEL_TYPES[override] && LEVEL_TYPES[override].base ? override : '';
+  const memo = !ov && !on;
+  if (memo && TYPE_MEMO.has(n)) return TYPE_MEMO.get(n);
+  const code = rotationCode(n), key = ov || keyOfCode(code, on), t = LEVEL_TYPES[key], per = LEVEL_ROTATION.cycle1[0].length;
+  const out = Object.freeze({ key, base: t.base, night: t.night, slot: (n - 1) % per + 1, cycle: Math.floor((n - 1) / (per * LEVEL_ROTATION.cycle1.length)) + 1, finale: (n - 1) % per === per - 1, code });
+  if (memo) TYPE_MEMO.set(n, out);
+  return out;
+}
+/** What level L's stars count against (D16): E_boss, on a Horde base E_hold = round5(eHoldShare·E_boss). */
+export function eTargetOf(L, override, on) {
+  const e = eBossOf(L);
+  return levelTypeOf(L, override, on).base === 'horde' ? Math.round(HORDE_GEN.eHoldShare * e / 5) * 5 : e;
+}
+/** The 3★ fraction of eTarget for type `key` on level L (D16). */
+export function starThreeOf(L, key) {
+  const t = LEVEL_TYPES[key];
+  return t && t.starThree > 0 ? t.starThree : starThree(L);
+}
+/** The first level ≥ fromL of type `key` within 60 (the Field Guide's MEET IT ON LEVEL n); 0 = none. */
+export function nextLevelOfType(key, fromL, on) {
+  const a = Math.max(1, Math.floor(Number.isFinite(fromL) ? fromL : 1));
+  for (let L = a; L < a + 60; L++) if (levelTypeOf(L, null, on).key === key) return L;
+  return 0;
+}
+//
+//
+//
+// ---- TYPES_TEXT (P7) ----
+// The level types' UI copy (the fixed lines are in index.html), merged by the spread lines. A number in the copy is read from
+// LEVEL_TYPES (the helpers HINTS uses are declared below this region, so it carries its own two).
+const TT_NB = String.fromCharCode(0xA0);                               // no-break space
+const TT_DASH = TT_NB + '—';                                           // a line breaks after the dash, never before it
+const ttPct = (f) => Math.round(f * 100);                              // 0.25 → 25
+export const TYPES_TEXT = deepFreeze({
+  hints: {
+    // the first enrage (ui passes weapons.storedCount): what it costs and the lever
+    'boss.enrage': (stored) => (stored > 0 ? `ENRAGED! IT EATS MORE SOLDIERS EVERY SECOND${TT_DASH} FIRE YOUR STORED WEAPON`
+      : `ENRAGED! IT EATS MORE SOLDIERS EVERY SECOND${TT_DASH} A BIGGER SQUAD KILLS IT IN TIME`),
+  },
+  strings: {
+    // every type key's name (district:change modeName, the kicker, accessible names)
+    modes: { standard: 'RUN', horde: 'HORDE', night: 'NIGHT', chase: 'CHASE', escort: 'ESCORT', nightHorde: 'NIGHT HORDE',
+             nightChase: 'NIGHT CHASE', nightEscort: 'NIGHT ESCORT' },
+    types: {
+      blackout: 'BLACKOUT',                          // a night level in NIGHT CITY
+      aria: { retype: 'new way to play', play: (name) => `Play · ${name}`, next: (name) => `Next · ${name}` },
+      // the briefing card at the first run of a type key
+      brief: {
+        goal: (n) => `★★★ at ${n} survivors`,
+        horde: { tagline: 'RUN, THEN HOLD THE LINE',
+                 rows: [`RUN THE GATES${TT_DASH} GROW YOUR SQUAD`, `DRAG TO SWEEP YOUR FIRE${TT_DASH} HOLD STILL TO FOCUS`, 'TAP REPAIR TO PATCH THE WALL'] },
+        night: { tagline: 'THEY COME OUT OF THE DARK',
+                 rows: [`WATCH FOR GLOWING EYES${TT_DASH} RED = RUNNER`, 'MORE SOLDIERS = LONGER FLASHLIGHTS', 'CRATES LAUNCH FLARES AT NIGHT'] },
+      },
+      // results: a type's title and lines (D45), the coaching line after a fail without play (D30)
+      results: {
+        horde: { title: 'LINE HELD', kills: (n) => `${n} ZOMBIES DOWN`, score: (s) => `SCORE ${s}`, lineHeld: 'Line held',
+                 overrun: 'LINE OVERRUN', lost: 'SQUAD LOST', surge: (k, n) => `SURGE ${k}/${n}`,
+                 of: (x, y) => `${x} OF ${y} ZOMBIES`, down: (x) => `${x} ZOMBIES DOWN`, kept: (n) => `Coins kept +${n}`,
+                 tip: 'MOVE YOUR FIRE AND REPAIR THE WALL' },
+        night: { title: 'NIGHT CLEARED', bonus: 'Night bonus' },
+        steer: 'STEER TO PICK YOUR GATES',
+      },
+      enrage: { tag: 'ENRAGED', aria: (s) => `Enrage in ${s} s`, ariaTag: 'Boss enraged' },
+      // the HUD kit's action button name ("REPAIR · 3")
+      action: (label, n) => (n >= 0 ? `${label} · ${n}` : label),
+      nightBright: { normal: 'Normal', bright: 'Bright' },   // SETTINGS Night brightness
+    },
+  },
+  codex: {
+    sections: [{ id: 'types', ids: ['type.horde', 'type.night'] }],
+    titles: { types: 'LEVEL TYPES' },
+    // ui keeps these rows "???" / "MEET IT ON LEVEL n" until the type is first played
+    entries: {
+      'type.horde': { name: 'HORDE', line: `Run the gates, then hold a barricade against thousands: drag to sweep your fire, hold still to focus it, tap REPAIR to patch the wall. ★★★ at ${ttPct(LEVEL_TYPES.horde.starThree)}${TT_NB}% of the level's target squad; +${ttPct(LEVEL_TYPES.horde.bonusMult - 1)}${TT_NB}% level bonus.` },
+      'type.night': { name: 'NIGHT', line: `They come out of the dark: watch the glowing eyes (red = runner). More soldiers light the road farther, crates launch flares; NIGHT CITY is a BLACKOUT. +${ttPct(LEVEL_TYPES.night.bonusMult - 1)}${TT_NB}% level bonus.` },
+    },
+  },
+});
+//
+//
+//
+// ---- HORDE_GEN (P3) ----
+// HORDE curve and generator keys (PLAN horde TUNING): js/holdgen.js builds each hold's spec from them, tools/holdsim.js models
+// them; runtime rule values live in HORDE (P6). Level tables [[L, v], …]: 'lerp' interpolates (end rows held flat), 'step'
+// takes the last row with L ≤ the level.
+export const HORDE_GEN = deepFreeze({
+  eHoldShare: 0.75,                                  // E_hold = round5(0.75·E_boss(L)): the run ends there, the stars count from it
+  // HP arrival over the spawn time = rho × the design DPS E_hold·rateBase·p_exp·accuracy (p_exp: fire × damage of
+  // expectedRanksOf(L)); lerp 0.57 at L5 → 0.73 at L30 → 0.865 at L60 → 1.05 at L120, flat after. L4's own row (A22): the expected shop's fodder sits on the 1-HP floor up to about 0.6, so it weighs on a shop far above L4;
+  // the top row is 10 % over the plan's 0.955: at 1.0 or under, with E_boss capped at 1,300, a hands-off squad outlasts L252 (D37)
+  rho: [[4, 0.7], [5, 0.57], [30, 0.73], [60, 0.865], [120, 1.05]],
+  surplusExp: 1.0,                                   // D26: HP × util.shopComp(p, p_exp, profileExp, surplusExp) / p_exp^profileExp
+  baseHp: { walker: 2, runner: 1.5, crawler: 1.5, brute: 24, spitter: 8 },   // unit HP = baseHp × hz
+  // `count` surges: the first at firstAt s, then gap ± jitter s (consecutive gaps never within antiRhythm s); each spawns over
+  // window s with ns(L) × shares[i] fodder (× swarm) at C = E_hold; a trickle adds `trickle` of the fodder over the spawn time
+  surges: {
+    count: 3, firstAt: 2, gap: 20, jitter: 3, antiRhythm: 1.2, window: [3.0, 5.5], shares: [1.20, 1.25, 1.30], trickle: 0.12,
+    ns: [[4, 1820], [5, 2420], [30, 2400], [60, 2700]],   // lerp; L4 2,000 × 0.651 / 0.717: its fodder all sits on the 1-HP floor; the L5 row and rho's keep L9's thinnest surge ≥ 1,000 on screen (A21)
+    // from L19 a later surge may be DOUBLE (never a pincer): `split` on the named side, the rest lag s later on the other flank
+    double: { from: 19, chance: 0.4, lateFrom: 35, lateChance: 0.6, split: 0.55, lag: [4.0, 6.5] },
+  },
+  // the bag grows by level (step); surge 1 from `opener` (not the centre a parked lane holds, A4), surge 2 from `second`, no
+  // repeats; a flank sends `flank` to its end
+  patterns: {
+    bag: [[4, ['center', 'flankL', 'flankR']], [9, ['pincer', 'sweepLR', 'sweepRL']], [13, ['split', 'crawlerCarpet']],
+          [19, ['brutePush', 'spitterBattery']], [23, ['runnerRush']]],
+    opener: ['flankL', 'flankR', 'pincer', 'runnerRush'], second: ['flankL', 'flankR', 'pincer'], flank: 0.8,
+  },
+  // from L20 list[(7·L + (seed >> 3)) mod 5]: stampede (+runners, the last surge a runner rush), siege (brutes and spitters
+  // ×1.5, the last surge a brute push), swarm (surges ×1.25), pincer (pincer / split / sweep patterns)
+  variants: { from: 20, list: ['standard', 'stampede', 'siege', 'swarm', 'pincer'], stampedeRunners: 0.12, siege: 1.5, swarm: 1.25 },
+  mix: [[4, [0.75, 0.15, 0.10]], [9, [0.70, 0.18, 0.12]], [20, [0.66, 0.21, 0.13]]],   // step: walker / runner / crawler
+  // brutes min(cap, per·L) from L13; spitters `early` on L9–12, then min(cap, at13 + per·(L − 13)); spitKills per lob (step)
+  counts: {
+    brutes: { from: 13, per: 0.8, cap: 50 },
+    spitters: { from: 9, early: 6, lateFrom: 13, at13: 12, per: 0.25, cap: 18 },
+    spitKills: [[1, 1], [20, 2]],
+  },
+  // live scaling at the dig-in, r = C / E_hold (util.holdLiveScale / holdLiveHp): above E_hold counts × min(cap, r^expAbove) and
+  // unit HP × r^hpExpAbove (r^1.0 together); below it unit HP × max(floor, r)^exp — never fewer units (A9). P9 keys (A4)
+  live: { exp: 0.75, expAbove: 0.75, hpExpAbove: 0.25, floor: 0.4, cap: 2 },
+  // first meeting (D29, A9): an eased surge and the trickle after it spawn with HP × threat, never fewer units; surge 1 needs
+  // ≥ surge1NeedsDecisions counted run decisions, a later one a counted hold action in the window before it (D30)
+  firstMeet: { threat: 0.85, surge1NeedsDecisions: 3, laterNeedsAction: true },
+  assist: { kitsPerStep: 1, capPerStep: 1, maxSteps: 4 },   // D35: + kits and kit cap per assist step k ≤ maxSteps
+  climb: { ref: 330, lo: 1, hi: 2 },                 // climber pacing × clamp(ref / E_hold, lo, hi) (util.holdClimbK)
+  // drops at `at` × the spawn time, count by level (step), at |x| in `x` m: clear of a lane parked at the centre (1.25 + crate
+  // 0.4; D30); from airstrikeFrom drop 2 is an AIRSTRIKE with ≥ airstrikeKits kits held
+  supply: { at: [0.35, 0.70], x: [2.0, 3.0], count: [[1, 0], [9, 1], [13, 2]], airstrikeFrom: 32, airstrikeKits: 3 },
+  // bossIdOf(L) spawns spawnAfter s after the last surge starts; HP util.holdBossHp: hpFrac·hpPerE·E_boss·factor (× BOSSES hpMult)
+  // × clamp(r^ratioExp, ratioMin, ratioMax) × clamp(p^(mExp·min(1, r)), 1, mMax) × bdExp^(1 − mExp)·bd^mExp (p = fire × damage,
+  // bd = bossDamage, bdExp the expected shop's); ratioExpAbove above E_hold: the A4 key, at its top (HORDE-STEER-IDLE)
+  boss: {
+    hpFrac: 0.38, hpPerE: 24, spawnAfter: 2,
+    factor: { hulk: 1.0, spitterQueen: 1.0, juggernaut: 1.2, colossus: 0.95, colossusPrime: 0.95, hulkTwins: 1.0 },
+    ratioExp: 0.6, ratioExpAbove: 1.0, ratioMin: 0.6, ratioMax: 2, mExp: 0.9, mMax: 10,
+  },
+  // the debut hold: surge 1 centre, surge 2 a flank, no brutes, spitters, drops or boss attacks, enrage after enrageS; level =
+  // LEVEL_TYPES.horde.debut (holdSpec's default; validateHoldSection checks)
+  debut: { level: 4, enrageS: 30 },
+  // kill coin = scale(L)·N_v1(L) / N_v2 (N_v2 = the hold's units at C = E_hold): scale lerp to its last row, then its last value·N_v1(lateRef) / N_v1(L);
+  // N_v1 = mult·(base + per·min(L, to) + perLate·clamp(L − to, 0, toLate − to)) to `round`. P9 (row 31): to L59 the crowd pays about 26 % of a clear at coinMult 1;
+  // from toLate on its total stays 990, so a late clear keeps to RUN pay. Its share falls under 25 % from about L150: the rest of a late clear already pays about a RUN clear
+  coins: {
+    scale: [[4, 0.2], [300, 0.2]], lateRef: 300,
+    n1: { base: 67, per: 80, to: 13, perLate: 47, toLate: 60, mult: 1.5, round: 50 },
+    lineHeldPerL: 10, kitRefund: 10,
+  },
+  // generateRunSteps options (D39): gate events (step); fixed lines ≤ lim·E_hold at both shops from `from`, the long budget +
+  // side repair at ≥ win·E_hold from repairFrom; the debut run has no ÷, two-red or lesser-evil events; one kit crate, and from
+  // kitsLaneFrom a gate event with a kitsLane (KITS ×2) lane
+  run: {
+    gates: [[4, 4], [9, 5], [23, 6]],
+    fixed: { lim: 0.80, win: 0.84, shops: ['expected', 'max'], from: 4, repairFrom: 4 },
+    debut: { noDiv: true, noTwoRed: true, noLesser: true },
+    crate: 'item.kit', kitsLane: 'item.kit2', kitsLaneFrom: 13,
+  },
+});
+//
+//
+//
+// ---- CROWD (P4) ----
+// The Horde crowd engine (js/crowd.js; PLAN horde part 2). Only what is DRAWN varies by tier; the simulation never does.
+export const CROWD = deepFreeze({
+  // pool: slots (alive + dying + slack), the feed's alive cap, the boss-burst reserve above it, the spawn queue (a whole hold: ≤ 13,500)
+  slots: 3072, feedCap: 2048, reserve: 256, queueCap: 16384,
+  grid: { x0: -12, x1: 12, z0: -80, z1: 2 },                    // 1 m cells: counting sort, separation, hit tests
+  // hold field: wall face, half-width, throat / funnel / street (the crowd is clamped to them), the feed band (<= feedDens per
+  // cell, x within ±feedX, tries / spawns per tick), the squad line a climber / breacher reaches, the spitter rule zone, the
+  // rifle reach (a round pierces no unit behind it), climb speed, flee speed (× unit speed) and release z
+  field: { wallZ: -3.9, wallHalf: 4, throatZ: -7, funnelZ: -25, streetHalf: 11, feedZ: [-70, -46], feedDens: 3, feedX: 10.7,
+    feedTries: 6, feedPerTick: 96, reachZ: -2.57, spitZ: -19.6, rangeZ: -44.3, climbSpeed: 3, fleeK: 1.2, fleeZ: -76 },
+  radius: 0.27,                                                 // separation radius
+  // steering: x gain by zone (street / funnel / at the wall), cap m/s, sideways diffusion, accel 1/s, crowd density cap per
+  // cell (the cell ahead above it slows, above 2× stops), relief m/s per unit a cell holds above 2× the cap (it backs off)
+  steer: { street: 0.06, funnel: 0.45, wall: 0.9, max: 1.8, diffuse: 0.3, accel: 6, densCap: 3.4, relief: 0.5 },
+  sep: { max: 10, k: 0.65, zMin: -76 },                         // half-shell separation: per-cell cap, gain, rows behind zMin skipped
+  // per type (ZOMBIES.common.types order): speed m/s, hit radius / height, gait Hz, leg / arm swing, arm rest (rad, + = forward),
+  // bob, body scale (every LOD draws the walker body), crawler pitch (rad) and lift (m); crawlers stay under the bullets to
+  // hitZ and lunge the last [m, m/s]
+  speedJitter: 0.05,
+  units: {
+    walker: { speed: 5, hitR: 0.3, height: 1.6, gait: [1.6, 2.4], leg: 0.5, arm: 0.28, armRest: 1.1, bob: 0.05, scale: [1, 1, 1] },
+    runner: { speed: 7, hitR: 0.28, height: 1.5, gait: [2.6, 3.2], leg: 0.8, arm: 0.65, armRest: 0.45, bob: 0.06, scale: [0.9, 0.94, 0.9] },
+    crawler: { speed: 3.5, hitR: 0.3, height: 0.7, gait: [2.2, 2.8], leg: 0.35, arm: 0.6, armRest: 0.2, bob: 0.03, scale: [1, 1, 1],
+      pitch: 1.2, lift: 0.42, hitZ: -14, lunge: [3, 6] },
+    brute: { speed: 3, hitR: 0.6, height: 2.8, gait: [1, 1.3], leg: 0.35, arm: 0.35, armRest: 0.6, bob: 0.08, scale: [2, 1.75, 1.6] },
+    spitter: { speed: 2.4, hitR: 0.32, height: 1.7, gait: [1, 1.4], leg: 0.35, arm: 0.15, armRest: 1.3, bob: 0.03, scale: [1.06, 1.06, 1.06] },
+  },
+  // drawn cap (instances, nearest first), LOD0 count and z bands, shadow casters (High: the LOD0 customDepthMaterial), carpet
+  // rows, gore ring, governor floor (software GL: a fixed hard cap). 'sw' = software GL at any tier
+  tiers: {
+    high: { cap: 2048, lod0: 400, lod0Z: -30, lod1Z: -58, shadows: 150, carpetRows: 40, gore: 256, floor: 1024 },
+    med: { cap: 1400, lod0: 260, lod0Z: -24, lod1Z: -50, shadows: 0, carpetRows: 40, gore: 192, floor: 700 },
+    low: { cap: 800, lod0: 160, lod0Z: -16, lod1Z: -40, shadows: 0, carpetRows: 40, gore: 96, floor: 400 },
+    sw: { cap: 500, lod0: 40, lod0Z: -8, lod1Z: -34, shadows: 0, carpetRows: 24, gore: 32, floor: 500 },
+  },
+  dyingReserve: 0.1,                                            // A13(b): this share of the drawn cap is kept for dying bodies
+  xfade: 48,                                                    // LOD0 slots cross-faded (4×4 Bayer) into LOD1
+  near40: -43.9,                                                // 'within 40 m of the wall' (on-screen counts)
+  // governor: reference = median frame interval of the last refS s before the hold; above up × for upS s: cap × down (to the
+  // floor); after raiseS s at <= raise ×: + step; the auto-scaler's drops wait dropOkS s at the floor; ema rate, hitch filter
+  governor: { refS: 10, up: 1.3, upS: 2, down: 0.85, raise: 1.1, raiseS: 6, step: 0.1, dropOkS: 3, ema: 0.1, hitchMs: 250 },
+  // rendering: copies per instanced draw (LOD0 / LOD1 / LOD2), crumple s, hit flash mix / cool-down s, view fill (× sun, × sky),
+  // body colour ceiling (linear), spitter acid glow
+  render: { K: [32, 64, 128], deathS: 0.65, flash: 0.22, flashCool: 0.25, fill: [0.3, 0.25], bodyMax: 0.9, sac: 0.6 },
+  // eyes (× hdr): full only near the wall (z > nearZ), × band from bandZ (under the bloom threshold), × far at farZ; carpet × carpet
+  eye: { color: 0xFFE14D, hdr: 1.5, nearZ: -11, bandZ: -13, farZ: -24, band: 0.56, far: 0.5, carpet: 0.45 },
+  // sRGB palette: fodder variants (skin / shirt / pants) and the run classes' skin / cloth for runner, brute and spitter (acid)
+  palette: {
+    skin: [0x7FA36B, 0xA9B46E, 0x6E8F5F, 0x8CA86B], shirt: [0x4A4A52, 0x6B3F3F, 0x3F4F6B, 0x5E5640], pants: [0x2E2E36, 0x3A3A40, 0x34404A, 0x40382E],
+    runner: [0xA9B46E, 0x6B3F3F], brute: [0x5F7B52, 0x9C3B3B], spitter: [0x8CA86B, 0xC7E84A],
+  },
+  // carpet: silhouette rows from its front to back z over ±half, walking m/s; when the cap binds the front follows the farthest
+  // drawn unit (clamped to nearest, eased /s); density clamp((queued + undrawn + d[0]) / d[1], d[2], 1); fade s after flee / end
+  carpet: { front: -46, back: -100, half: 11, speed: 2.4, nearest: -10, ease: 6, density: [600, 1500, 0.35], fade: 1.5 },
+  gore: { color: 0x4A0A08, size: [0.7, 1.6], maxZ: -60 },
+  tracers: { cap: 192, color: 0xFFD27A, hdr: 3, speed: 95, len: 1.4, y: 1.15 },   // pierce streaks: the first to the last unit of a round
+  killsHz: 30,                                                  // crowd:kills batches
+});
+//
+//
+//
+// ---- HORDE + HORDE_TEXT + HORDE_AUDIO (P6) ----
+// The hold's runtime rules (js/hold.js, boss.js hold mode; PLAN horde 'Fixed values'). tools/holdsim.js RULES models the same
+// numbers, but for the engine-only wall keys slotReach, lurch and passSpeed and pileZone (7 m here, 3 in the model: the engine's
+// crowd queues back instead of stacking in the wall row): change both (or nothing). The surge plan, counts, HP scale, first-meeting ease and the assist live in HORDE_GEN (P3,
+// one source through each script's hold spec); the hold-action window is LEVELS.curve.assist.windowS. m = metres in the
+// squad frame (the wall face at z −3.9, the squad never moves); s = seconds of the hold clock (crowd.t).
+export const HORDE = deepFreeze({
+  // field: wall face z, half-width, sections of segW m, the squad's front row (a climber / breacher bites there; a brute stops
+  // brute m before it), the gap a rebuild needs clear (no unit nearer than gapZ, for rebuildClearS s), the rifle reach, the
+  // planks' height / depth, the firing step's top (the squad's rear rows), the side closures to the throat
+  field: { wallZ: -3.9, wallHalf: 4, segW: 2, sections: 4, frontZ: -2.3, brute: 0.4, gapZ: -5.5, rangeZ: -44.3, throatZ: -7,
+    height: 1.1, depth: 0.8, stepY: 0.45, stepZ: [-3.5, -1.0], stepX: 3.6 },
+  // the dig-in: the road stops over stopS s (the face at wallZ when it does); the barricade shows on the road from appearZ;
+  // HOLD THE LINE for bannerS s; tier changes frozen for freezeS s from the hold's start (engine.freezeQuality); a manual tier on
+  // software GL holds at render scale softwareScale
+  stop: { stopS: 2.5, appearZ: -130, bannerS: 2.2, freezeS: 3, softwareScale: 0.85 },
+  // fire: lane half-width, in-lane share at full focus, FOCUS (rate from focusFrom to 1 over focusT s of dwell; three glow steps),
+  // pierce, rounds/s cap (folded), the boss share β (in lane / during
+  // a wind-up / out of lane) for shooters whose column passes within bossR of the boss (of the nearer Twin: holdsim's rule, the
+  // model P3 tuned), the boss share's aim height, the spitter share, tracer heights (pileY over a pile, clearing the planks)
+  fire: { laneHalf: 1.25, laneShare: 0.8, focusT: 0.8, focusFrom: 0.5, focusSteps: [0.34, 0.67, 1],
+    pierce: 4, rateCap: 90, beta: 0.5, betaWind: 0.75, betaOut: 0.2, bossR: 1.77, bossY: 2.4, spitBeta: 0.5,
+    tracerY: 1.0, pileY: 1.3 },
+  // the wall: section HP, claw slots, claw delay (brute), claw WP/s per type (ZOMBIES.common.types order), the pile above which
+  // one non-brute climbs every climbK·max(climbMin, climbEvery·pile / (pile − slots)) s (from pileZone m behind the face: the
+  // crowd queues back where holdsim's row stacks in 3 m; a tick old), the climber's start above the planks, the breach: tokens per s (rate + widen·s open, ≤ max, banked ≤ bank), a
+  // passing unit's nudge past the face and its lunge (m/s); all four down for overrunS s ends the hold; damaged / critical below these fractions;
+  // a pile unit within slotReach m of the face takes a free slot and lurches up to it at lurch m/s
+  wall: { segHp: 100, slots: 5, clawDelay: 0.5, bruteClawDelay: 1.0, claw: [3, 3, 2.25, 12, 0], pile: 10, pileZone: 7,
+    climbEvery: 0.8, climbMin: 0.8, climbLift: 0.4, breachRate: 2, breachWiden: 0.6, breachMax: 8, breachBank: 2, passZ: 0.05, passSpeed: 14,
+    overrunS: 3, damaged: 0.67, critical: 0.34, slotReach: 1, lurch: 4 },
+  // kits: +repairWp over repairTime s on a standing section; a breached one rebuilds to rebuildWp once its gap stayed clear
+  // rebuildClearS s; a section cool-down; start / cap (+ run crates, + assist steps HORDE_GEN.assist); bubbles under bubbleBelow
+  kits: { repairWp: 60, repairTime: 0.8, rebuildWp: 50, rebuildClearS: 0.5, cool: 1.5, start: 2, cap: 6, bubbleBelow: 0.5 },
+  // supply drops (spec.supply [{ t, x }]): a crate opens when its centre stays within fire.laneHalf of the lane for openS s,
+  // it lies life s; it falls from dropY m over fallS s
+  supply: { openS: 1.0, life: 6, dropY: 9, fallS: 0.9 },
+  // the airstrike (from HORDE_GEN.supply.airstrikeFrom, drop 2 with ≥ airstrikeKits kits): bombs walk the lane from z0 to z1 in
+  // seconds, each a splash m circle, together worth dpsS s of squad DPS
+  airstrike: { bombs: 5, z0: -8, z1: -40, seconds: 1.5, splash: 3, dpsS: 10, warnS: 0.8 },
+  // spitters stop at holdZ + (slot mod 5)·step − spread (±1.6 m) and hold only inside |x| ≤ colX (side-stepping in at side m/s),
+  // lob every `every` s (the first after first[0] + first[1]·frac) with a telegraph s arc; kills per lob = spec.spitKills
+  spit: { holdZ: -18, step: 0.8, spread: 1.6, colX: 3.4, side: 1.2, every: 2.5, first: [0.6, 0.8], telegraph: 0.6 },
+  // a brute past a breach swings every `every` s (the first after first s) for clamp(round(frac·C), min, max) soldiers
+  bruteSwing: { every: 1, first: 0.6, frac: 0.06, min: 1, max: 3 },
+  runner: { retargetZ: -23.9, weakBelow: 0.66 },   // runners re-target the weakest section (under weakBelow) until 20 m out
+  // stored weapons in the lane (weaponFrame), on top of the full rifle fold: the shotgun's and minigun's rounds add `add` × the
+  // fold (in rounds and DPS: the model's +100 % lane DPS) over the lane's middle out to ± their m (wider than the rifles' lane:
+  // those already take most of what walks into it), the laser across the lane, rockets at the densest 1 m cell of the lane
+  // within reach m of the squad (splash m), the railgun's bolt the lane wide
+  weapons: { add: 1, shotgun: 2.2, minigun: 2.4, laser: 1.25, railgun: 1.25, rocketReach: 30, rocketSplash: 3, rocketZ: -6.5 },
+  // troops in the hold: the flamer at the wall centre on the step, its jet flameReach m long, the sniper and medic on the step's flanks, the drone above
+  // the lane, the APC behind the weakest section (it soaks breach bites)
+  troops: { flameReach: 4, flamer: [0, -2.0], sniper: [-3.3, -1.4], medic: [3.3, -1.4], droneY: 5.2, droneZ: -6, apcZ: -0.4 },
+  // the hold boss (boss.js hold mode): spawn z, walk m/s, the hold line, Twins at ±twinX (the second twinBack m behind), the
+  // crowd pushed out of push m, the first wind-up firstWindup s after arriving (the second twin offset s later), stagger at a
+  // share of max HP dealt during a wind-up (Juggernaut staggerJug) for staggerS s, the enrage enrageS s after arriving (the
+  // debut's from the spec): charge m/s to wallZ − enrageStop, break WP/s, chew max(chewMin, round(chewPerE·E_hold))·(1 + n)/s;
+  // phase minions (BOSSES onEnter spawns and lastHorde) × minionScale (brutes × bruteMinionScale) minionBack m behind it within
+  // ±minionX (and as far again back); a sniper's capped shot lands sniperShot of its max HP (after bossDamage; about a tenth of the rifles' 0.07 in
+  // the same 1.5 s); per archetype the attack cycle and its interval per phase; wind-ups (s), section WP and kills
+  boss: {
+    spawnZ: -62, walk: 2.4, holdZ: -12, twinX: 2.2, twinBack: 1.5, push: 1.8, firstWindup: 2, twinOffset: 2.5,
+    enrageS: 20, stagger: 0.04, staggerJug: 0.06, staggerS: 1.0, enrageWalk: 6, enrageStop: 0.6, enrageBreak: 150, chewPerE: 0.05, chewMin: 3,
+    minionScale: 10, bruteMinionScale: 3, minionBack: 6, minionX: 2.5, sniperShot: 0.0075,
+    windup: { slam: 1.2, acid: 1.0, charge: 1.6 }, wp: { slam: 45, acid: 45, charge: 60 }, slamKills: { frac: 0.05, min: 3 },
+    acidGlobs: 3, acidX: 3,
+    archetypes: {
+      hulk: { attacks: ['slam'], interval: [5, 5, 3] },
+      spitterQueen: { attacks: ['acid'], interval: [3, 3, 2] },
+      juggernaut: { attacks: ['charge'], interval: [4.5, 4.5, 3] },
+      colossus: { attacks: ['slam', 'acid', 'charge'], interval: [4.5, 4.5, 3] },
+      colossusPrime: { attacks: ['slam', 'acid', 'charge'], interval: [4.5, 4.5, 3] },
+      hulkTwins: { attacks: ['slam'], interval: [5, 5, 3] },
+    },
+  },
+  actions: { laneM: 2 },   // D30: a hold action = lane-target travel ≥ laneM in the window (LEVELS.curve.assist.windowS), a repair or a crate
+  // lessons keyed to first sight (D40): the lane's travel that ends 'DRAG TO SWEEP', a brute this near the wall, a section under
+  // repairBelow; at most one slow-mo lesson per hold (JUICE.slowmo.bossTutorial)
+  lessons: { sweepM: 2, bruteNear: 20, repairBelow: 0.5 },
+  // HUD kit: anchors / counter / focus at hz; the repair bubble's world height over the planks; banner colours
+  hud: { hz: 10, bubbleY: 1.9, banner: 0xFF7A2F, danger: 0xFF3B3B, good: 0x5FE07A },
+  // the barricade per district (sRGB): planks, posts, sheet metal / boards, sandbags, accent (paint, hazard tape), debris
+  look: {
+    sunset: { plank: 0x8A6440, post: 0x5C4128, sheet: 0x9C9488, bag: 0xB59A6A, accent: 0xFF9F43, debris: 0x6E5A44 },
+    overcast: { plank: 0x7C7468, post: 0x4E4A44, sheet: 0x8E979E, bag: 0x9E9580, accent: 0xE8E2C8, debris: 0x5E5C58 },
+    night: { plank: 0x5A4A5E, post: 0x2E2A36, sheet: 0x46506A, bag: 0x6E6658, accent: 0xFF4FD8, debris: 0x3A3644 },
+    toxic: { plank: 0x6A5A3A, post: 0x3A3A30, sheet: 0x7E7A50, bag: 0x8A8460, accent: 0xE8D23A, debris: 0x4A4838 },
+    ash: { plank: 0x4A3A30, post: 0x2A221E, sheet: 0x7A4A36, bag: 0x7A6E62, accent: 0xFF5A2A, debris: 0x3A322E },
+    frozen: { plank: 0x8C8A84, post: 0x5E6268, sheet: 0xAEC2D0, bag: 0xC8C4BA, accent: 0xBFE6FF, debris: 0x7E848C },
+  },
+  // the marks (one instanced draw): section bars (over the planks, m), the lane band, crate rings, colours (sRGB)
+  marks: { barY: 1.35, barW: 1.6, barH: 0.16, laneY: 0.03, laneLen: 38, crateRingY: 0.9, ok: 0x5FE07A, warn: 0xFFC23A, bad: 0xFF3B3B, lane: 0xFFE08A, crate: 0x5FD0FF },
+});
+//
+//
+//
+// ---- HORDE_TEXT (P6): the hold's lessons (HINTS), banners and labels (STRINGS.hold) and its FIELD GUIDE section ----
+const HOLD_NB = String.fromCharCode(0xA0), HOLD_DASH = HOLD_NB + '—';
+const HOLD_SUPPLY_L = nextLevelOfType('horde', HORDE_GEN.supply.count.find((r) => r[1] > 0)[0], { horde: true }) || LEVEL_TYPES.horde.debut;
+const HOLD_AIR_L = nextLevelOfType('horde', HORDE_GEN.supply.airstrikeFrom, { horde: true }) || HORDE_GEN.supply.airstrikeFrom;   // past LEVELS.count: told in the supply row
+export const HORDE_TEXT = deepFreeze({
+  hints: {
+    'hold.sweep': 'DRAG TO SWEEP YOUR FIRE',
+    'hold.focus': `HOLD STILL TO FOCUS${HOLD_DASH} FULL FIRE AFTER ${HORDE.fire.focusT}${HOLD_NB}s`,
+    'hold.flank': (side) => `THEY'RE HITTING THE ${side < 0 ? 'LEFT' : 'RIGHT'}${HOLD_DASH} SWEEP THERE`,
+    'hold.repair': 'TAP REPAIR TO PATCH IT',
+    'hold.stagger': `HIT HIM WHILE HE WINDS UP${HOLD_DASH} STAGGER HIM!`,
+    'hold.brute': `BRUTES SMASH THE WALL${HOLD_DASH} FOCUS FIRE ON THEM`,
+    'hold.climb': `A BIG PILE CLIMBS THE WALL${HOLD_DASH} THIN IT OUT`,
+    'hold.breach': `BREACH!${HOLD_DASH} CLEAR THE GAP, THEN REPAIR`,
+    'hold.supply': 'KEEP YOUR LANE ON THE CRATE TO OPEN IT',
+    'hold.airstrike': 'AIRSTRIKE DOWN YOUR LANE!',
+    'hold.weapons': 'WEAPONS FIRE DOWN YOUR LANE',
+  },
+  strings: {
+    hold: {
+      start: 'HOLD THE LINE',
+      variants: { standard: '', stampede: 'STAMPEDE', siege: 'SIEGE', swarm: 'SWARM', pincer: 'PINCER' },
+      double: 'DOUBLE SURGE',
+      surge: (i, n) => `SURGE ${i}/${n}`,
+      next: (s) => `NEXT SURGE ${s}`,
+      boss: 'BOSS',
+      left: (n) => `${n.toLocaleString('en-US')} LEFT`,
+      collapsing: (s) => `LINE COLLAPSING ${s}…`,
+      reinforcements: (k) => `REINFORCEMENTS: +${k} REPAIR KIT${k === 1 ? '' : 'S'}${HOLD_DASH} TAP REPAIR`,
+      breach: 'BREACH!',
+      stagger: 'STAGGER!',
+      repair: 'REPAIR',
+      clearGap: 'CLEAR THE GAP',
+      noKits: 'NO KITS',
+      kit: (n) => `+${n} KIT${n === 1 ? '' : 'S'}`,
+      airstrike: 'AIRSTRIKE',
+      // the hold boss's name card tagline (PLAN horde UI; the card shows the boss's name above it)
+      cards: { hulk: 'SMASHES THE WALL', spitterQueen: 'ACID OVER THE WALL', juggernaut: 'CHARGES TWO SECTIONS', colossus: 'BREAK HIS SHIELD',
+        colossusPrime: 'BREAK HIS SHIELD', hulkTwins: 'TWO AT ONCE' },
+    },
+  },
+  codex: {
+    sections: [{ id: 'hold', ids: ['hold.barricade', 'hold.lane', 'hold.focus', 'hold.climb', 'hold.breach', 'hold.overrun', 'hold.surges', 'hold.supply'] }],
+    titles: { hold: 'THE HOLD' },
+    unlock: { 'hold.barricade': LEVEL_TYPES.horde.debut, 'hold.lane': LEVEL_TYPES.horde.debut, 'hold.focus': LEVEL_TYPES.horde.debut,
+      'hold.climb': LEVEL_TYPES.horde.debut, 'hold.breach': LEVEL_TYPES.horde.debut, 'hold.overrun': LEVEL_TYPES.horde.debut,
+      'hold.surges': LEVEL_TYPES.horde.debut, 'hold.supply': HOLD_SUPPLY_L },
+    entries: {
+      'hold.barricade': { name: 'BARRICADE', line: `${HORDE.field.sections} sections of ${HORDE.wall.segHp} HP. Up to ${HORDE.wall.slots} zombies claw each one; tap a section's bubble or REPAIR to patch it (+${HORDE.kits.repairWp} per kit).` },
+      'hold.lane': { name: 'FIRE LANE', line: `Drag to sweep it along the wall: ${Math.round(HORDE.fire.laneShare * 100)} % of your fire goes down it, the rest covers the other sections.` },
+      'hold.focus': { name: 'FOCUS FIRE', line: `Shooters in the lane start at ${Math.round(HORDE.fire.focusFrom * 100)} % and reach full fire after ${HORDE.fire.focusT} s of holding still.` },
+      'hold.climb': { name: 'CLIMBERS', line: `When more than ${HORDE.wall.pile + HORDE.wall.slots} zombies pile at a section, one climbs over and bites. Thin the pile.` },
+      'hold.breach': { name: 'BREACH', line: `A broken section lets ${HORDE.wall.breachRate} zombies a second through (more the longer it stays open). Clear the gap, then a kit rebuilds it to ${HORDE.kits.rebuildWp}.` },
+      'hold.overrun': { name: 'LINE OVERRUN', line: `All ${HORDE.field.sections} sections down for ${HORDE.wall.overrunS} s and the hold is lost. Any rebuild resets the countdown.` },
+      'hold.surges': { name: 'SURGE BAR', line: `Three surges, then the boss. The counter shows how many zombies are left; the boss's death ends the hold.` },
+      'hold.supply': { name: 'SUPPLY DROP', line: `A crate lands beside the wall: keep your lane on it for ${HORDE.supply.openS} s to open it (+1 kit). From level ${HOLD_AIR_L} the second one, opened with ${HORDE_GEN.supply.airstrikeKits}+ kits, calls an AIRSTRIKE down your lane.` },
+    },
+  },
+});
+//
+//
+//
+// ---- HORDE_AUDIO (P6): the hold's cues, played on its events (AUDIO_CUES 'on') or looped ('audio:loop') ----
+export const HORDE_AUDIO = deepFreeze({
+  // a surge: a low two-note horn (sawtooth through a low-pass), the second a fourth up
+  hold_surge: { on: 'horde:surge', noAtten: true,
+    layers: [{ src: 'sawtooth', f: hz(N.C3), ms: 420, attack: 40, decay: 300, filter: { type: 'lowpass', f: 900 }, gain: 0.32 },
+             { src: 'sawtooth', f: hz(N.F3), ms: 520, delayMs: 300, attack: 40, decay: 380, filter: { type: 'lowpass', f: 1000 }, gain: 0.32 }] },
+  // a section breaks: splintering wood (band noise sweeping down) + a low crack
+  hold_breach: { on: 'horde:breach', coalesceMs: 80,
+    layers: [{ src: 'noise', ms: 320, attack: 2, decay: 220, filter: { type: 'bandpass', f: 2600, fEnd: 500, q: 1.1 }, gain: 0.7 },
+             { src: 'sine', f: 120, fEnd: 50, ms: 220, shaper: 0.4, gain: 0.5 }] },
+  // a repair: three hammer knocks
+  hold_repair: { on: 'horde:repair', coalesceMs: 60,
+    layers: [{ src: 'band', ms: 50, attack: 1, decay: 20, filter: { type: 'lowpass', f: 2400 }, gain: 0.8 },
+             { src: 'band', ms: 50, delayMs: 150, attack: 1, decay: 20, filter: { type: 'lowpass', f: 2400 }, gain: 0.7 },
+             { src: 'band', ms: 50, delayMs: 300, attack: 1, decay: 20, filter: { type: 'lowpass', f: 2400 }, gain: 0.6 },
+             { src: 'triangle', f: 660, ms: 90, delayMs: 320, gain: 0.25 }] },
+  // kits gained (a crate, the reinforcements): a short rising pair on the reward bus
+  hold_kits: { on: 'horde:kits', bus: 'reward', noTimeScale: true,
+    layers: [{ src: 'triangle', f: hz(N.E5), ms: 90, attack: 4, gain: 0.45 }, { src: 'triangle', f: hz(N.B5), ms: 140, delayMs: 90, attack: 4, gain: 0.45 }] },
+  // a supply drop opens: a crate lid + a bright chime
+  hold_supply: { on: 'horde:supply', bus: 'reward', noTimeScale: true,
+    layers: [{ src: 'noise', ms: 80, attack: 1, filter: { type: 'lowpass', f: 1500 }, gain: 0.5 },
+             { src: 'sine', f: hz(N.A5), ms: 220, delayMs: 60, attack: 5, decay: 160, gain: 0.35 }] },
+  // the airstrike: a falling whistle (bombs land as fx bursts with the thud cue)
+  hold_airstrike: { on: 'horde:airstrike', noAtten: true,
+    layers: [{ src: 'sine', f: 1400, fEnd: 500, ms: 800, attack: 30, decay: 600, gain: 0.25 },
+             { src: 'brown', ms: 700, delayMs: 700, attack: 4, decay: 500, filter: { type: 'lowpass', f: 600 }, shaper: 0.5, gain: 0.9 }] },
+  // the boss is staggered: a heavy clang
+  hold_stagger: { on: 'horde:stagger', noAtten: true,
+    layers: [{ src: 'square', f: 220, fEnd: 180, ms: 160, attack: 1, decay: 120, filter: { type: 'bandpass', f: 1200, q: 2 }, gain: 0.4 },
+             { src: 'band', ms: 70, attack: 1, gain: 0.6 }] },
+  // LINE COLLAPSING: one alarm beep per second of the countdown
+  hold_alarm: { on: 'horde:collapse', noAtten: true,
+    layers: [{ src: 'square', f: 880, ms: 140, attack: 2, decay: 60, filter: { type: 'lowpass', f: 2400 }, gain: 0.3 },
+             { src: 'square', f: 660, ms: 140, delayMs: 160, attack: 2, decay: 60, filter: { type: 'lowpass', f: 2400 }, gain: 0.3 }] },
+  // the horde bed while the hold runs (audio:loop): a groaning, filtered roar that the crowd's size sets the gain of
+  hold_roar: { repeatMs: 1600,
+    layers: [{ src: 'brown', ms: 1700, attack: 300, decay: 1200, filter: { type: 'bandpass', f: 380, q: 0.6 }, gain: 0.5 },
+             { src: 'sawtooth', f: 62, fEnd: 55, ms: 1700, attack: 400, decay: 1100, filter: { type: 'lowpass', f: 260 }, gain: 0.18 }] },
+});
+//
+//
+//
+// ---- NIGHT + NIGHT_DISTRICTS + NIGHT_TEXT + NIGHT_AUDIO (P5) ----
+// NIGHT (PLAN night TUNING): a RUNTIME-ONLY modifier, read by js/night.js. variant: program defines per tier (1 FULL, 2 LITE, 3 MIN;
+// D15). vision: reach R = clamp(base + perSqrt·√C, min, cap) m with C = the squad COUNT, cap = max, past capFrom falling capPerLevel per
+// level to capFloor; ÷firstMeet on a first meeting (D34); the cone (deg) widens with √C. bright: the 'Bright' setting (never reach or
+// eyes). flare: lands `ahead` m in front, +bonus m reach for seconds (late[1] from level late[0]). light: I = intensity·(0.75 + 0.25·
+// min(1, √(C / countRef))), falloff d^−decay·(1 − (d/R)^4)².
+// eyes (B6): dots ≥ minDotCss CSS px and minDotPx device px tall, widthK × as wide, a gap ≥ minGapCss / minGapPx, pulled `pull` m to the
+// camera, fading out while the true eye grows from fade[0] to fade[1] × the floor; shapes = half spacing, height, width (m); gain
+// intensity × gainCanvas (canvas tiers) or × gainBloom, easing to gainBloomLate over late; full to att[0] m, then a smoothstep to the far
+// level max(kMin, lumFloor / class luminance) at att[1] m: runners never dim. trueFade: the true eyes go out here (m). prefetchMs: a menu's
+// idle wait.
+export const NIGHT = deepFreeze({
+  variant: { high: 1, med: 2, low: 3, software: 3 },
+  vision: { base: 14, perSqrt: 1.6, min: 16, max: 30, capFrom: 30, capPerLevel: 0.13, capFloor: 26, firstMeet: 0.85,
+            outerBase: 12, outerGain: 8, innerGap: 12, innerMin: 4 },
+  bright: { band: 1.35, inner: 4 },
+  flare: { bonus: 10, seconds: 8, late: [40, 6], ahead: 28, glow: 12, color: 0xFF4A2A, intensity: 8, decay: 0.9, sparkS: 0.12, sparks: 3 },
+  light: { y: 1.25, z: -0.35, pitchDeg: 7, color: 0xE8F0FF, intensity: 11.6, countRef: 60, decay: 0.35, wrap: 0.5, spec: 1,
+           cookie: 0.3, spacing: 5, tanAlpha: 0.18, shadow: 0.85, widthK: 0.92, minHalfWidth: 0.25 },
+  muzzle: { color: 0xFFB060, intensity: 4, range: 7, decay: 1.6, y: 1, z: -0.6, kick: 0.12, perShot: 0.02, shotCap: 20, envCap: 1.4,
+            fade: 9, flicker: 0.28, flickerHz: 24 },
+  gates: { rows: [0, 2, 1, 0], y: 1, ahead: 1.4, half: 4.2, range: 7.5, decay: 1.4, intensity: 1.6, maxZ: -48 },
+  beams: { high: 10, med: 6, low: 3, software: 2, len: 15, radius: 2.1, gain: 0.09, color: 0xDDE8FF },
+  eyes: {
+    minDotCss: 2, minDotPx: 2, widthK: 1.25, minGapCss: 1.5, minGapPx: 2, pull: 0.35, fade: [1, 1.8], spawnFadeM: 4,
+    shapes: { walker: [0.06, 0.044, 0.055], runner: [0.06, 0.044, 0.055], crawler: [0.068, 0.046, 0.057], brute: [0.099, 0.055, 0.088],
+              spitter: [0.06, 0.04, 0.06] },
+    colors: { walker: 0xFFD23A, runner: 0xFF3A2A, crawler: 0xFFD23A, brute: 0xFF7A1F, spitter: 0x9BFF3A },
+    intensity: 3.2, gainCanvas: 0.3125, gainBloom: 0.6, gainBloomLate: 0.45, late: [30, 61], farBloom: 1, att: [24, 66],
+    lumFloor: 0.25, kMin: 0.35, cap: 512, trueFade: [22, 32],
+  },
+  lowExposure: 0.15,
+  blackout: { districts: ['night'], seconds: 2, flickerHz: 14 },
+  sounds: { groanM: 30, groanS: 0.8, screechM: 30, roarM: 18, bed: 0.55 },
+  eyesLessonM: 45, prefetchMs: 1500,
+  // a district's night table: the sky lerps tintMix toward tint, then × skyK / horizonK; the fog the same lerp × fogK
+  district: {
+    tint: 0x1A2A55, tintMix: 0.6, skyK: 0.14, horizonK: 0.2, fogK: 0.12,
+    moon: { color: 0xA8BCE8, intensity: 0.14, offset: [0.6, 6.5, 14] }, hemi: { sky: 0x2C3A5C, ground: 0x0E0E12, intensity: 0.16 },
+    exposure: 1.3, bloom: { strength: 0.6, radius: 0.45 },
+    grade: { shadowTint: 0x10204A, shadowMix: 0.12, highlightTint: 0xFFD8A0, saturation: 1.12, vignette: 0.5 },
+    disc: { color: 0xDCE6FF, boost: 1.2, haloWide: 0.08, haloTight: 0.2, mottle: 0.35, edge: [0.9993, 0.99965], azimuthDeg: -8, elevationDeg: 11 },
+    horizonWarm: 0.05, cloudK: 0.3, stars: { density: 0.012, gain: 0.8 }, skylineLit: 0.6, skylineDensity: 0.03,
+    puddles: 0.25, litFraction: 0.05, windowK: 0.8, beaconK: 0.45, weatherK: 0.45, eyes: 3.2,
+  },
+});
+// sRGB hex → linear, lerp / scale, → sRGB hex (module load only)
+const nLin = (v) => (v < 0.04045 ? v * 0.0773993808 : Math.pow(v * 0.9478672986 + 0.0521327014, 2.4));
+const nSrgb = (v) => (v < 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 0.41666) - 0.055);
+function nightHex(hex, k) {
+  const N = NIGHT.district;
+  let out = 0;
+  for (let s = 16; s >= 0; s -= 8) {
+    let c = nLin(((hex >> s) & 255) / 255);
+    c += (nLin(((N.tint >> s) & 255) / 255) - c) * N.tintMix;
+    out = out * 256 + Math.round(Math.min(1, Math.max(0, nSrgb(c * k))) * 255);
+  }
+  return out;
+}
+/** District d by night (nightOf = its id; the same props, so environment re-lights its ring instead of re-laying it). */
+function nightDistrict(d) {
+  const N = NIGHT.district, S = d.sky, G = N.grade;
+  return {
+    ...d, nightOf: d.id,
+    sky: { ...S, zenith: nightHex(S.zenith, N.skyK), upper: nightHex(S.upper, N.skyK), horizon: nightHex(S.horizon, N.horizonK),
+           glow: nightHex(S.glow, N.horizonK), disc: { ...S.disc, ...N.disc }, horizonWarm: N.horizonWarm,
+           cloud: { ...S.cloud, opacity: S.cloud.opacity * N.cloudK }, stars: N.stars,
+           skyline: { ...S.skyline, lit: Math.min(S.skyline.lit, N.skylineLit), litDensity: Math.min(S.skyline.litDensity, N.skylineDensity) } },
+    fog: { ...d.fog, color: nightHex(d.fog.color, N.fogK) },
+    sun: { ...N.moon, titleAzimuthDeg: d.sun.titleAzimuthDeg },
+    hemi: { ...d.hemi, ...N.hemi },
+    exposure: N.exposure,
+    bloom: { ...d.bloom, ...N.bloom },
+    grade: { ...d.grade, shadowTint: G.shadowTint, shadowMix: G.shadowMix, highlightTint: G.highlightTint,
+             saturation: Math.max(G.saturation, d.grade.saturation), vignette: { ...d.grade.vignette, strength: G.vignette } },
+    road: { ...d.road, puddles: Math.max(d.road.puddles, N.puddles), pools: null },
+    building: { ...d.building, litFraction: N.litFraction, windowEmissive: d.building.windowEmissive * N.windowK },
+    lamps: { ...d.lamps, lit: 'none' },
+    beacon: { ...d.beacon, gain: d.beacon.gain * N.beaconK },
+    weather: { ...d.weather, gain: d.weather.gain * N.weatherK },
+    zombie: { eyesEmissive: N.eyes },
+  };
+}
+export const NIGHT_DISTRICTS = deepFreeze(DISTRICTS.map(nightDistrict));
+// the lessons and the FIELD GUIDE's NIGHT section, numbers from NIGHT
+const nV = NIGHT.vision, nF = NIGHT.flare, nDebut = LEVEL_TYPES.night.debut;
+export const NIGHT_TEXT = deepFreeze({
+  hints: {
+    'night.eyes': 'EYES IN THE DARK — RED EYES = RUNNER',
+    'night.flare': `FLARE — LIGHTS THE ROAD FOR ${nF.seconds} S`,
+    'night.flareLate': `FLARE — LIGHTS THE ROAD FOR ${nF.late[1]} S`,
+  },
+  codex: {
+    sections: [{ id: 'night', ids: ['night.light', 'night.eyes', 'night.flare'] }],
+    titles: { night: 'NIGHT' },
+    unlock: { 'night.light': nDebut, 'night.eyes': nDebut, 'night.flare': nDebut },
+    entries: {
+      'night.light': { name: 'FLASHLIGHTS', line: `Only your flashlights light the road: ${nV.min} m with a few soldiers, up to ${nV.max} m with `
+        + `${Math.ceil(((nV.max - nV.base) / nV.perSqrt) ** 2)} or more. The level is the same as by day.` },
+      'night.eyes': { name: 'EYES', line: 'Eyes glow far beyond your light: yellow walkers and crawlers, red runners, orange brutes, green spitters.' },
+      'night.flare': { name: 'FLARE', line: `At night a crate also fires a flare: +${nF.bonus} m of light for ${nF.seconds} s (${nF.late[1]} s from level ${nF.late[0]}).` },
+    },
+  },
+});
+export const NIGHT_AUDIO = deepFreeze({
+  nightClick: { on: 'night:click', layers: [{ src: 'square', f: 2400, fEnd: 1400, ms: 18, attack: 1, filter: { type: 'highpass', f: 900 }, gain: 0.22 },
+    { src: 'noise', ms: 24, attack: 1, filter: { type: 'bandpass', f: 3200, q: 1.4 }, gain: 0.18 }] },
+  nightBed: { repeatMs: 3000, layers: [{ src: 'brown', ms: 6000, attack: 1500, decay: 2600, filter: { type: 'lowpass', f: 320 }, gain: 0.3 },
+    { src: 'sine', f: 55, ms: 6000, attack: 1500, decay: 2600, gain: 0.05 }] },
+  nightGroan: { on: 'night:groan', maxPerSec: 2, rateJitter: 0.12,
+    layers: [{ src: 'sawtooth', f: 95, fEnd: 70, ms: 700, attack: 120, decay: 300, filter: { type: 'lowpass', f: 420 }, gain: 0.32 },
+    { src: 'brown', ms: 600, attack: 100, decay: 250, filter: { type: 'bandpass', f: 380, q: 0.8 }, gain: 0.2 }] },
+  nightScreech: { on: 'night:screech', coalesceMs: 40,
+    layers: [{ src: 'sawtooth', f: 1300, fEnd: 850, ms: 300, filter: { type: 'bandpass', f: 1150, q: 1.5 }, gain: 0.42 }] },
+  nightRoar: { on: 'night:roar', coalesceMs: 40,
+    layers: [{ src: 'sawtooth', f: 66, ms: 650, attack: 30, decay: 320, shaper: 0.6, gain: 0.26 },
+    { src: 'noise', ms: 650, attack: 30, decay: 320, filter: { type: 'bandpass', f: 850, q: 0.6 }, shaper: 0.6, gain: 0.3 }] },
+  nightFlare: { on: 'night:flare', layers: [{ src: 'noise', ms: 900, attack: 20, decay: 200, filter: { type: 'bandpass', f: 2600, q: 0.9, fEnd: 1400 }, gain: 0.3 },
+    { src: 'sine', f: 520, fEnd: 180, ms: 160, gain: 0.25 }] },
+});
+//
+//
+//
+// ---- merge lists (P0) ----
+export const TEXT_REGIONS = Object.freeze({ TYPES_TEXT, HORDE_TEXT, NIGHT_TEXT });
+export const AUDIO_REGIONS = Object.freeze({ HORDE_AUDIO, NIGHT_AUDIO });
+const textParts = (k, c) => Object.values(TEXT_REGIONS).map((t) => (c ? t[k] && t[k][c] : t[k]) || []);
+const textOf = (k, c) => Object.assign({}, ...textParts(k, c));
+const textList = (k, c) => [].concat(...textParts(k, c));
+
 // ==== AUDIO_CUES =============================================================================
 // GDD §13 cue recipes; ARCHITECTURE §6.13 / §8.8 / §11. audio.js interprets EXACTLY this vocabulary:
 //
@@ -2011,6 +2776,7 @@ export const JUICE = deepFreeze({
 // }
 // opts passed to audio.play(name, { volume, pitch, pos, detune, count, value }) — `pitch` multiplies every f and buffer rate (boss-death roar: 0.4).
 export const AUDIO_CUES = deepFreeze({
+  ...Object.assign({}, ...Object.values(AUDIO_REGIONS)),
   // ---- gunfire / hits ----
   shot: { bus: 'gun', maxPerSec: JUICE.caps.voicedShotsPerSec, rateJitter: 0.08, countDb: { per: 8, db: 1, cap: 12 },
           layers: [{ src: 'band', ms: 40, attack: 1, gain: 0.8 },                                      // white noise 40 ms → band-pass 1.2 kHz Q 0.7 (pre-rendered)
@@ -2182,6 +2948,7 @@ const NB = String.fromCharCode(0xA0);                                  // no-bre
 // never with a line that starts with it
 const DASH = NB + '—';
 export const HINTS = deepFreeze({
+  ...textOf('hints'),
   steer: 'DRAG TO STEER',
   steerDesktop: 'DRAG OR ← → TO STEER',                 // shown instead of `steer` with a fine pointer / no touch (ui)
   shoot: 'SHOOT THE GATE!',
@@ -2224,12 +2991,12 @@ export const HINTS = deepFreeze({
   'boss.stomp': (stored) => (stored > 0 ? `STOMPS HIT EVERYONE${DASH} FIRE A STORED WEAPON AT HIM` : `STOMPS HIT EVERYONE${DASH} THEY CANNOT BE DODGED`),
   // r7 (teaching:3): the phase changes, by base archetype (twins → hulk, prime → colossus), templated from BOSSES
   'boss.hulk.2': `PHASE 2: HE CHARGES${DASH} WATCH THE RED STRIPE`,
-  'boss.hulk.3': `ENRAGED! HE SLAMS EVERY ${numTxt(phaseInterval('hulk', 2))} SECONDS`,
+  'boss.hulk.3': `PHASE 3: HE SLAMS EVERY ${numTxt(phaseInterval('hulk', 2))} SECONDS`,
   'boss.spitterQueen.2': `PHASE 2: ACID RAIN${DASH} KEEP MOVING`,
   'boss.spitterQueen.3': (() => {
     const sp = phaseAction('spitterQueen', 2, 'spawn');
     const n = sp && sp.spawn ? sp.spawn.crawler | 0 : 0;
-    return n > 0 ? `ENRAGED! ${n} CRAWLERS${DASH} SHE SPITS FASTER` : `ENRAGED!${DASH} SHE SPITS FASTER`;
+    return n > 0 ? `PHASE 3: ${n} CRAWLERS${DASH} SHE SPITS FASTER` : 'PHASE 3: SHE SPITS FASTER';
   })(),
   'boss.juggernaut.2': 'PHASE 2: LANE CHARGES AND A THROWN CAR',
   'boss.juggernaut.3': (() => {
@@ -2239,7 +3006,7 @@ export const HINTS = deepFreeze({
   // r7 fix: the squad's fire breaks the shield by itself ("KEEP SHOOTING" asked for an action the player cannot take, the reason
   // 'boss' was rewritten); what the player CAN do is fire a stored weapon at it
   'boss.colossus.2': `SHIELD UP! YOUR SQUAD'S FIRE BREAKS IT${DASH} A STORED WEAPON HELPS`,
-  'boss.colossus.3': `ENRAGED! AN ATTACK EVERY ${numTxt(phaseInterval('colossus', 2))} SECONDS`,
+  'boss.colossus.3': `PHASE 3: AN ATTACK EVERY ${numTxt(phaseInterval('colossus', 2))} SECONDS`,
   // r7 (teaching:7 part 2): name the circles — the green acid mark read as a heal pad
   spitter: `SPITTERS LOB ACID${DASH} GREEN CIRCLES MARK WHERE IT LANDS`,
   single: `NO WAY AROUND${DASH} SHOOT IT DOWN`,
@@ -2273,6 +3040,9 @@ export const HINTS = deepFreeze({
   'troop.medic': `A MEDIC JOINS${DASH} +${pctOf(TROOPS.medic.pct)}${NB}% SOLDIERS EVERY ${numTxt(TROOPS.medic.every)}${NB}S WHILE YOU ARE LOW`,
   'troop.flamer': 'A FLAMETHROWER JOINS YOUR SQUAD!',
   'troop.drone': 'A DRONE TURRET JOINS YOUR SQUAD!',
+  // r8 (P1T): the Horde run's kit items (PICKUPS.eventItems)
+  'item.kit': `+${PICKUPS.eventItems['item.kit'].kits} REPAIR KIT FOR THE HOLD`,
+  'item.kit2': `+${PICKUPS.eventItems['item.kit2'].kits} REPAIR KITS FOR THE HOLD`,
   'troop.apc': 'AN APC JOINS\u00A0— IT SOAKS UP BITES',
   // round 6: the first weapon ever stored (weapon:stored; level shows it once ever) — the FIRE button bottom-right starts
   // it. It shows before that weapon's own name hint (weapon:stored is emitted before item:pickup); text only — the touch
@@ -2312,6 +3082,9 @@ const codexUnlock = {};
 for (const k in CODEX_ITEMS) for (const id of CODEX_ITEMS[k]) codexUnlock[id] = itemOf(id).unlock;
 for (const t of ZOMBIES.common.types) codexUnlock['zombie.' + t] = ZOMBIES[t].unlock;
 for (const a of CODEX_BOSSES) { const i = BOSSES.rotation.indexOf(a); if (i >= 0) codexUnlock['boss.' + a] = i + 1; }
+// r8 (P1T): the kit items on the 1.4.0 map: the crate from the Horde debut, the KITS ×2 lane from kitsLaneFrom
+codexUnlock['item.kit'] = LEVEL_TYPES.horde.debut;
+codexUnlock['item.kit2'] = nextLevelOfType('horde', HORDE_GEN.run.kitsLaneFrom, { horde: true });
 const codexLegacy = {
   'ctl.steer': ['steer'], 'ctl.fire': ['fire'], 'gate.plus': ['shoot', 'more'], 'gate.minus': ['red'], 'gate.mult': ['x2', 'tryx2'],
   'gate.div': ['div'], 'gate.single': ['single'], 'pickup.crate': ['crate'], 'zombie.walker': ['bite'], 'zombie.brute': ['brute'],
@@ -2322,17 +3095,18 @@ export const CODEX = deepFreeze({
   sections: [
     { id: 'controls', ids: ['ctl.steer', 'ctl.fire', 'ctl.pause', 'ctl.mute'] },
     { id: 'gates', ids: ['gate.plus', 'gate.max', 'gate.minus', 'gate.mult', 'gate.div', 'gate.zero', 'gate.item', 'gate.single', 'gate.guards'] },
-    { id: 'pickups', ids: ['pickup.crate', 'pickup.coins', 'coins', 'pickup.duplicate'] },
+    { id: 'pickups', ids: ['pickup.crate', 'pickup.coins', 'coins', 'pickup.duplicate', 'item.kit', 'item.kit2'] },
     { id: 'weapons', ids: CODEX_ITEMS.weapons.slice() },
     { id: 'gear', ids: CODEX_ITEMS.gear.slice() },
     { id: 'troops', ids: CODEX_ITEMS.troops.slice() },
     { id: 'zombies', ids: ZOMBIES.common.types.map((t) => 'zombie.' + t) },
     { id: 'bosses', ids: CODEX_BOSSES.map((a) => 'boss.' + a).concat(['boss.valve']) },
     { id: 'hud', ids: ['hud.progress', 'hud.bossbar', 'hud.stars', 'hud.fire', 'hud.shield', 'hud.pills'] },
+    ...textList('codex', 'sections'),
   ],
-  unlock: codexUnlock,
-  legacy: codexLegacy,
-  cards: CODEX_ITEMS.weapons.concat(CODEX_ITEMS.gear, CODEX_ITEMS.troops, ['coins', 'gate.max', 'gate.zero']),
+  unlock: { ...textOf('codex', 'unlock'), ...codexUnlock },
+  legacy: { ...textOf('codex', 'legacy'), ...codexLegacy },
+  cards: CODEX_ITEMS.weapons.concat(CODEX_ITEMS.gear, CODEX_ITEMS.troops, ['coins', 'gate.max', 'gate.zero', 'item.kit', 'item.kit2'], textList('codex', 'cards')),
 });
 
 // r7 (teaching:3): the name card's tagline per archetype — the Colossus names its attack cycle and its shield threshold
@@ -2368,15 +3142,16 @@ const CODEX_STRINGS = {
   kicker: 'NEW',                                     // the NEW card's kicker and a row's NEW tag
   lockedName: '???',
   locked: (L) => `MEET IT ON LEVEL ${L}`,
-  sections: { controls: 'CONTROLS', gates: 'GATES', pickups: 'PICKUPS', weapons: 'WEAPONS', gear: 'GEAR', troops: 'TROOPS',
+  sections: { ...textOf('codex', 'titles'), controls: 'CONTROLS', gates: 'GATES', pickups: 'PICKUPS', weapons: 'WEAPONS', gear: 'GEAR', troops: 'TROOPS',
               zombies: 'ZOMBIES', bosses: 'BOSSES', hud: 'ON SCREEN' },
   notes: {
     weapons: `Stored in the FIRE button (${PICKUPS.weaponSlots} at most) — start one when you want.`,
     troops: 'They join for the rest of the level, one of each.',
     zombies: 'A zombie that touches your squad kills soldiers and dies (a brute keeps swinging). Zombies that walk past you do nothing.',
-    bosses: `Every level ends with a boss; your squad shoots it by itself. Skull levels (${BOSSES.milestones.join(', ')}) are district finales: +${pctOf(BOSSES.milestoneMult - 1)} % boss HP.`,
+    bosses: `Every level ends with a boss; your squad shoots it by itself. Skull levels (every 5th: ${BOSSES.milestones.join(', ')} …) are district finales: +${pctOf(BOSSES.milestoneMult - 1)} % boss HP.`,
   },
   entries: {
+    ...textOf('codex', 'entries'),
     // controls
     'ctl.steer': { name: 'STEER', line: 'Drag anywhere, A / D or ← / →, or a gamepad stick. The squad slides to where you steer.' },
     'ctl.fire': { name: 'FIRE', line: `The FIRE button, Space or gamepad A starts a stored weapon (${PICKUPS.weaponSlots} can wait).` },
@@ -2403,6 +3178,11 @@ const CODEX_STRINGS = {
     'pickup.coins': { name: 'COIN LINE', line: `${PICKUPS.coinLine.count} coins in a row. A magnet pulls them in from ${numTxt(G.magnet.radius)} m.` },
     coins: { name: 'COIN CRATE', card: `${PICKUPS.crateCoins} COINS`, line: `A crate with ${PICKUPS.crateCoins} coins inside.` },
     'pickup.duplicate': { name: 'DUPLICATES', line: `A second troop or magnet, a weapon when ${PICKUPS.weaponSlots} are stored, and every weapon still stored when the boss dies pay ${PICKUPS.duplicateCoins} coins.` },
+    // r8 (P1T): the Horde run's kit items (PICKUPS.eventItems)
+    'item.kit': { name: 'REPAIR KIT', card: `+${PICKUPS.eventItems['item.kit'].kits} KIT FOR THE HOLD`,
+                  line: `A crate on a Horde level's run: +${PICKUPS.eventItems['item.kit'].kits} repair kit at the barricade.` },
+    'item.kit2': { name: 'KITS ×2', card: `+${PICKUPS.eventItems['item.kit2'].kits} KITS FOR THE HOLD`,
+                   line: `A purple lane on a Horde level's run: +${PICKUPS.eventItems['item.kit2'].kits} repair kits at the barricade.` },
     // weapons (stored; the FIRE button starts them)
     'weapon.shotgun': { name: 'SHOTGUN', card: `${W.shotgun.duration}${NB}S WIDE BLAST, PUMPS GATES`,
                         line: `${W.shotgun.duration} s. ${W.shotgun.pellets} pellets in a ±${W.shotgun.fanDeg}° fan to ${W.shotgun.range} m; every pellet is a gate hit.` },
@@ -2451,11 +3231,11 @@ const CODEX_STRINGS = {
                        line: `${(BOSS_ARCH.colossus.cycle || []).map((k) => (ATTACK_WORD[k] || k).toLowerCase()).join(' → ').replace(/^./, (c) => c.toUpperCase())}, one every ${numTxt(phaseInterval('colossus', 0))} s. At ${P2_PCT} % a shield goes up — ${BOSS_ARCH.colossus.shieldHits} hits break it. At ${P3_PCT} %: an attack every ${numTxt(phaseInterval('colossus', 2))} s.` },
     'boss.hulkTwins': { name: BOSS_ARCH.hulkTwins.name, line: `Two Hulks at ${pctOf(BOSS_ARCH.hulkTwins.hpSplit)} % HP each, one HP bar; the fight ends when both fall.` },
     'boss.colossusPrime': { name: BOSS_ARCH.colossusPrime.name, line: `A Colossus whose shield takes ${BOSS_ARCH.colossusPrime.shieldHits} hits.` },
-    'boss.valve': { name: 'TOO SLOW', line: `After ${BOSSES.valve.after} s of fight the boss walks in and eats ${BOSSES.valve.perSec} soldiers a second.` },
+    'boss.valve': { name: 'ENRAGE', line: `The clock beside the boss bar counts down: after ${BOSSES.valve.campaign.after} s of fight (${BOSSES.valve.campaign.afterMilestone} s on a finale; slow bosses may wait a bit longer) the boss walks in and eats more soldiers every second. Endless: ${BOSSES.valve.after} s, ${BOSSES.valve.perSec} a second.` },
     // on screen (HUD)
     'hud.progress': { name: 'ROAD BAR', line: 'The road to the boss (the skull). Each gold diamond is a special ahead — a crate or a purple gate.' },
-    'hud.bossbar': { name: 'BOSS BAR', line: `Ticks at ${P2_PCT} % and ${P3_PCT} % mark new phases: the bar turns orange, then pulses red when the boss is enraged.` },
-    'hud.stars': { name: 'STARS', line: `★ beat the boss · ★★ ${pctOf(STARS.two)} % of the level's target squad survive · ★★★ ${pctOf(STARS.three)} %. The results name the numbers.` },
+    'hud.bossbar': { name: 'BOSS BAR', line: `Ticks at ${P2_PCT} % and ${P3_PCT} % mark new phases: the bar turns orange, then pulses red in phase 3.` },
+    'hud.stars': { name: 'STARS', line: `★ beat the boss · ★★ ${pctOf(STARS.two)} % of the level's target squad survive · ★★★ ${pctOf(starThree(1))}–${pctOf(STARS.three)} % (it rises to L10). The results name the numbers.` },
     'hud.fire': { name: 'FIRE BUTTON', line: 'Shows the next stored weapon (×2 = two stored); its ring drains while one fires.' },
     'hud.shield': { name: 'BLUE COUNTER', line: 'Armor plates left, beside your squad count.' },
     'hud.pills': { name: 'TIMERS', line: `The running weapon and boosts; they blink in their last ${JUICE.powerup.pillBlinkLast} s.` },
@@ -2470,6 +3250,7 @@ const CODEX_STRINGS = {
 // over — is built from this one template ("LEVEL 7"); screen-reader labels (aria.level) stay in sentence case.
 const LEVEL_NAME = n => `LEVEL ${n}`;
 export const STRINGS = deepFreeze({
+  ...textOf('strings'),
   // contract keys (flat)
   noWebGL2: 'This browser cannot run 3D graphics (WebGL 2). Try Chrome or Safari.',
   noImportMap: 'This browser cannot load the game (no import maps).',
@@ -2494,7 +3275,10 @@ export const STRINGS = deepFreeze({
            // no touch (the steerDesktop rule), else touch. fs = fullscreen is available (ui._fsAvailable; F does nothing
            // elsewhere). No-break spaces inside each item, so a wrapped line breaks only between items
            controlsKeys: fs => '← → / A D STEER · SPACE FIRE · ESC / P PAUSE · M MUTE' + (fs ? ' · F FULLSCREEN' : ''),
-           controlsTouch: 'DRAG TO STEER · TAP FIRE TO USE A STORED WEAPON' },
+           controlsTouch: 'DRAG TO STEER · TAP FIRE TO USE A STORED WEAPON',
+           // r8 (P8): the same line during a hold, where a drag sweeps the fire lane and REPAIR exists
+           controlsKeysHold: fs => '← → / A D SWEEP · R REPAIR · SPACE FIRE · ESC / P PAUSE · M MUTE' + (fs ? ' · F FULLSCREEN' : ''),
+           controlsTouchHold: 'DRAG TO SWEEP YOUR FIRE · TAP REPAIR TO PATCH THE WALL · TAP FIRE TO USE A STORED WEAPON' },
   settings: { title: 'SETTINGS', sound: 'Sound', music: 'Music', haptics: 'Haptics', quality: 'Quality',
               qualityOptions: { auto: 'Auto', low: 'Low', med: 'Med', high: 'High' },
               reducedMotion: 'Reduced motion', hcGates: 'High-contrast gates', largeText: 'Large text',
@@ -2544,9 +3328,10 @@ export const STRINGS = deepFreeze({
              newBest: 'NEW BEST!', retry: 'RETRY', home: 'HOME' },
   // round 7 (r7): the name card's label ('DISTRICT FINALE' on BOSSES.milestones, explain:3) and its tagline (teaching:3, the
   // first time per archetype the card holds BOSSES.intro.fightAfter s), the boss bar's phase flash ("PHASE 2" /
-  // "ENRAGED" in place of the name; r7 fix: "HULK · PHASE 2" ran into the progress skull) and the letterbox count dock
+  // "PHASE 3" in place of the name; r7 fix: "HULK · PHASE 2" ran into the progress skull; r8 V1F, LOOKS-1: phase 3 read
+  // "ENRAGED", the enrage clock's word — that one is the clock's alone now, TYPES_TEXT) and the letterbox count dock
   // during the intro dolly ("144 SOLDIERS", explain:6; r7 fix round 3: "1 SOLDIER" — a weak squad can reach a boss with one)
-  boss: { label: 'BOSS', finale: 'DISTRICT FINALE', phase: n => `PHASE ${n}`, enraged: 'ENRAGED', squad: n => `${n} ${n === 1 ? 'SOLDIER' : 'SOLDIERS'}`,
+  boss: { label: 'BOSS', finale: 'DISTRICT FINALE', phase: n => `PHASE ${n}`, squad: n => `${n} ${n === 1 ? 'SOLDIER' : 'SOLDIERS'}`,
           tagline: BOSS_TAGLINES },
   // round 7 (r7, explain:4): the district banner — a big card on a district's first level and every endless rotation
   // ("NEW DISTRICT 2" over the name), a small tag on every other run start, retries included ("NIGHT CITY · 3/5",
@@ -2558,7 +3343,7 @@ export const STRINGS = deepFreeze({
             listener: name => `Listener error in ${name}`, reload: 'RELOAD', contextLost: 'Reloading graphics…',
             // round 7 (r7, flow-coins:4): the fatal box when a lost WebGL context never comes back (engine give-up timer)
             gpuGone: 'Graphics stopped working. Your coins and levels are saved — reload to continue.' },
-  update: { ready: 'Update ready — tap to reload', aria: 'Update ready. Reload to update the game' },   // round 5 (ui): the title pill when sw.js has a new build waiting
+  update: { ready: 'Update — tap to reload', aria: 'Update ready. Reload to update the game' },   // round 5 (ui): the title pill when sw.js has a new build waiting
   aria: { pause: 'Pause', settings: 'Settings', fullscreen: 'Fullscreen', back: 'Back', close: 'Close', star: 'Star', coins: 'Coins', home: 'Home', level: n => `Level ${n}`,
           guide: 'Field guide', guideNew: 'Field guide, new entries', finale: 'District finale' },   // r7 (teaching:5 / explain:3)   // home: the results screens' HOME icon (round 4)
   // round 6: the HUD FIRE button (stored weapons): caption under the icon, the "×2" badge, screen-reader name

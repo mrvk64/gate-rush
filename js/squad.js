@@ -27,11 +27,15 @@
 //     `_rx/_rz` formation-local position for ALIVE / DISSOLVE, world position for DYING.
 //   • `_slotRec[slot]` → record or −1; `_instRec[inst]` → record (kept dense through onMove).
 //
-// Reconciliation (`_settle`): the live formation must occupy exactly slots [0, V) with
-// V = min(C, vmax). Displaced records (slots ≥ V) move to the nearest vacancy, or dissolve rim-first
-// when there is none (gate losses, vmax drops); remaining vacancies are filled by reserve soldiers
-// stepping up from the rear (hidden soldiers when C > vmax, vmax raises). Deaths settle after
-// SQUAD.reflowDelay so a toppling soldier leaves a legible hole; everything else settles at once.
+// 1.4.0 logical formation (D5): every tier plays on the first L = min(C, CAP) slots (width, depth, contact box, the 40
+// shooters and muzzles); records only draw — slots [0, L) when V = min(C, vmax) ≥ L, else _syncWant's subset.
+// Reconciliation (`_settle`): records occupy exactly the drawn set. Displaced records move to the nearest vacancy, or
+// dissolve rim-first when there is none (gate losses, vmax drops); remaining vacancies are filled by reserve soldiers
+// stepping up from the rear (hidden soldiers when C > vmax, vmax raises). Deaths settle after SQUAD.reflowDelay so a
+// toppling soldier leaves a legible hole; everything else settles at once.
+//
+// 1.4.0 hook (ARCH §3): setFormation('wall') swaps in the SQUAD.formations.wall slot table for every query; its anchor
+// (front-row z, firing step) lives in _s, 0 for 'run'.
 //
 // Matrices: squad composes its own TRS (yaw, pitch = topple, roll = steering lean, scale) straight
 // into `instances.mesh.instanceMatrix.array` (the standard InstancedMesh layout, 16 floats per
@@ -39,7 +43,7 @@
 // GDD §3.1 asks for a 6° roll into lateral movement. Characters face −Z with feet at y = 0 (models.js).
 
 import { SQUAD, WORLD, FIRE, GEAR, RENDER, QUALITY_TIERS, UPGRADES } from './data.js';
-import { clamp, lerpExp, ease } from './util.js';
+import { clamp, lerpExp, ease, warnOnce } from './util.js';
 import { CharacterInstances } from './models.js';
 
 // ---------------------------------------------------------------------------------------------
@@ -59,6 +63,9 @@ const SPAWN_RISE_FRACTION = SQUAD.spawnAnim.riseFraction;                 // sha
 const TINT_JITTER = SQUAD.tintJitter;                        // ± per-soldier uniform brightness jitter (fraction) (data key; wired round-2 cross-group)
 const YAW_JITTER = SQUAD.yawJitter;                         // ± per-soldier facing jitter while marching (rad) (data key; wired round-2 cross-group)
 const BURST_JITTER = SQUAD.slotSpacing;         // spawn-burst footprint jitter = one lattice spacing (m)
+const EDGE_MAX = 10;                            // A13a: row ends drawn per side when V < L
+const WALL = SQUAD.formations.wall;             // 1.4.0
+const FORM_RUN = 0, FORM_WALL = 1;
 
 // Record states
 const REC_FREE = 0;
@@ -73,9 +80,12 @@ const REC_DISSOLVE = 3;
 
 const _tmpVacant = new Int32Array(CAP);
 const _tmpDisplaced = new Int32Array(CAP);
+const _edgeL = new Int32Array(CAP), _edgeR = new Int32Array(CAP);   // _syncWant row ends
 // CHR-13: indices into Squad._s (the per-step scalars): simulation clock, squadX, lateral velocity, lean roll,
-// invulnerability left, committed lane x, render coast clock, next reconciliation time
-const S_T = 0, S_X = 1, S_VX = 2, S_ROLL = 3, S_INV = 4, S_LANE_X = 5, S_COAST = 6, S_SETTLE_AT = 7, S_COUNT = 8;
+// invulnerability left, committed lane x, render coast clock, next reconciliation time; 1.4.0: front-row z, firing step
+// (height now / from / to, back edge z), formation ease (start, seconds; 0 = none)
+const S_T = 0, S_X = 1, S_VX = 2, S_ROLL = 3, S_INV = 4, S_LANE_X = 5, S_COAST = 6, S_SETTLE_AT = 7;
+const S_AZ = 8, S_SY = 9, S_SY0 = 10, S_SY1 = 11, S_SZ = 12, S_FT0 = 13, S_FDUR = 14, S_COUNT = 15;
 const _tmpFree = new Int32Array(CAP);             // records step() frees after stepCore (CHR-13)
 
 const _evCount = { count: 0, prev: 0, delta: 0, reason: 'start' };
@@ -106,13 +116,13 @@ const STEP_INVULN_ENDED = 0x10000;                 //   the invulnerability wind
 const STEP_SETTLE_DUE = 0x20000;                   //   a requested reconciliation is due (call _settle)
 
 /**
- * Squad.step body for V visible soldiers: GDD §3.2 steering (lerpExp toward targetX, lane lock, speed cap, lean roll),
+ * Squad.step body for the logical count L: GDD §3.2 steering (lerpExp toward targetX, lane lock, speed cap, lean roll),
  * the invulnerability countdown, record motion (ALIVE soldiers lerp to their slot, corpses drift with the road; finished
  * corpses / dissolves are written to freeOut) and the ctx.world mirrors (w). The scalars live in s (S_*).
  * Returns the number written to freeOut | STEP_INVULN_ENDED | STEP_SETTLE_DUE; the caller applies those.
  */
-function stepCore(s, dt, targetX, laneLocked, roadSpeed, settlePending, V, count, frontOffset, halfWidthAt, depthAt, w,
-  list, n, rState, rSlot, rx, rz, rSpawnT, rDeathT, slotX, slotZ, freeOut) {
+function stepCore(s, dt, targetX, laneLocked, roadSpeed, settlePending, L, count, frontOffset, halfWidthAt, depthAt, w,
+  list, n, rState, rSlot, rx, rz, rSpawnT, rDeathT, slotX, slotZ, freeOut, rFx, rFz) {
   const t = s[S_T] + dt;
   s[S_T] = t;
 
@@ -148,10 +158,19 @@ function stepCore(s, dt, targetX, laneLocked, roadSpeed, settlePending, V, count
   const due = t >= s[S_SETTLE_AT];                          // read unconditionally (no first-use deopt when a settle is pending)
   if (settlePending && due) flags |= STEP_SETTLE_DUE;
 
-  // --- record motion
-  const fo = frontOffset[V];
+  // --- record motion (1.4.0: a formation ease moves each soldier from rFx / rFz to its slot by smoothstep ek, the step too)
+  const fo = frontOffset[L];
+  const az = s[S_AZ];
   const k = 1 - Math.exp(-SQUAD.slotLerpRate * dt);          // soldier -> slot lerp 1 - exp(-8*dt)
   const roadDz = roadSpeed * dt;                              // corpses are left behind at road speed
+  const fd = s[S_FDUR];
+  let ek = -1;
+  if (fd > 0) {
+    const u = (t - s[S_FT0]) / fd;
+    if (u < 1) ek = u > 0 ? u * u * (3 - 2 * u) : 0;
+    else s[S_FDUR] = 0;
+  }
+  s[S_SY] = ek < 0 ? s[S_SY1] : s[S_SY0] + (s[S_SY1] - s[S_SY0]) * ek;
   let nFree = 0;
   for (let i = 0; i < n; i++) {
     const rec = list[i];
@@ -159,8 +178,13 @@ function stepCore(s, dt, targetX, laneLocked, roadSpeed, settlePending, V, count
     if (st === REC_ALIVE) {
       if (t >= rSpawnT[rec]) {
         const sl = rSlot[rec];
-        rx[rec] += (slotX[sl] - rx[rec]) * k;
-        rz[rec] += (slotZ[sl] - fo - rz[rec]) * k;
+        if (ek < 0) {
+          rx[rec] += (slotX[sl] - rx[rec]) * k;
+          rz[rec] += (slotZ[sl] - fo + az - rz[rec]) * k;
+        } else {
+          rx[rec] = rFx[rec] + (slotX[sl] - rFx[rec]) * ek;
+          rz[rec] = rFz[rec] + (slotZ[sl] - fo + az - rFz[rec]) * ek;
+        }
       }
     } else if (st === REC_DYING) {
       rz[rec] += roadDz;
@@ -172,8 +196,8 @@ function stepCore(s, dt, targetX, laneLocked, roadSpeed, settlePending, V, count
 
   // --- shared state mirrors (the only ctx.world fields squad writes)
   w.squadX = x;
-  w.squadHalfWidth = halfWidthAt[V];
-  w.squadDepth = depthAt[V];
+  w.squadHalfWidth = halfWidthAt[L];
+  w.squadDepth = depthAt[L];
   w.squadCount = count;
   w.invulnerable = inv > 0;
   return nFree | flags;
@@ -188,6 +212,7 @@ function stepCore(s, dt, targetX, laneLocked, roadSpeed, settlePending, V, count
 function writeInstances(s, alpha, list, n, rState, rInst, rx, rz, rs, rYaw, rSpawnT, rDeathT, ma, stateArr) {
   const tR = s[S_T] + alpha * STEP + s[S_COAST];            // render clock (coasts in complete / gameover)
   const sx = s[S_X], roll = s[S_ROLL];
+  const stepH = s[S_SY], stepZ = s[S_SZ];                    // 1.4.0: z ≤ stepZ stands on the firing step
   const spawnTime = SQUAD.spawnAnim.time;
   const topple = SQUAD.death.topple;
   for (let i = 0; i < n; i++) {
@@ -224,8 +249,32 @@ function writeInstances(s, alpha, list, n, rState, rInst, rx, rz, rs, rYaw, rSpa
     ma[o] = (cyr + sysr * sa) * scale; ma[o + 1] = ca * sr * scale; ma[o + 2] = (cysr * sa - sycr) * scale; ma[o + 3] = 0;
     ma[o + 4] = (sycr * sa - cysr) * scale; ma[o + 5] = ca * cr * scale; ma[o + 6] = (sysr + cyr * sa) * scale; ma[o + 7] = 0;
     ma[o + 8] = ca * sy * scale; ma[o + 9] = -sa * scale; ma[o + 10] = ca * cy * scale; ma[o + 11] = 0;
-    ma[o + 12] = wx; ma[o + 13] = 0; ma[o + 14] = wz; ma[o + 15] = 1;
+    ma[o + 12] = wx; ma[o + 13] = stepH > 0 && wz <= stepZ ? stepH : 0; ma[o + 14] = wz; ma[o + 15] = 1;
   }
+}
+
+/** Draws ≤ e of the n row ends in list (front to back): the outer column (sign·x ≥ lim) first, then the rest, by stride. */
+function pickEnds(list, n, x, lim, sign, e, want) {
+  let k = 0;
+  for (let i = 0; i < n; i++) if (sign * x[list[i]] >= lim) k++;
+  const a = k < e ? k : e, b = e - a < n - k ? e - a : n - k;
+  for (let i = 0, c = 0, d = 0, ja = 0, jb = 0; i < n; i++) {
+    const s = list[i];
+    if (sign * x[s] >= lim) { if (ja < a && c++ === Math.floor((ja + 0.5) * k / a)) { want[s] = 1; ja++; } }
+    else if (jb < b && d++ === Math.floor((jb + 0.5) * (n - k) / b)) { want[s] = 1; jb++; }
+  }
+  return a + b;
+}
+
+/** Slot draw priority: zo (slots by z) in bit-reversed index order, so any prefix spreads over the rows. Init only. */
+function bitReversed(zo) {
+  const bits = Math.ceil(Math.log2(CAP)), pr = new Int16Array(CAP);
+  for (let i = 0, n = 0; i < 1 << bits; i++) {
+    let r = 0;
+    for (let b = 0; b < bits; b++) r |= ((i >> b) & 1) << (bits - 1 - b);
+    if (r < CAP) pr[n++] = zo[r];
+  }
+  return pr;
 }
 
 /**
@@ -243,6 +292,7 @@ function warmHotPaths(w) {
   const rx = new Float32Array(N), rz = new Float32Array(N), rs = new Float32Array(N), rYaw = new Float32Array(N);
   const rSpawnT = new Float32Array(N), rDeathT = new Float32Array(N), slotX = new Float32Array(N), slotZ = new Float32Array(N);
   const fo = new Float32Array(N + 1), hw = new Float32Array(N + 1), dp = new Float32Array(N + 1);
+  const rFx = new Float32Array(N), rFz = new Float32Array(N);
   const ma = new Float32Array(N * 16), stateArr = new Float32Array(N * 4);
   const saved = w ? [w.squadX, w.squadHalfWidth, w.squadDepth, w.squadCount, w.invulnerable] : null;
   const ww = w || { squadX: 0, squadHalfWidth: 0, squadDepth: 0, squadCount: 0, invulnerable: false };
@@ -259,8 +309,11 @@ function warmHotPaths(w) {
     s[S_LANE_X] = (it % 3 - 1) * 1.8;
     s[S_SETTLE_AT] = s[S_T] + (it % 2 === 0 ? -0.01 : 0.5);
     s[S_COAST] = (it % 4) * 0.01;
+    // 1.4.0: formation eases and the wall anchor / step get feedback too
+    s[S_FDUR] = it % 3 === 0 ? 0 : WALL.easeS; s[S_FT0] = s[S_T] - (it % 5) * 0.4;
+    s[S_AZ] = it % 2 === 0 ? 0 : WALL.frontZ; s[S_SY0] = 0; s[S_SY1] = it % 2 === 0 ? 0 : WALL.stepY; s[S_SZ] = WALL.stepBackZ;
     stepCore(s, WORLD.step, (it % 5 - 2) * 1.3, it % 2 === 0, 9.5 + it * 0.01, it % 3 !== 0, N - (it % 3), N - 1,
-      fo, hw, dp, ww, list, N, rState, rSlot, rx, rz, rSpawnT, rDeathT, slotX, slotZ, freeOut);
+      fo, hw, dp, ww, list, N, rState, rSlot, rx, rz, rSpawnT, rDeathT, slotX, slotZ, freeOut, rFx, rFz);
     writeInstances(s, (it % 10) * 0.1, list, N, rState, rInst, rx, rz, rs, rYaw, rSpawnT, rDeathT, ma, stateArr);
   }
   if (saved) {
@@ -312,9 +365,14 @@ export class Squad {
     // typed-array pools are allocated in init()
     this._slotX = null; this._slotZ = null; this._frontOffset = null; this._halfWidthAt = null; this._depthAt = null;
     this._zOrder = null; this._shooterSlots = null; this._slotRec = null;
+    this._slotRow = null; this._prio = null; this._want = null; this._wantL = -1; this._wantV = -1; this._shooterL = -1;
     this._rx = null; this._rz = null; this._rs = null; this._rSpawnT = null; this._rDeathT = null;
     this._rYaw = null; this._rPhase = null; this._rTint = null;
     this._rState = null; this._rSlot = null; this._rInst = null; this._instRec = null;
+    // 1.4.0: formation, the two slot tables (the active one's arrays are the _slot* fields), positions when an ease began
+    this._form = FORM_RUN;
+    this._run = null; this._wall = null;
+    this._rFx = null; this._rFz = null;
     this._recList = null; this._recPos = null; this._recCount = 0;
     this._freeRec = null; this._freeCount = 0;
   }
@@ -327,9 +385,14 @@ export class Squad {
     const ctx = this._ctx;
 
     this._buildSlotTable();
+    this._run = this._tables();
+    this._buildWallTable();
+    this._useTables(this._run);
+    this._s[S_SZ] = WALL.stepBackZ;
 
     // per-slot / per-record state (ARCH §6.5 "per-slot soldier state")
     this._slotRec = new Int32Array(CAP).fill(-1);
+    this._want = new Uint8Array(CAP);
     this._shooterSlots = new Int32Array(FIRE.shooters);
     this._rx = new Float32Array(CAP);
     this._rz = new Float32Array(CAP);
@@ -343,6 +406,8 @@ export class Squad {
     this._rSlot = new Int32Array(CAP).fill(-1);
     this._rInst = new Int32Array(CAP).fill(-1);
     this._instRec = new Int32Array(CAP).fill(-1);
+    this._rFx = new Float32Array(CAP);
+    this._rFz = new Float32Array(CAP);
     this._recList = new Int32Array(CAP);
     this._recPos = new Int32Array(CAP);
     this._freeRec = new Int32Array(CAP);
@@ -408,6 +473,9 @@ export class Squad {
     this._settlePending = false;
     this._s[S_SETTLE_AT] = 0;
     this._shooterCount = 0;
+    this._shooterL = -1; this._wantL = -1;
+    if (this._form !== FORM_RUN) { this._form = FORM_RUN; this._useTables(this._run); }   // 1.4.0
+    this._s[S_AZ] = 0; this._s[S_SY] = 0; this._s[S_SY0] = 0; this._s[S_SY1] = 0; this._s[S_FDUR] = 0;
     if (this._s[S_INV] > 0) {
       this._s[S_INV] = 0;
       _evInvuln.on = false;
@@ -468,9 +536,9 @@ export class Squad {
     // ascending norm; ties -> front first (smaller z), then nearer the centre line (|x|), then left first
     order.sort((a, b) => (key[a] - key[b]) || (cz[a] - cz[b]) || (Math.abs(cx[a]) - Math.abs(cx[b])) || (cx[a] - cx[b]));
 
-    const slotX = new Float32Array(CAP), slotZ = new Float32Array(CAP);
-    for (let i = 0; i < CAP; i++) { slotX[i] = cx[order[i]]; slotZ[i] = cz[order[i]]; }
-    this._slotX = slotX; this._slotZ = slotZ;
+    const slotX = new Float32Array(CAP), slotZ = new Float32Array(CAP), row = new Int16Array(CAP);
+    for (let i = 0; i < CAP; i++) { slotX[i] = cx[order[i]]; slotZ[i] = cz[order[i]]; row[i] = Math.round(cz[order[i]] / rp); }
+    this._slotX = slotX; this._slotZ = slotZ; this._slotRow = row;
 
     // running stats for the first n slots (n = 0..CAP)
     const fo = new Float32Array(CAP + 1), hwAt = new Float32Array(CAP + 1), dAt = new Float32Array(CAP + 1);
@@ -490,6 +558,39 @@ export class Squad {
     for (let i = 0; i < CAP; i++) zo.push(i);
     zo.sort((a, b) => (slotZ[a] - slotZ[b]) || (Math.abs(slotX[a]) - Math.abs(slotX[b])) || (a - b));
     this._zOrder = Int32Array.from(zo);
+    // interior draw priority: the z order by bit-reversed index (any prefix spreads over the rows; ±1 slot moves ≈ 1.5)
+    this._prio = bitReversed(this._zOrder);
+  }
+
+  /** 1.4.0: the active slot table as one record. */
+  _tables() {
+    return { slotX: this._slotX, slotZ: this._slotZ, frontOffset: this._frontOffset, halfWidthAt: this._halfWidthAt, depthAt: this._depthAt,
+      zOrder: this._zOrder, slotRow: this._slotRow, prio: this._prio };
+  }
+
+  /** 1.4.0: makes table t the active one. */
+  _useTables(t) {
+    this._slotX = t.slotX; this._slotZ = t.slotZ; this._frontOffset = t.frontOffset; this._halfWidthAt = t.halfWidthAt;
+    this._depthAt = t.depthAt; this._zOrder = t.zOrder; this._slotRow = t.slotRow; this._prio = t.prio;
+    this._shooterL = -1; this._wantL = -1;
+  }
+
+  /** 1.4.0 (horde DESIGN 4.1): WALL.cols columns about x 0, rows behind the front row (z 0), filled row by row, centre out. */
+  _buildWallTable() {
+    const cols = WALL.cols, sp = WALL.spacing, rp = WALL.rowPitch;
+    const col = [];
+    for (let c = 0; c < cols; c++) col.push((c - (cols - 1) / 2) * sp);
+    col.sort((a, b) => (Math.abs(a) - Math.abs(b)) || (a - b));
+    const slotX = new Float32Array(CAP), slotZ = new Float32Array(CAP), row = new Int16Array(CAP);
+    const fo = new Float32Array(CAP + 1), hwAt = new Float32Array(CAP + 1), dAt = new Float32Array(CAP + 1), zo = new Int32Array(CAP);
+    let maxAbsX = 0;
+    for (let i = 0; i < CAP; i++) {
+      const r = (i / cols) | 0;
+      slotX[i] = col[i % cols]; slotZ[i] = r * rp; row[i] = r; zo[i] = i;
+      if (Math.abs(slotX[i]) > maxAbsX) maxAbsX = Math.abs(slotX[i]);
+      hwAt[i + 1] = maxAbsX; dAt[i + 1] = slotZ[i];
+    }
+    this._wall = { slotX, slotZ, frontOffset: fo, halfWidthAt: hwAt, depthAt: dAt, zOrder: zo, slotRow: row, prio: bitReversed(zo) };
   }
 
   // ------------------------------------------------------------------------------------------
@@ -502,10 +603,14 @@ export class Squad {
   get visible() { return this._count < this._vmax ? this._count : this._vmax; }
   /** squadX (mirrored to ctx.world.squadX every step). */
   get x() { return this._s[S_X]; }
-  get halfWidth() { return this._halfWidthAt[this.visible]; }
-  get depth() { return this._depthAt[this.visible]; }
-  /** Formation centre z (= depth / 2); the formation centre is (x, centerZ). */
-  get centerZ() { return this._depthAt[this.visible] * 0.5; }
+  /** L = min(C, CAP): the logical formation (D5). */
+  get logicalCount() { return this._count < CAP ? this._count : CAP; }
+  get halfWidth() { return this._halfWidthAt[this.logicalCount]; }
+  get depth() { return this._depthAt[this.logicalCount]; }
+  /** Formation centre z (= front-row z (1.4.0; 0 for 'run') + depth / 2); the formation centre is (x, centerZ). */
+  get centerZ() { return this._s[S_AZ] + this._depthAt[this.logicalCount] * 0.5; }
+  /** 1.4.0: 'run' | 'wall'. */
+  get formation() { return this._form === FORM_WALL ? 'wall' : 'run'; }
   get invulnerable() { return this._s[S_INV] > 0; }
   get armor() { return this._plates; }
 
@@ -518,13 +623,14 @@ export class Squad {
     // --- visible cap from the live tier (read every step; a change re-settles the formation)
     const params = ctx.quality ? ctx.quality.params : null;
     if (params && params.vmax !== this._vmax) { this._vmax = params.vmax; this._requestSettle(0); }
-    const V = this._count < this._vmax ? this._count : this._vmax;
+    const L = this._count < CAP ? this._count : CAP;
     // CHR-13: steering, invulnerability countdown, record motion and the ctx.world mirrors run in stepCore, a module
     // function over typed arrays (it stays optimised, so it allocates nothing); the rare side effects it reports
     // (records to free, invulnerability ended, reconciliation due) are applied here.
-    const r = stepCore(this._s, dt, ctx.input.targetX, this._laneLocked, ctx.world.roadSpeed, this._settlePending, V, this._count,
+    const wall = this._form === FORM_WALL;                      // 1.4.0: the wall never steers
+    const r = stepCore(this._s, dt, wall ? 0 : ctx.input.targetX, this._laneLocked && !wall, ctx.world.roadSpeed, this._settlePending, L, this._count,
       this._frontOffset, this._halfWidthAt, this._depthAt, ctx.world, this._recList, this._recCount, this._rState, this._rSlot,
-      this._rx, this._rz, this._rSpawnT, this._rDeathT, this._slotX, this._slotZ, _tmpFree);
+      this._rx, this._rz, this._rSpawnT, this._rDeathT, this._slotX, this._slotZ, _tmpFree, this._rFx, this._rFz);
     const nFree = r & STEP_FREE_MASK;
     for (let j = 0; j < nFree; j++) this._freeRecord(_tmpFree[j]);
     if ((r & STEP_INVULN_ENDED) !== 0) {
@@ -577,7 +683,8 @@ export class Squad {
 
     // the ONLY label call squad makes (D3): world anchor at (x, label.y + label.yPerSqrt * sqrt(V), label.z)
     if (this._label !== null) {
-      this._label.setWorldPos(this._s[S_X], SQUAD.label.y + SQUAD.label.yPerSqrt * Math.sqrt(V), SQUAD.label.z);
+      if (this._form === FORM_WALL) this._label.setWorldPos(WALL.label[0], WALL.label[1], WALL.label[2]);   // 1.4.0
+      else this._label.setWorldPos(this._s[S_X], SQUAD.label.y + SQUAD.label.yPerSqrt * Math.sqrt(V), SQUAD.label.z);
     }
   }
 
@@ -622,9 +729,10 @@ export class Squad {
    * GEAR.armor.costBrute — round 7: fewer against a small squad); a spit splash consumes min(GEAR.armor.costSpit, plates) plates and absorbs the
    * whole splash (GDD §6.1/§8.2 "spit 1"). Boss attacks ('slam', 'charge', 'stomp', 'car', 'chew') ignore plates. The
    * soldier nearest the attacker topples away from it. Emits squad:loss per soldier, one squad:count,
-   * squad:dead at 0. No losses while invulnerable (GDD §6.1). Never called with 'gate' (see applyGate).
+   * squad:dead at 0. No losses while invulnerable (GDD §6.1). Never called with 'gate' (see applyGate). z defaults to the
+   * front row (1.4.0: the wall's at WALL.frontZ).
    */
-  removeSoldiers(n, reason, x = this._s[S_X], z = 0) {
+  removeSoldiers(n, reason, x = this._s[S_X], z = this._s[S_AZ]) {
     n = Math.round(n);
     if (!(n > 0) || this._count <= 0) return;
     if (this._s[S_INV] > 0) return;
@@ -705,6 +813,37 @@ export class Squad {
   }
 
   /**
+   * 1.4.0 (ARCH §3): 'wall' — the WALL table at world x 0, rows at z ≤ WALL.stepBackZ on the firing step (opts.stepY); 'run' —
+   * the blob. Gameplay reads the new table at once; the soldiers walk there over opts.easeS (smoothstep), re-anchored so nobody
+   * jumps; the wall ignores targetX and the lane lock. reset() returns to 'run'. No allocation.
+   */
+  setFormation(name, opts) {
+    const wall = name === 'wall';
+    if (!wall && name !== 'run') { warnOnce('squad.formation.' + name, 'squad.setFormation: unknown formation "' + name + '"'); return; }
+    if ((this._form === FORM_WALL) === wall) return;
+    const o = opts || WALL;
+    const s = this._s;
+    const sx = wall ? s[S_X] : 0;
+    for (let i = 0; i < this._recCount; i++) {
+      const rec = this._recList[i];
+      if (this._rState[rec] !== REC_DYING) this._rx[rec] += sx;   // about x 0 (DYING records are in world space)
+      this._rFx[rec] = this._rx[rec]; this._rFz[rec] = this._rz[rec];
+    }
+    if (wall) { s[S_X] = 0; s[S_VX] = 0; }
+    this._laneLocked = false; s[S_LANE_X] = 0;
+    s[S_FT0] = s[S_T];
+    s[S_FDUR] = o.easeS >= 0 ? o.easeS : WALL.easeS;
+    s[S_SY0] = s[S_SY];
+    s[S_SY1] = wall ? (o.stepY >= 0 ? o.stepY : WALL.stepY) : 0;
+    s[S_AZ] = wall ? WALL.frontZ : 0;
+    if (!(s[S_FDUR] > 0)) { s[S_FDUR] = 0; s[S_SY] = s[S_SY1]; }
+    this._form = wall ? FORM_WALL : FORM_RUN;
+    this._useTables(wall ? this._wall : this._run);
+    this._syncShooters();
+    this._requestSettle(0);
+  }
+
+  /**
    * Invulnerability for `seconds` (Infinity allowed: level end / boss intro). Never shortens an active
    * window; 0 or a negative value cancels. Emits squad:invuln on transitions; mirrors ctx.world.invulnerable.
    */
@@ -722,32 +861,29 @@ export class Squad {
   // Public API: queries (ARCH §6.5 / §7)
   // ------------------------------------------------------------------------------------------
 
-  /**
-   * Muzzle of the k-th front-most visible soldier (k < min(V, FIRE.shooters)), world coords. A soldier
-   * still spawning in fires from its slot; k out of range falls back to the front-centre muzzle.
-   */
+  /** Muzzle of the k-th front-most logical slot (k < min(L, FIRE.shooters)), world coords — tier-free (D5); else front centre. */
   shooterPosition(k, out) {
     const mo = FIRE.muzzleOffset;
     if (k >= 0 && k < this._shooterCount) {
       const s = this._shooterSlots[k];
-      const rec = this._slotRec[s];
-      if (rec >= 0 && this._rState[rec] === REC_ALIVE) {
-        if (this._rs[rec] >= 1) {
-          out.set(this._s[S_X] + this._rx[rec] + mo[0], mo[1], this._rz[rec] + mo[2]);
-        } else {
-          out.set(this._s[S_X] + this._slotX[s] + mo[0], mo[1], this._slotZ[s] - this._frontOffset[this.visible] + mo[2]);
-        }
-        return out;
-      }
+      const z = this._slotZ[s] - this._frontOffset[this.logicalCount] + this._s[S_AZ];
+      out.set(this._s[S_X] + this._slotX[s] + mo[0], z <= this._s[S_SZ] ? mo[1] + this._s[S_SY] : mo[1], z + mo[2]);
+      return out;
     }
     out.set(this._s[S_X] + mo[0], mo[1], mo[2]);
     return out;
   }
 
-  /** World position of slot i for the current formation (slot 0 = centre; the first V slots are occupied). */
+  /** 1.4.0: the x of the first n shooterPosition muzzles, less the muzzle offset, into out (a hold's lane test, every step: no Vector3 call). */
+  shootersX(n, out) {
+    const m = FIRE.muzzleOffset[0], sx = this._s[S_X], slots = this._shooterSlots, X = this._slotX, sc = this._shooterCount;
+    for (let k = 0; k < n; k++) out[k] = (k < sc ? sx + X[slots[k]] + m : sx + m) - m;
+  }
+
+  /** World position of slot i for the current formation (slot 0 = centre). */
   slotWorld(i, out) {
     const s = i < 0 ? 0 : (i >= CAP ? CAP - 1 : i | 0);
-    out.set(this._s[S_X] + this._slotX[s], 0, this._slotZ[s] - this._frontOffset[this.visible]);
+    out.set(this._s[S_X] + this._slotX[s], 0, this._slotZ[s] - this._frontOffset[this.logicalCount] + this._s[S_AZ]);
     return out;
   }
 
@@ -769,17 +905,18 @@ export class Squad {
 
   /** Contact test: the formation AABB (slot centres, front row at z = 0) inflated by r. */
   intersectsCircle(x, z, r) {
-    const V = this.visible;
-    if (V <= 0) return false;
-    const hw = this._halfWidthAt[V] + r;
-    return x >= this._s[S_X] - hw && x <= this._s[S_X] + hw && z >= -r && z <= this._depthAt[V] + r;
+    const L = this.logicalCount;
+    if (L <= 0) return false;
+    const hw = this._halfWidthAt[L] + r;
+    const az = this._s[S_AZ];
+    return x >= this._s[S_X] - hw && x <= this._s[S_X] + hw && z >= az - r && z <= az + this._depthAt[L] + r;
   }
 
   /** Formation AABB in world XZ. */
   bounds(out) {
-    const V = this.visible;
-    const hw = this._halfWidthAt[V];
-    out.minX = this._s[S_X] - hw; out.maxX = this._s[S_X] + hw; out.minZ = 0; out.maxZ = this._depthAt[V];
+    const L = this.logicalCount;
+    const hw = this._halfWidthAt[L];
+    out.minX = this._s[S_X] - hw; out.maxX = this._s[S_X] + hw; out.minZ = this._s[S_AZ]; out.maxZ = this._s[S_AZ] + this._depthAt[L];
     return out;
   }
 
@@ -795,6 +932,7 @@ export class Squad {
   // ------------------------------------------------------------------------------------------
 
   _emitCount(prev, reason) {
+    this._syncShooters();
     _evCount.count = this._count; _evCount.prev = prev; _evCount.delta = this._count - prev; _evCount.reason = reason;
     this._ctx.events.emit('squad:count', _evCount);
   }
@@ -815,7 +953,7 @@ export class Squad {
   }
 
   // ------------------------------------------------------------------------------------------
-  // Private: reconciliation (occupied slots == [0, V))
+  // Private: reconciliation (occupied slots == the drawn set)
   // ------------------------------------------------------------------------------------------
 
   _requestSettle(delay) {
@@ -826,18 +964,32 @@ export class Squad {
 
   _settle() {
     this._settlePending = false;
-    const V = this.visible;
-    const fo = this._frontOffset[V];
-    const slotRec = this._slotRec, slotX = this._slotX, slotZ = this._slotZ, rx = this._rx, rz = this._rz, rSlot = this._rSlot;
+    const L = this.logicalCount;
+    const nv = this._relocate(this._frontOffset[L], true);
 
-    // vacancies inside the formation (ascending) and displaced occupants beyond it (rim first)
+    // remaining vacancies: reserve soldiers step up from behind the rear row (hidden count, Vmax raise)
+    if (nv > 0) {
+      const rearZ = this._s[S_AZ] + this._depthAt[L] + SQUAD.rowPitch;
+      for (let j = 0; j < nv; j++) {
+        const v = _tmpVacant[j];
+        const spawnT = this._s[S_T] + (j < SQUAD.spawnAnim.maxVisible ? j * SQUAD.spawnAnim.stagger : 0);
+        if (this._spawnRecord(v, this._slotX[v], rearZ, spawnT, true) < 0) { this._requestSettle(STEP); break; }   // pool full: retry next step
+      }
+    }
+  }
+
+  /**
+   * Displaced records (rim first) walk to the nearest vacant drawn slot; with none left they dissolve rim-inward,
+   * SQUAD.dissolvePer100ms per DISSOLVE_WINDOW (or stay, without `dissolve`). Returns the vacancies left (_tmpVacant).
+   */
+  _relocate(fo, dissolve) {
+    this._syncWant();
+    const want = this._want, slotRec = this._slotRec, slotX = this._slotX, slotZ = this._slotZ, rx = this._rx, rz = this._rz, rSlot = this._rSlot;
+    fo -= this._s[S_AZ];                                          // 1.4.0: slot z − fo = local z
     let nv = 0;
-    for (let s = 0; s < V; s++) if (slotRec[s] < 0) _tmpVacant[nv++] = s;
+    for (let s = 0; s < CAP; s++) if (want[s] === 1 && slotRec[s] < 0) _tmpVacant[nv++] = s;
     let nd = 0;
-    for (let s = CAP - 1; s >= V; s--) if (slotRec[s] >= 0) _tmpDisplaced[nd++] = s;
-
-    // displaced soldiers walk to the nearest vacancy; with none left they dissolve rim-inward,
-    // SQUAD.dissolvePer100ms per DISSOLVE_WINDOW
+    for (let s = CAP - 1; s >= 0; s--) if (want[s] === 0 && slotRec[s] >= 0) _tmpDisplaced[nd++] = s;
     let dissolveK = 0;
     for (let i = 0; i < nd; i++) {
       const s = _tmpDisplaced[i];
@@ -854,39 +1006,29 @@ export class Squad {
         const v = _tmpVacant[best];
         _tmpVacant[best] = _tmpVacant[--nv];
         slotRec[s] = -1; slotRec[v] = rec; rSlot[rec] = v;
-      } else {
+      } else if (dissolve) {
         this._dissolveRecord(rec, this._s[S_T] + Math.floor(dissolveK / SQUAD.dissolvePer100ms) * DISSOLVE_WINDOW);
         dissolveK++;
       }
     }
-
-    // remaining vacancies: reserve soldiers step up from behind the rear row (hidden count, Vmax raise)
-    if (nv > 0) {
-      const rearZ = this._depthAt[V] + SQUAD.rowPitch;
-      for (let j = 0; j < nv; j++) {
-        const v = _tmpVacant[j];
-        const spawnT = this._s[S_T] + (j < SQUAD.spawnAnim.maxVisible ? j * SQUAD.spawnAnim.stagger : 0);
-        if (this._spawnRecord(v, slotX[v], rearZ, spawnT, true) < 0) { this._requestSettle(STEP); break; }   // pool full: retry next step
-      }
-    }
-    this._rebuildShooters(V);
+    return nv;
   }
 
   /**
-   * Fills every vacant slot below V with a new soldier. fromOrigin: the first spawnAnim.maxVisible
+   * Fills every vacant drawn slot with a new soldier. fromOrigin: the first spawnAnim.maxVisible
    * burst from the world origin (ox, oz) with the stagger; the rest appear instantly in place.
    * Without an origin ('start') they pop in place with the stagger.
    */
   _spawnVisible(ox, oz, fromOrigin) {
-    const V = this.visible;
-    const fo = this._frontOffset[V];
-    const slotRec = this._slotRec, slotX = this._slotX, slotZ = this._slotZ;
+    const fo = this._frontOffset[this.logicalCount] - this._s[S_AZ];   // 1.4.0: slot z − fo = local z
+    this._relocate(this._frontOffset[this.logicalCount], false);
+    const want = this._want, slotRec = this._slotRec, slotX = this._slotX, slotZ = this._slotZ;
     const rng = this._ctx.rngFx;
     const maxVis = SQUAD.spawnAnim.maxVisible, stagger = SQUAD.spawnAnim.stagger;
     const lox = ox - this._s[S_X];
     let k = 0;
-    for (let s = 0; s < V; s++) {
-      if (slotRec[s] >= 0) continue;
+    for (let s = 0; s < CAP; s++) {
+      if (want[s] === 0 || slotRec[s] >= 0) continue;
       const animated = k < maxVis;
       let lx, lz, spawnT;
       if (animated) {
@@ -904,16 +1046,53 @@ export class Squad {
       if (this._spawnRecord(s, lx, lz, spawnT, animated) < 0) { this._requestSettle(STEP); break; }
       k++;
     }
-    this._rebuildShooters(V);
   }
 
-  /** The min(V, FIRE.shooters) front-most occupied-formation slots, by z ascending then |x|. */
-  _rebuildShooters(V) {
-    const n = V < FIRE.shooters ? V : FIRE.shooters;
+  /** The min(L, FIRE.shooters) front-most logical slots, by z ascending then |x|. */
+  _syncShooters() {
+    const L = this.logicalCount;
+    if (L === this._shooterL) return;
+    this._shooterL = L;
+    const n = L < FIRE.shooters ? L : FIRE.shooters;
     const zo = this._zOrder, out = this._shooterSlots;
     let c = 0;
-    for (let i = 0; i < CAP && c < n; i++) { const s = zo[i]; if (s < V) out[c++] = s; }
+    for (let i = 0; i < CAP && c < n; i++) { const s = zo[i]; if (s < L) out[c++] = s; }
     this._shooterCount = c;
+  }
+
+  /**
+   * Drawn set for (L, V < L), A13a: the shooters, ≤ min(EDGE_MAX, 1/6 of the rest) row ends per side, the rest by the
+   * interior priority — sparser but filled, never a hollow U. Event time, no allocation.
+   */
+  _syncWant() {
+    const L = this.logicalCount, V = this.visible;
+    if (L === this._wantL && V === this._wantV) return;
+    this._wantL = L; this._wantV = V;
+    this._syncShooters();
+    const want = this._want, zo = this._zOrder, x = this._slotX, row = this._slotRow, pr = this._prio;
+    want.fill(0);
+    if (V >= L) { want.fill(1, 0, L); return; }
+    let n = this._shooterCount;
+    for (let k = 0; k < n; k++) want[this._shooterSlots[k]] = 1;
+    let nl = 0, nr = 0, r = -1e9, lo = -1, hi = -1, xl = 0, xr = 0;
+    for (let i = 0; i <= CAP; i++) {                              // zOrder: row by row, front to back
+      const s = i < CAP ? zo[i] : -1;
+      if (s >= L) continue;
+      if (s < 0 || row[s] !== r) {
+        if (lo >= 0) {
+          if (want[lo] === 0) _edgeL[nl++] = lo;
+          if (want[hi] === 0 && hi !== lo) _edgeR[nr++] = hi;
+          if (x[lo] < xl) xl = x[lo];
+          if (x[hi] > xr) xr = x[hi];
+        }
+        if (s < 0) break;
+        r = row[s]; lo = hi = s;
+      } else { if (x[s] < x[lo]) lo = s; if (x[s] > x[hi]) hi = s; }
+    }
+    let e = Math.floor((V - n) / 6);
+    if (e > EDGE_MAX) e = EDGE_MAX;
+    n += pickEnds(_edgeL, nl, x, -xl - 1e-3, -1, e, want) + pickEnds(_edgeR, nr, x, xr - 1e-3, 1, e, want);
+    for (let i = 0; i < CAP && n < V; i++) { const s = pr[i]; if (s < L && want[s] === 0) { want[s] = 1; n++; } }
   }
 
   // ------------------------------------------------------------------------------------------
@@ -960,6 +1139,7 @@ export class Squad {
     this._rState[rec] = REC_ALIVE;
     this._rSlot[rec] = slot; this._slotRec[slot] = rec;
     this._rx[rec] = lx; this._rz[rec] = lz;
+    this._rFx[rec] = lx; this._rFz[rec] = lz;                      // 1.4.0: a formation ease starts here
     this._rs[rec] = animated ? 0 : 1;
     this._rSpawnT[rec] = spawnT;
     this._rDeathT[rec] = 0;

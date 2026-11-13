@@ -15,9 +15,19 @@
 //       brute's swing period, the spitter's spit period, the crawler lunge in HINTS.crawler, the medic hint, the phase
 //       hints' intervals and the Juggernaut's damage multiplier;
 //       r7 fix round 2: HINTS['boss.stomp'] names the stored-weapon lever only with a weapon stored;
-//   (d) no text holds "undefined", "NaN", "[object" or a doubled space.
+//   (d) no text holds "undefined", "NaN", "[object" or a doubled space;
+//   (e) 1.4.0 spread merge: every key a TYPE REGION text (data.TEXT_REGIONS: hints, strings, codex sections / unlock /
+//       legacy / cards / entries / titles) or audio region (data.AUDIO_REGIONS) contributes reached its merged table
+//       unchanged — a base entry or another region defining the same key would silently win, so that is an error;
+//   (f) r8 (P1T): every kind-'event' item (PICKUPS.eventItems: the Horde run's kits) is a grantable item with a positive kit
+//       count, its entry, NEW card and pickup hint quote that count, and its unlock is the first Horde level of the 1.4.0 map
+//       where it can appear (the crate from LEVEL_TYPES.horde.debut, the KITS ×2 lane from HORDE_GEN.run.kitsLaneFrom);
+//   (g) r8 (P7): the level types' copy (TYPES_TEXT) — every type key has its STRINGS.modes name; every type of the 1.4.0 map
+//       has a briefing (tagline, three rows) and a Field Guide row 'type.<key>' in the LEVEL TYPES section, outside CODEX.unlock
+//       (ui unlocks it by play) and quoting today's numbers (HORDE's 3★ share, each type's bonus); the first-enrage lesson names
+//       the stored-weapon lever only with a weapon stored; no text of STRINGS.modes / STRINGS.types is broken.
 // Exit code 1 on any error.
-import { CODEX, STRINGS, HINTS, PICKUPS, ZOMBIES, BOSSES, WEAPONS, GEAR, TROOPS, LEVELS } from '../js/data.js';
+import { CODEX, STRINGS, HINTS, PICKUPS, ZOMBIES, BOSSES, WEAPONS, GEAR, TROOPS, LEVELS, TEXT_REGIONS, AUDIO_REGIONS, AUDIO_CUES, LEVEL_TYPES, HORDE_GEN, nextLevelOfType } from '../js/data.js';
 
 const verbose = process.argv.includes('--verbose');
 const errors = [];
@@ -108,7 +118,66 @@ for (const id of ids) { const e = E[id]; if (e) { scan(id + '.name', e.name); sc
 for (const [k, v] of Object.entries(HINTS)) { scan('HINTS.' + k, typeof v === 'function' ? v(2) : v); if (typeof v === 'function') scan('HINTS.' + k + '(0)', v(0)); }
 for (const [k, v] of Object.entries(STRINGS.boss.tagline || {})) scan('tagline.' + k, v);
 
+// (e) the TYPE REGION spread merge (identity: the merged table must hold the region's own value)
+let regionKeys = 0;
+const merged = (where, table, part) => {
+  for (const k of Object.keys(part || {})) { regionKeys++; if (!table || table[k] !== part[k]) err(`${where}.${k}: shadowed in the merged table (a base entry or another region defines it too)`); }
+};
+for (const [name, t] of Object.entries(TEXT_REGIONS || {})) {
+  const cx = t.codex || {};
+  merged(name + '.hints', HINTS, t.hints);
+  merged(name + '.strings', STRINGS, t.strings);
+  merged(name + '.codex.entries', E, cx.entries);
+  merged(name + '.codex.titles', C.sections, cx.titles);
+  merged(name + '.codex.unlock', CODEX.unlock, cx.unlock);
+  merged(name + '.codex.legacy', CODEX.legacy, cx.legacy);
+  for (const sec of cx.sections || []) { regionKeys++; if (CODEX.sections.indexOf(sec) === -1) err(`${name}.codex.sections: ${sec.id} did not reach CODEX.sections`); }
+  for (const id of cx.cards || []) { regionKeys++; if (CODEX.cards.indexOf(id) === -1) err(`${name}.codex.cards: ${id} did not reach CODEX.cards`); }
+}
+for (const [name, a] of Object.entries(AUDIO_REGIONS || {})) merged(name, AUDIO_CUES, a);
+
+// (f) the kind-'event' items (r8, P1T)
+for (const [id, it] of Object.entries(PICKUPS.eventItems || {})) {
+  if (PICKUPS.items.indexOf(id) === -1) err(`${id}: an eventItems id missing from PICKUPS.items`);
+  if (it.kind !== 'event' || !(Number.isInteger(it.kits) && it.kits > 0)) err(`${id}: needs kind 'event' and a positive integer kits (${JSON.stringify(it)})`);
+  const e = E[id];
+  if (e) { has(id, e.line, '+' + it.kits, 'its kits'); has(id + ' card', e.card, '+' + it.kits, 'its kits'); }
+  has(`HINTS['${id}']`, HINTS[id], '+' + it.kits, 'its kits');
+  if (CODEX.cards.indexOf(id) === -1) err(`${id}: no NEW card (CODEX.cards)`);
+  const from = id === HORDE_GEN.run.kitsLane ? HORDE_GEN.run.kitsLaneFrom : LEVEL_TYPES.horde.debut;
+  const want = nextLevelOfType('horde', from, { horde: true });
+  if (CODEX.unlock[id] !== want) err(`${id}: unlock ${CODEX.unlock[id]}, the first Horde level from L${from} is L${want}`);
+}
+
+// (g) the level types' copy (r8, P7)
+const TYPE_KEYS = Object.keys(LEVEL_TYPES).filter((k) => LEVEL_TYPES[k] && LEVEL_TYPES[k].base);
+const T = STRINGS.types;
+for (const k of TYPE_KEYS) if (typeof STRINGS.modes[k] !== 'string' || !STRINGS.modes[k]) err(`STRINGS.modes.${k}: missing`);
+const typeSec = CODEX.sections.find((s) => s.id === 'types');
+const nb = (t) => (typeof t === 'string' ? t.split(String.fromCharCode(0xA0)).join(' ') : t);   // the copy's no-break spaces
+if (!typeSec) err("CODEX: no 'types' section (LEVEL TYPES)");
+for (const k of ['horde', 'night']) {
+  const id = 'type.' + k;
+  if (!nextLevelOfType(k, 1, { horde: true, night: true })) err(`${k}: not in the 1.4.0 map`);
+  const b = T.brief[k];
+  if (!b || typeof b.tagline !== 'string' || !b.tagline || !Array.isArray(b.rows) || b.rows.length !== 3) err(`STRINGS.types.brief.${k}: needs a tagline and 3 rows`);
+  if (typeSec && typeSec.ids.indexOf(id) === -1) err(`${id}: not in the LEVEL TYPES section`);
+  if (CODEX.unlock[id] !== undefined) err(`${id}: in CODEX.unlock (a level type is met by playing it; ui names the next level of that type)`);
+  if (E[id]) has(id, nb(E[id].line), '+' + pct(LEVEL_TYPES[k].bonusMult - 1) + ' %', 'its bonus');
+}
+if (E['type.horde']) has('type.horde', nb(E['type.horde'].line), pct(LEVEL_TYPES.horde.starThree) + ' %', 'the 3★ share');
+if (E['type.night']) has('type.night', E['type.night'].line, T.blackout, 'BLACKOUT');
+const enrageH = HINTS['boss.enrage'];
+if (typeof enrageH !== 'function' || /STORED WEAPON/.test(enrageH(0)) || !/STORED WEAPON/.test(enrageH(1))) err("HINTS['boss.enrage']: a template naming FIRE only with a weapon stored");
+const deep = (where, v) => {
+  if (typeof v === 'function') { scan(where + '()', String(v(2, 3))); return; }
+  if (typeof v === 'string') { scan(where, v); return; }
+  if (v && typeof v === 'object') for (const k of Object.keys(v)) deep(where + '.' + k, v[k]);
+};
+deep('STRINGS.modes', STRINGS.modes);
+deep('STRINGS.types', T);
+
 if (verbose) for (const id of ids) console.log(id.padEnd(20), '|', E[id].name, '|', E[id].line, E[id].card ? '| card: ' + E[id].card : '');
-console.log(`check-codex: ${ids.length} entries in ${CODEX.sections.length} sections, ${CODEX.cards.length} cards — ${errors.length} error(s)`);
+console.log(`check-codex: ${ids.length} entries in ${CODEX.sections.length} sections, ${CODEX.cards.length} cards, ${Object.keys(TEXT_REGIONS || {}).length + Object.keys(AUDIO_REGIONS || {}).length} type regions (${regionKeys} keys merged) — ${errors.length} error(s)`);
 for (const e of errors) console.log('  ERROR ' + e);
 process.exit(errors.length > 0 ? 1 : 0);

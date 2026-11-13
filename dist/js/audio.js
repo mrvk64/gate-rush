@@ -49,6 +49,9 @@
 //     setTargetAtTime); sources whose start is still in the future (cue delayMs, layer delays, the music
 //     lookahead) get their start value rewritten. Cues flagged `noTimeScale` (fanfare, chime3, ui_*) ignore it.
 //
+// 1.4.0 hooks (ARCH §3): AUDIO_CUES[id].on (played on that event, at its x / z); 'audio:loop' { id, on, gain } (re-played
+// while playing; level start / end stop it); 'music:mode' { mode, restart, swell }.
+//
 // Coding rules (ARCH §14): no per-frame allocation in update() except the WebAudio nodes a cue
 // inherently needs (created only when a cue actually starts); every browser API guarded; no
 // console.log; randomness from ctx.rngFx; private fields `_`; init() returns this; dispose()
@@ -152,6 +155,10 @@ const VOICE_CUE = 0, VOICE_MUSIC = 1, VOICE_DRONE = 2;
 const ENV_FLOOR = 0.001;
 // Minimum oscillator frequency for exponential ramps (the ramp target must be > 0).
 const MIN_HZ = 1;
+const LOOP_MAX = 4;              // 1.4.0: 'audio:loop' cues at once (structural)
+// 1.4.0: the hold mode's low brass and its swell (slower attack)
+const BRASS = MUSIC.instruments.brass;
+const BRASS_SWELL = BRASS ? Object.freeze({ ...BRASS, attackMs: BRASS.swellMs }) : null;
 // Default layer attack when a recipe omits it (AUDIO_CUES vocabulary: "attack: ms (default 2)").
 const DEFAULT_ATTACK_MS = 2;
 // Scheduling offset for cues started "now" so the first envelope event is never in the past.
@@ -602,6 +609,10 @@ export class AudioSystem {
     this._pendingStopT = 0.5; this._pendingStopT = 0;       // boss death: the loop fades to 'none' at this context time (MUSIC.duck.bossDead)
     this._duckStuck = false;      // the boss-death duck is held (no scheduled release) until the music restarts
     this._droneVoice = null;
+    // 1.4.0: sustained loops and the pending brass swell
+    this._loops = [];
+    for (let i = 0; i < LOOP_MAX; i++) this._loops.push({ id: '', gain: 1, every: 0, next: 0 });
+    this._swellNext = false;
     this._droneGain = null;
     this._droneOsc = null;
     this._droneLfo = null;
@@ -720,6 +731,7 @@ export class AudioSystem {
   /** Coalescing windows, ladder, limiter clocks and the countdown slot (level:start). Queued cues are
    *  kept: the PLAY button's ui_tap shares the frame with level:start. */
   _resetRunState() {
+    this._stopLoops();
     if (this._keyUsed) this._keyUsed.fill(0);
     if (this._gateHits) this._gateHits.fill(0);
     this._tickSlot = -1;
@@ -1424,6 +1436,44 @@ export class AudioSystem {
     if (this._deferCount > 0) this._startDeferred(now, t0);
     this._pollTicktock();
     this._sweepVoices(now);
+    const st = this._ctx.state, live = !!st && st.is('playing'), ms = this._nowMs();
+    for (let i = 0; i < LOOP_MAX; i++) {
+      const L = this._loops[i];
+      if (L.id === '') continue;
+      if (!live) { L.next = 0; continue; }                         // silent while paused / in a menu; resumes at once
+      if (ms < L.next) continue;
+      L.next = ms + L.every;
+      resetOpts().volume = L.gain;
+      this.play(L.id, OPTS);
+    }
+  }
+
+  /** 1.4.0 'audio:loop' { id, on, gain }: update() re-plays cue id every repeatMs (else its length) while on. */
+  _onLoop(p) {
+    const id = p && typeof p.id === 'string' ? p.id : '';
+    const st = this._cueStates ? this._cueStates[id] : undefined;
+    if (st === undefined) { warnOnce('audio.loop.' + id, 'audio:loop: unknown cue ' + id); return; }
+    let L = null;
+    for (let i = 0; i < LOOP_MAX; i++) { const r = this._loops[i]; if (r.id === id || (L === null && r.id === '')) L = r; }
+    if (L === null) return;
+    if (p.on === false) { if (L.id === id) L.id = ''; return; }
+    if (L.id !== id) {
+      const c = st.recipe;
+      let ms = 0;
+      for (let i = 0; i < c.layers.length; i++) ms = Math.max(ms, (c.layers[i].delayMs || 0) + c.layers[i].ms);
+      L.id = id; L.every = c.repeatMs > 0 ? c.repeatMs : ms; L.next = 0;
+    }
+    L.gain = p.gain >= 0 ? p.gain : 1;
+  }
+
+  _stopLoops() {
+    for (let i = 0; i < LOOP_MAX; i++) this._loops[i].id = '';
+  }
+
+  /** 1.4.0: true while cue `id` loops. */
+  loopActive(id) {
+    for (let i = 0; i < LOOP_MAX; i++) if (this._loops[i].id === id) return true;
+    return false;
   }
 
   /** Builds the deferred cues whose start time is within DEFER_LEAD_S; a late frame starts them at t0 at the latest. */
@@ -2196,6 +2246,20 @@ export class AudioSystem {
       if (note > 0) this._musicNote(I.lead, midiHz(note), t, lead.gateSteps * stepDur, 1, 1, 0);
     }
 
+    // 1.4.0: low brass (hold mode): the bar chord's root and fifth BRASS.octave down, held the bar (a swell: slower, louder)
+    if (mode.brass && s === 0 && BRASS) {
+      const swell = this._swellNext;
+      this._swellNext = false;
+      const inst = swell ? BRASS_SWELL : BRASS;
+      const root = MUSIC.chords[bar][0] + BRASS.octave;
+      const nv = BRASS.voices || 1;
+      const gm = mode.brass * (swell ? BRASS.swell : 1) / nv;
+      for (let c = 0; c < 2; c++) {
+        const fq = midiHz(c === 0 ? root : root + 7);
+        for (let k = 0; k < nv; k++) this._musicNote(inst, fq, t, STEPS_PER_BAR * stepDur, 1, gm, nv > 1 ? BRASS.detuneCents * ((2 * k) / (nv - 1) - 1) : 0);
+      }
+    }
+
     // round 5: a pre-rendered chord (MUSIC.instruments.pad.prerender) is one buffer source + envelope gain instead of 3 notes × voices
     // × (oscillator, low-pass, envelope); played at the music rate, so its hold spans the bar under slow-mo like the scheduler's steps
     if (mode.pad && s === 0 && !(this._padBufs !== null && this._padChord(this._padBufs[bar], t, mode.pad))) {
@@ -2662,10 +2726,12 @@ export class AudioSystem {
     on('level:complete', () => {               // J17
       this.play('chime3', resetOpts());
       this.setMusic('none');
+      this._stopLoops();
     });
     on('level:failed', () => {                 // J18
       this.play('drone_down', resetOpts());
       this.setMusic('none');
+      this._stopLoops();
     });
     on('endless:end', () => {
       this.play('drone_down', resetOpts());
@@ -2683,9 +2749,26 @@ export class AudioSystem {
     });
     on('level:runup', () => { this.setMusic('runup'); });
     on('boss:fight', () => { this._requestMusic('boss', true); });
+    // 1.4.0
+    on('music:mode', (p) => {
+      if (!p) return;
+      if (p.swell === true) this._swellNext = true;
+      if (typeof p.mode === 'string') this._requestMusic(p.mode, p.restart === true);
+    });
     on('state:change', (p) => {
       if (MENU_STATES[p.to] === true) this._requestMusic('menu', this._wantMode !== 'menu');
     });
+
+    // ---- 1.4.0 hooks ----
+    on('audio:loop', (p) => { this._onLoop(p); });
+    for (const name of Object.keys(AUDIO_CUES)) {
+      const evs = AUDIO_CUES[name].on;
+      if (!evs) continue;
+      const list = typeof evs === 'string' ? [evs] : evs;
+      for (let i = 0; i < list.length; i++) {
+        on(list[i], (p) => { resetOpts(); this.play(name, p && typeof p.x === 'number' ? withPos(p.x, typeof p.z === 'number' ? p.z : 0) : OPTS); });
+      }
+    }
 
     // ---- settings (sound / music faders 0–100) ----
     on('settings:change', (p) => {

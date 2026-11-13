@@ -139,6 +139,18 @@ export function roundDesign(v) {
   return round10(v);
 }
 
+/**
+ * r8 shop-surplus compensation (PLAN D26): the HP multiplier a campaign wave / guard / run-up / minion table (and the hold)
+ * meets for a shop whose fire rate × damage is p, at a level whose expected shop has pExp and whose compensation exponent
+ * is exp (LEAK_MODEL.profileExpByLevel): p ≤ pExp → p^exp (1.3.0); above the expected shop the surplus is answered with
+ * its own exponent, pExp^exp·(p / pExp)^surplusExp (1: upgrades past the expected shop no longer weaken the waves).
+ * surplusExp ≤ 0 turns it off (p^exp at every shop, F12). Pure; shared by level.js, levelgen.js and the hold.
+ */
+export function shopComp(p, pExp, exp, surplusExp) {
+  if (!(surplusExp > 0) || !(p > pExp) || !(pExp > 0)) return Math.pow(p, exp);
+  return Math.pow(pExp, exp) * Math.pow(p / pExp, surplusExp);
+}
+
 /** FNV-1a 32-bit string hash → uint32 (stable across sessions). */
 export function hashString(s) {
   let h = 0x811C9DC5;
@@ -204,6 +216,48 @@ export function noise1(t) {
   const b = hashInt01(i + 1) * 2 - 1;
   const u = f * f * (3 - 2 * f);
   return a + (b - a) * u;
+}
+
+// ---------------------------------------------------------------------------
+// Hold math (1.4.0 HORDE) — shared by hold.js, holdgen.js and tools/holdsim.js;
+// the parameter objects are the data.HORDE_GEN tables
+// ---------------------------------------------------------------------------
+
+/** Unit HP scale for a live shop p (fire × damage): hz · shopComp(p, pExp, exp, surplusExp) / pExp^exp (D26). */
+export function holdHpScale(hz, p, pExp, exp, surplusExp) {
+  return hz * shopComp(p, pExp, exp, surplusExp) / Math.pow(pExp, exp);
+}
+
+/** Surge counts at the dig-in, r = C / E_hold: × min(cap, r^expAbove) above E_hold, never fewer below it (A9). */
+export function holdLiveScale(r, live) {
+  return r < 1 ? 1 : Math.min(live.cap, Math.pow(r, live.expAbove));
+}
+
+/** Unit HP at the dig-in: × max(floor, r)^exp below E_hold (A9), × r^hpExpAbove above. */
+export function holdLiveHp(r, live) {
+  return r < 1 ? Math.pow(Math.max(live.floor, r), live.exp) : Math.pow(r, live.hpExpAbove);
+}
+
+/**
+ * Hold boss HP: hpFrac·hpPerE·eBoss·factor · clamp(r^ratioExp(Above), ratioMin, ratioMax) · clamp(p^(mExp·min(1, r)), 1, mMax)
+ * · bdExp^(1 − mExp)·bd^mExp, rounded; p = fire × damage of the live shop (horde-v2's m), bd its bossDamage, bdExp the expected
+ * shop's. The squad's boss damage carries bd (the hit rule), so an expected shop meets horde-v2's TTK and a surplus nets
+ * (bd / bdExp)^(1 − mExp), as the run's shop scale.
+ */
+export function holdBossHp(eBoss, factor, r, p, bd, bdExp, b) {
+  const squad = clamp(Math.pow(r, r > 1 ? b.ratioExpAbove : b.ratioExp), b.ratioMin, b.ratioMax);
+  const shop = clamp(Math.pow(p > 0 ? p : 1, b.mExp * Math.min(1, r)), 1, b.mMax);
+  return Math.round(b.hpFrac * b.hpPerE * eBoss * factor * squad * shop * Math.pow(bdExp, 1 - b.mExp) * Math.pow(bd, b.mExp));
+}
+
+/** Climber pacing factor clamp(ref / E_hold, lo, hi). */
+export function holdClimbK(eHold, climb) {
+  return clamp(climb.ref / Math.max(1, eHold), climb.lo, climb.hi);
+}
+
+/** FOCUS FIRE: an in-lane shooter's rate factor at focus f ∈ [0, 1] (dwell / focus time), from `from` up to 1. */
+export function holdFocusRate(f, from) {
+  return from + (1 - from) * (f < 1 ? (f > 0 ? f : 0) : 1);
 }
 
 // ---------------------------------------------------------------------------

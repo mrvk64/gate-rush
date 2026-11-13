@@ -9,10 +9,11 @@
 // auto-scaler (GDD §16) and the debug overlay text (§13). Round 7 adds the render-scale rungs (software GL), the frozen
 // slow-device menus, the context-loss give-up, the pause on window blur and the diagnostics ring buffer
 // (window.__gateRushDiag(), ARCH §13).
+// 1.4.0 hooks (ARCH §3, no-ops until used): setInputMode, input.tap / action / activityM, pause(data), scalerGuard.
 //
 // This module never touches document / window / navigator at import time: every browser access
 // happens inside init() or a listener, and every optional API is guarded (§14 rule 4).
-import { clamp, isIOS, warnOnce } from './util.js';
+import { clamp, lerpExp, isIOS, warnOnce } from './util.js';
 import { WORLD, SQUAD, QUALITY_TIERS, MUSIC, JUICE, STRINGS } from './data.js';
 
 // ---------------------------------------------------------------------------------------------
@@ -74,6 +75,9 @@ const FORM_CONTROL_SELECTOR = 'input, select, textarea, button, [contenteditable
 const TEXT_ENTRY_SELECTOR = 'input:not([type]), input[type="text"], input[type="search"], input[type="number"], input[type="email"], input[type="password"], input[type="tel"], input[type="url"], textarea, select, [contenteditable]:not([contenteditable="false"])';
 // standard gamepad mapping: button 9 = Start
 const GAMEPAD_START_BUTTON = 9;
+const GAMEPAD_X_BUTTON = 2;      // 1.4.0: X → input.action 'repair'
+const AIM = SQUAD.aim;           // 1.4.0: setInputMode('aim') defaults
+const TAP_SLOTS = 4;             // 1.4.0: pointers the tap classifier tracks at once (structural)
 
 // Back guard (round 6, ARCH §6.2 "Back guard"): the history.state of the one entry engine keeps above the page's own
 // while the player is anywhere but the title, so the Android back gesture / button pauses (or steps back a screen)
@@ -418,7 +422,18 @@ export class Engine {
     this._gamepadOk = false;
     this._gamepadSeen = false;
     this._gpStartDown = false;
+    this._gpXDown = false;
     this._muted = false;
+
+    // 1.4.0: aim mode + parameters (k × getSteerK()), tap slots (pointer id; x, y, ms, max distance²), activity sample
+    this._aiming = false;
+    this._aim = { range: AIM.range, k: AIM.k / STEER.k, follow: AIM.follow, maxSpeed: AIM.maxSpeed, keySpeed: AIM.keySpeed, dragTop: AIM.dragTop };
+    this._tapId = new Int32Array(TAP_SLOTS).fill(-1);
+    this._tap = new Float64Array(TAP_SLOTS * 4);
+    this._actX = 0.5; this._actX = 0;
+    /** 1.4.0: the auto-scaler guard a hold writes — exemptMs leaves each frame's raise test, dropOk false holds every drop. */
+    this.scalerGuard = { exemptMs: 0.5, dropOk: true };
+    this.scalerGuard.exemptMs = 0;
 
     // settings cache
     this._sensitivity = 1;
@@ -559,8 +574,12 @@ export class Engine {
     time.elapsed = 0; time.levelTime = 0; time.slowmoLeft = 0; time.theatre = t0;
     ctx.time = time;
     ctx.state = new StateMachine(ctx);
-    const input = { steerDx: 0.5, targetX: 0.5, pointerDown: false, keyLeft: false, keyRight: false, gamepadX: 0.5, hasSteered: false, locked: false };
+    // 1.4.0: aim mode lane (aimTargetX → aimX), activityM, action { seq, name 'snap' | 'repair', arg 0–3 / −1 = the weakest },
+    // tap { seq, x, y (client px), t (ms) }; consumers watch seq
+    const input = { steerDx: 0.5, targetX: 0.5, pointerDown: false, keyLeft: false, keyRight: false, gamepadX: 0.5, hasSteered: false, locked: false,
+      aimTargetX: 0.5, aimX: 0.5, aiming: false, activityM: 0.5, action: { seq: 0, name: '', arg: 0 }, tap: { seq: 0, x: 0.5, y: 0.5, t: 0.5 } };
     input.steerDx = 0; input.targetX = 0; input.gamepadX = 0;
+    input.aimTargetX = 0; input.aimX = 0; input.activityM = 0; input.tap.x = 0; input.tap.y = 0; input.tap.t = 0;
     ctx.input = input;
     const debugOn = !!(ctx.config && ctx.config.debug);
     // Every field other modules write is declared here (round-3 polish, ARCH §14 rule 11): weapons writes shotsPerSec /
@@ -938,7 +957,10 @@ export class Engine {
     // r7 fix: a drag steers only while playing (beginFrame drops steerDx in every other state). Capturing a press on a
     // menu retargeted its click to #app, outside ui's #ui listener — a tap on the results panel never skipped the count-up
     if (!ctx.state.is('playing')) return;
+    this._tapDown(e);                                              // 1.4.0: any pointer here may be a tap
     if (this._pointerId !== -1) return;                            // first pointer only
+    const rs = ctx.render && ctx.render.size;                      // 1.4.0: an aim drag starts below dragTop of the height
+    if (this._aiming && rs && e.clientY < this._aim.dragTop * rs.h) return;
     this._pointerId = e.pointerId;
     this._lastX = e.clientX;
     this._gestureAbs = 0;
@@ -951,6 +973,7 @@ export class Engine {
   }
 
   _pointerMove(e) {
+    this._tapMove(e);
     if (e.pointerId !== this._pointerId) return;
     if (e.isTrusted) this.lastInputMs = nowMs();   // r7 final fix: a held steering drag is input too (lessons, inputIdleS)
     let list = null;
@@ -977,8 +1000,44 @@ export class Engine {
   }
 
   _pointerUp(e) {
+    this._tapUp(e);
     if (e.pointerId !== this._pointerId) return;
     this._releasePointer();
+  }
+
+  // 1.4.0 tap classifier: a press that passed _pointerDown takes a slot; released (not cancelled) within STEER.tapMaxMs and
+  // never STEER.tapMaxPx from its press point, it bumps input.tap. A second finger is tracked here only. No allocation.
+  _tapDown(e) {
+    const ids = this._tapId, t = this._tap;
+    let k = -1;
+    for (let i = TAP_SLOTS - 1; i >= 0; i--) { if (ids[i] === e.pointerId) ids[i] = -1; if (ids[i] === -1) k = i; }
+    if (k < 0) return;
+    ids[k] = e.pointerId; t[k * 4] = e.clientX; t[k * 4 + 1] = e.clientY; t[k * 4 + 2] = nowMs(); t[k * 4 + 3] = 0;
+  }
+
+  /** Slot of pointer e (its max distance² updated), or −1. */
+  _tapMove(e) {
+    const i = this._tapId.indexOf(e.pointerId), t = this._tap;
+    if (i < 0) return -1;
+    const dx = e.clientX - t[i * 4], dy = e.clientY - t[i * 4 + 1];
+    if (dx * dx + dy * dy > t[i * 4 + 3]) t[i * 4 + 3] = dx * dx + dy * dy;
+    return i;
+  }
+
+  _tapUp(e) {
+    const i = this._tapMove(e), t = this._tap, now = nowMs();
+    if (i < 0) return;
+    this._tapId[i] = -1;
+    if (e.type === 'pointercancel' || !this._ctx.state.is('playing') || t[i * 4 + 3] >= STEER.tapMaxPx * STEER.tapMaxPx || now - t[i * 4 + 2] >= STEER.tapMaxMs) return;
+    const tap = this._ctx.input.tap;
+    tap.seq++; tap.x = e.clientX; tap.y = e.clientY; tap.t = now;
+  }
+
+  /** 1.4.0: input.action ← an action key (1–4 'snap'; Shift+1–4, R, gamepad X 'repair') while playing. */
+  _action(name, arg) {
+    if (!this._ctx.state.is('playing')) return;
+    const a = this._ctx.input.action;
+    a.seq++; a.name = name; a.arg = arg;
   }
 
   _releasePointer() {
@@ -1037,6 +1096,12 @@ export class Engine {
       case 'KeyM':
         if (!e.repeat && !onTextEntry) this._toggleMute();
         break;
+      case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4':   // 1.4.0 action keys
+        if (!onControl && !e.repeat) this._action(e.shiftKey ? 'repair' : 'snap', code.charCodeAt(5) - 49);
+        break;
+      case 'KeyR':
+        if (!onControl && !e.repeat) this._action('repair', -1);
+        break;
       default:
         break;
     }
@@ -1086,10 +1151,13 @@ export class Engine {
         if (x !== 0 || startDown) this._userInput = true;   // r7 blur pause: the player is here
         if (startDown && !this._gpStartDown) this._togglePause();
         this._gpStartDown = startDown;
+        const xDown = !!(buttons && buttons.length > GAMEPAD_X_BUTTON && buttons[GAMEPAD_X_BUTTON] && buttons[GAMEPAD_X_BUTTON].pressed);
+        if (xDown && !this._gpXDown) this._action('repair', -1);
+        this._gpXDown = xDown;
         found = true;
         break;
       }
-      if (!found) { input.gamepadX = 0; this._gpStartDown = false; }
+      if (!found) { input.gamepadX = 0; this._gpStartDown = false; this._gpXDown = false; }
     } catch (_) {
       this._gamepadOk = false;
       input.gamepadX = 0;
@@ -1102,6 +1170,7 @@ export class Engine {
     input.keyRight = false;
     input.gamepadX = 0;
     input.steerDx = 0;
+    this._tapId.fill(-1);
     this._kbRelease();
     this._releasePointer();
   }
@@ -1112,7 +1181,7 @@ export class Engine {
    * with the target still KB_LEAD (0.86 m) ahead: the squad slid ≈ 0.9 m by itself after the resume.
    */
   _kbRelease() {
-    if (this._kbDir !== 0) {
+    if (this._kbDir !== 0 && !this._aiming) {                    // 1.4.0: in aim mode keys move the lane, not targetX
       const w = this._ctx.world;
       if (w) this._ctx.input.targetX = w.squadX;
     }
@@ -1700,11 +1769,13 @@ export class Engine {
       const alpha = time.alpha;
       const squad = ctx.squad; if (squad) squad.render(alpha);
       const zombies = ctx.zombies; if (zombies) zombies.render(alpha);
+      const crowd = ctx.crowd; if (crowd) crowd.render(alpha);
       const boss = ctx.boss; if (boss) boss.render(alpha);
       const gates = ctx.gates; if (gates) gates.render(alpha);
       const pickups = ctx.pickups; if (pickups) pickups.render(alpha);
       const weapons = ctx.weapons; if (weapons) weapons.render(alpha);
       const troops = ctx.troops; if (troops) troops.render(alpha);
+      const hold = ctx.hold; if (hold) hold.render(alpha);
       // E — camera, environment scroll, lights, uTime
       const render = ctx.render;
       if (render) render.update(time.dt);
@@ -1759,14 +1830,26 @@ export class Engine {
 
   _stepAll(dt) {
     const ctx = this._ctx;
+    // 1.4.0: the aim lane follows its target; input.activityM sums the active target's travel per fixed step
+    const input = ctx.input;
+    if (this._aiming) {
+      const a = this._aim, x = input.aimX, m = a.maxSpeed * dt;
+      const d = lerpExp(x, input.aimTargetX, a.follow, dt) - x;
+      input.aimX = x + (d > m ? m : (d < -m ? -m : d));
+    }
+    const ax = this._aiming ? input.aimTargetX : input.targetX;
+    const ad = ax - this._actX;
+    if (ad !== 0) { input.activityM += ad < 0 ? -ad : ad; this._actX = ax; }
     const level = ctx.level; if (level) level.step(dt);
     const squad = ctx.squad; if (squad) squad.step(dt);
     const troops = ctx.troops; if (troops) troops.step(dt);
     const weapons = ctx.weapons; if (weapons) weapons.step(dt);
     const zombies = ctx.zombies; if (zombies) zombies.step(dt);
+    const crowd = ctx.crowd; if (crowd) crowd.step(dt);
     const boss = ctx.boss; if (boss) boss.step(dt);
     const gates = ctx.gates; if (gates) gates.step(dt);
     const pickups = ctx.pickups; if (pickups) pickups.step(dt);
+    const hold = ctx.hold; if (hold) hold.step(dt);
   }
 
   /**
@@ -1838,17 +1921,24 @@ export class Engine {
       const L = input.keyLeft || (this._kbTap & 1) !== 0;
       const R = input.keyRight || (this._kbTap & 2) !== 0;
       const dir = L && R ? this._kbLastDir : (R ? 1 : (L ? -1 : 0));
-      let tx = input.targetX;
-      if (dir !== this._kbDir) {
-        const sx = ctx.world ? ctx.world.squadX : tx;
-        if (dir > 0) { if (tx < sx + KB_LEAD) tx = sx + KB_LEAD; }
-        else if (dir < 0) { if (tx > sx - KB_LEAD) tx = sx - KB_LEAD; }
-        else tx = sx;
+      if (this._aiming) {
+        // 1.4.0 aim mode: drag, keys and stick move the lane target; targetX (the squad) stays
+        const a = this._aim, av = dir * a.keySpeed + input.gamepadX * STEER.gamepadSpeed;
+        input.aimTargetX = clamp(input.aimTargetX + input.steerDx * this.getSteerK() * a.k + av * unscaled, -a.range, a.range);
         this._kbDir = dir;
+      } else {
+        let tx = input.targetX;
+        if (dir !== this._kbDir) {
+          const sx = ctx.world ? ctx.world.squadX : tx;
+          if (dir > 0) { if (tx < sx + KB_LEAD) tx = sx + KB_LEAD; }
+          else if (dir < 0) { if (tx > sx - KB_LEAD) tx = sx - KB_LEAD; }
+          else tx = sx;
+          this._kbDir = dir;
+        }
+        if (dir !== 0 || input.gamepadX !== 0) input.hasSteered = true;   // r7: keys and the stick dismiss the steer hint too
+        const vel = dir * STEER.keyboardSpeed + input.gamepadX * STEER.gamepadSpeed;
+        input.targetX = clamp(tx + input.steerDx * this.getSteerK() + vel * unscaled, -STEER_RANGE, STEER_RANGE);
       }
-      if (dir !== 0 || input.gamepadX !== 0) input.hasSteered = true;   // r7: keys and the stick dismiss the steer hint too
-      const vel = dir * STEER.keyboardSpeed + input.gamepadX * STEER.gamepadSpeed;
-      input.targetX = clamp(tx + input.steerDx * this.getSteerK() + vel * unscaled, -STEER_RANGE, STEER_RANGE);
     } else {
       this._kbRelease();   // r7 fix: any other way out of a held key (a state change, the lock) stops at the squad too
     }
@@ -2003,10 +2093,11 @@ export class Engine {
     } else {
       this._winCount++;
     }
+    const js = jsMs - this.scalerGuard.exemptMs;   // 1.4.0 (0 unless a hold sets it)
     this._winInt[i] = intervalMs;
-    this._winJs[i] = jsMs;
+    this._winJs[i] = js;
     this._sumInt += intervalMs;
-    this._sumJs += jsMs;
+    this._sumJs += js;
     this._winIdx = i + 1 === W ? 0 : i + 1;
     // r7 (perf-render:3b): a time-based rolling window — the last windowSec of frames, at least windowMin, at most W
     // (60 frames: the same window as before at 60 fps) — so a 5 fps device decides in ~2 s instead of 12
@@ -2045,7 +2136,7 @@ export class Engine {
     if (idx === 0 && q.software && this._sampleRenderScale(now, meanInt, rf)) return;
     if (q.renderScale < 1) return;
 
-    const slow = this._slowSince >= 0 && now - this._slowSince >= SCALER.dropAfter * 1000 && idx > 0;
+    const slow = this._slowSince >= 0 && now - this._slowSince >= SCALER.dropAfter * 1000 && idx > 0 && this.scalerGuard.dropOk;
     // r7 (perf-render:3c): an emergency drop (under ≈ 20 fps at a 60 Hz target) waits emergencyHysteresis, not 15 s
     const hyst = slow && meanInt > SCALER.emergencyFactor * rf ? SCALER.emergencyHysteresis : SCALER.hysteresis;
     if (now - this._lastChangeAt < hyst * 1000) return;
@@ -2079,7 +2170,7 @@ export class Engine {
     const cur = q.renderScale > 0 ? q.renderScale : 1;
     const k = rungIndex(cur);
     if (now - this._rsChangedAt < RS.hysteresis * 1000) return false;
-    if (this._slowSince >= 0 && now - this._slowSince >= RS.dropAfter * 1000 && k < L.length - 1) {
+    if (this._slowSince >= 0 && now - this._slowSince >= RS.dropAfter * 1000 && k < L.length - 1 && this.scalerGuard.dropOk) {
       if (this._rsDrops[k] < 255) this._rsDrops[k]++;
       this._setRenderScale(L[k + 1], 'auto', meanInt);
       return true;
@@ -2348,14 +2439,15 @@ export class Engine {
     }
   }
 
-  /** playing → paused; emits `pause`; ducks music; arms the paused redraw gate. */
-  pause() {
+  /** playing → paused; emits `pause`; ducks music; arms the paused redraw gate. 1.4.0: `data` rides state:change and is the
+   *  `pause` payload (ui: { brief }). */
+  pause(data) {
     const ctx = this._ctx;
     if (!ctx.state.is('playing')) return;
     this._clearTransientInput();
     this._pauseEma = this._ivEma;   // r7 (perf-render:9): the paused redraw gate follows the frame time the run held
     this._diag('pause');
-    ctx.state.set('paused');
+    ctx.state.set('paused', data);
     const audio = ctx.audio;
     if (audio && typeof audio.duck === 'function') {
       try { audio.duck(MUSIC.duck.pause, 0); } catch (_) { /* ignore */ }
@@ -2363,7 +2455,7 @@ export class Engine {
     this._lastPausedDraw = 0;
     this.requestRedraw();
     this.measureRefresh();   // paused frames are draw-free on Med / Low: a clean refresh sample window
-    if (ctx.events) ctx.events.emit('pause', _emptyPayload);
+    if (ctx.events) ctx.events.emit('pause', data != null ? data : _emptyPayload);
   }
 
   /** paused → playing; emits `resume`; restores the duck and the continuous redraw. */
@@ -2449,14 +2541,43 @@ export class Engine {
     if (locked) this._kbRelease();   // r7 fix: a key held into the boss intro stops at the squad (no slide under the lock)
   }
 
-  /** targetX = 0, steerDx = 0 (LevelRunner.start); hasSteered is left untouched. */
+  /** targetX = 0, steerDx = 0 (LevelRunner.start); hasSteered is left untouched. 1.4.0: back to 'steer' with the lane at 0,
+   *  scalerGuard back to its defaults. */
   resetSteering() {
     const input = this._ctx.input;
     input.targetX = 0;
     input.steerDx = 0;
     this._kbDir = 0;
     this._kbTap = 0;
+    this._aiming = input.aiming = false;
+    input.aimTargetX = input.aimX = this._actX = 0;
+    this.scalerGuard.exemptMs = 0; this.scalerGuard.dropOk = true;
   }
+
+  /**
+   * 1.4.0 (ARCH §3): 'steer' — drag, keys and stick move input.targetX (the squad); 'aim' — they move input.aimTargetX within
+   * ±range (never re-centred; bots may write it) and input.aimX follows it on the fixed step (rate follow, ≤ maxSpeed m/s).
+   * opts { range, k, follow, maxSpeed, keySpeed, dragTop, x (the lane's start) } override SQUAD.aim.
+   */
+  setInputMode(mode, opts) {
+    const input = this._ctx.input;
+    const aim = mode === 'aim';
+    if (mode !== 'steer' && !aim) { warnOnce('engine.inputMode.' + mode, 'setInputMode: unknown mode ' + mode); return; }
+    this._kbRelease();
+    input.steerDx = 0;
+    this._aiming = input.aiming = aim;
+    if (aim) {
+      const o = opts || AIM, a = this._aim;
+      a.range = o.range > 0 ? o.range : AIM.range; a.k = (o.k > 0 ? o.k : AIM.k) / STEER.k; a.follow = o.follow > 0 ? o.follow : AIM.follow;
+      a.maxSpeed = o.maxSpeed > 0 ? o.maxSpeed : AIM.maxSpeed; a.keySpeed = o.keySpeed > 0 ? o.keySpeed : AIM.keySpeed;
+      a.dragTop = o.dragTop >= 0 ? o.dragTop : AIM.dragTop;
+      input.aimTargetX = input.aimX = clamp(Number.isFinite(o.x) ? o.x : input.aimTargetX, -a.range, a.range);
+    }
+    this._actX = aim ? input.aimTargetX : input.targetX;   // a mode switch is no travel
+  }
+
+  /** 1.4.0: 'aim' | 'steer'. */
+  get inputMode() { return this._aiming ? 'aim' : 'steer'; }
 
   /**
    * r7 (perf-render:0): the sustained frame time (ms) — the EMA of the rAF intervals of frames that drew the scene

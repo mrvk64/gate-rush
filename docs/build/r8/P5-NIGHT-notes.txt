@@ -1,0 +1,62 @@
+P5 NIGHT: documentation draft for P10 (fold into ARCHITECTURE, README, GDD)
+==========================================================================
+
+MODULE (ARCHITECTURE)
+js/night.js is owned and imported only by render.js. render.night is a NightSystem.
+- Program variants: applyVariant(material, v) wraps a MeshStandardMaterial's onBeforeCompile and sets cache key '<day key>|grN' and
+  defines GR_NIGHT (+ _LITE, + _MIN). v = 0 gives the day's source and key back, so day programs keep both. No global chunk splice.
+  three keeps ONE uniforms object per material, the newest program's (WebGLRenderer.getProgram), and every program of the material draws with it. So from its first
+  applyVariant a material keeps a day wrapper: its own onBeforeCompile + bindNight, the key pinned to the original. Without it a day program made after a night one (a tier
+  change compiles both, a lost context rebuilds them in any order) took grNight away from the night program: no light pool, nothing updating. Rule for any new per-variant
+  uniform: bind it in bindNight, never in the splice alone. Harness rows: night/unilost.v2.mjs, the uniform rows of night/paths.v2.mjs (night/uniprobe.mjs).
+- Variants: High FULL (1), Medium LITE (2), Low and software GL MIN (3). NIGHT.variant in data.js is the one place to step a tier down
+  (D15 release gate).
+- Light rig: one uniform array grNight (NIGHT_UNIFORM, 20 vec4, by reference). Layout in the night.js header.
+- Eye sprites: one non-instanced draw, pair data in a 512 x 1 RGBA32F texture, corner and pair from gl_VertexID. Written each rendered
+  frame from zombies.forEachAlive with the drawn pose (position + velocity x alpha, yaw, lean), so a pair stays on its head.
+- Readiness API on render: programsReady(v), variantForLevel(night), preparePrograms(v, onProgress, idle), setNight(on, seconds),
+  lastPrep. A prepare ends with two empty frames: the GPU drains the full-viewport warm there, not on the first frame of play. Ready keys are '<committed tier program key>|<variant>'. level.prepareFor awaits preparePrograms on every way in. Context
+  loss clears the set; the restore warm-up re-marks the variant on screen; a tier change compiles the target variant before its commit, and at night the new tier's day programs too, so the way out compiles nothing on the title. The keys read ready only
+  when that compile resolved (the night key and key|0): the 3 s commit fallback does not mark them (night/tierready.v2.mjs).
+- Idle prefetch: on 'complete' (NEXT), 'title' and 'levels' (frontier, last level) night.js waits NIGHT.prefetchMs and prepares the
+  variant at the thinner TIER_COMPILE limits, so the spinner is rarely seen. A tap on that night level before it finishes shares the same run
+  (behind the spinner). Any other start cancels it: render.setNight marks the run dead (a real prepare of another key does too), it stops
+  between chunks, its key stays unready, and the next prepare finishes it. The same goes for a REAL prepare the player abandons: the menu buttons stay live while
+  .starting spins, so a tap on a night tile or NEXT, then on a day tile or REPLAY, starts a ready day level at once (requestStart cancels the night request first, so no one waits
+  on the dead run). No compile, warm draw or variant flip of any prepare reaches play. The work already sent to the GPU when the run dies still drains there, so the first frame after
+  such a tap costs 15-42 ms against 9-15 ms (hardware Medium, 28 raced rows); a verifier run saw one 216.9 ms frame that never recurred. Harness rows: night/race.v2.mjs (idle runs), night/race2.v2.mjs (abandoned real prepares).
+- environment.js: NIGHT_DISTRICTS records resolve by identity; a day to night switch of one district re-lights the ring instead of
+  re-laying it. env.blackout(seconds): the street lamps start lit and die with a time-hash flicker.
+- zombies.forEachAlive: fn(id, type, x, z, hp, yaw, vx, vz, pitch) (the last three added by P5 for the eye pose).
+- Events: night:on {on, variant, blackout} at every night start (RETRY and a night to night tile too) and once on the way out, night:click at
+  every night start (the nightClick cue; audio cues have no payload filter, so the click needs its own event), night:flare {x, z, seconds}, night:groan / night:screech / night:roar {x, z}.
+  'audio:loop' nightBed while a night run plays.
+- Debug and bench only: night.forced, night.debugPairs, night.flags.eyes.
+
+DETERMINISM
+Night draws no random stream: the flicker and the groan pick are hashes of time. A night run record equals the day record except the
+coin fields the 1.10 night bonus changes (end.coins, coinsKept, breakdown, run.coins, run.breakdown, run.score). Lessons fire only with
+trusted input inside JUICE.ui.hintIdleS, so a hands-off run records the same hints by day and by night.
+
+DATA (data.js NIGHT regions)
+NIGHT (vision, bright, flare, light, muzzle, gates, beams, eyes, lowExposure, blackout, sounds, eyesLessonM, prefetchMs, district),
+NIGHT_DISTRICTS (derived from DISTRICTS at load), NIGHT_TEXT (lessons night.eyes, night.flare, night.flareLate; Field Guide NIGHT section),
+NIGHT_AUDIO (nightClick, nightBed, nightGroan, nightScreech, nightRoar, nightFlare).
+
+NOTE ON THE FLARE LESSON
+The plan's lesson text is 'FLARE - LIGHTS THE ROAD FOR 8 S'. Flares burn 6 s from L40, so a player whose first flare comes at L40 or later
+gets 'night.flareLate' with the true 6 S. A player who saw the 8 S lesson earlier also sees the 6 S one once at L40.
+
+PLAYER TEXT (GDD)
+A night level is the same level as by day: same gates, waves, boss and stars. Only the light changes. Your flashlights reach 16 m with a few
+soldiers and up to 30 m with 100 soldiers or more (the reach cap falls slowly past L30, to 26 m). Eyes glow far beyond the light: yellow
+walkers and crawlers, red runners, orange brutes, green spitters. Eyes dim with distance, except runners, which stay bright. A
+crate also fires a flare at night: +10 m of light for 8 s (6 s from L40).
+
+ADDED DURING THE BUILD (differs from the plan text)
+- NIGHT.eyes.trueFade [22, 32]: the modelled eyes go out between 22 and 32 m from the camera, at night only. Past that range the sprite pair is
+  fully on, and the true eyes (0.12 m apart) only filled the gap between the two dots: on High one sub-pixel phase merged the pair at 60 m.
+- Flares: every crate launches one, not only 'coins' crates. The generator places no coin crates (0 of 338 on L2-60 x 3 seeds).
+- Eye texture: one texel per pair (512 x 1), not two (1024 x 1). Yaw and lean are applied on the CPU when the pair is packed.
+- render.preparePrograms takes a third argument, idle.
+- Event night:click (fix round 1): the plan lists night:on and night:flare only.

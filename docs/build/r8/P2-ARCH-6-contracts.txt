@@ -1,0 +1,132 @@
+ARCHITECTURE.md §6 "Module contracts" — 1.4.0 hook additions by P2. Each hook is generic; with nothing registered every RUN
+path is the 1.3.0 one (proven by the HOOK NO-OP digest: L1-60 × 3 seeds × {passive, idle, strongj} at High and Low).
+=========================================================================================================================
+
+§6.2 engine.js
+- setInputMode('steer' | 'aim', opts?) — opts { range, k, follow, maxSpeed, keySpeed, dragTop, x } override SQUAD.aim (range
+  3.4 m, k 6.8 m per steer.kFraction·W_eff px, follow 18 /s, maxSpeed 14 m/s, keySpeed 12 m/s, dragTop 0.35; x = the lane's
+  start). 'aim': the drag / keys / stick move input.aimTargetX, input.aimX follows on the fixed step, targetX stays; a drag
+  starts only below dragTop of the screen height (horde CONTROLS: the lower 65 %), while a tap counts anywhere.
+  resetSteering() (every level start and quitToTitle) returns to 'steer' with the lane at 0 and scalerGuard to 0 / true.
+  Getter inputMode.
+- Tap classifier: every non-UI pointer while playing (a second finger included) → input.tap { seq, x, y, t } when released
+  within SQUAD.steer.tapMaxMs and never SQUAD.steer.tapMaxPx from its press; pointercancel never taps. 4 pointer slots.
+- Action keys: Digit1-4 → input.action 'snap' 0-3, Shift+Digit1-4 → 'repair' 0-3, R → 'repair' −1, gamepad X (button 2) →
+  'repair' −1; only while playing, not from form controls; input.action.seq counts them.
+- input.activityM: see §3 (sampled in _stepAll).
+- pause(data): data rides state:change and is the `pause` payload.
+- scalerGuard { exemptMs, dropOk }: each frame's JS minus exemptMs feeds the raise test; dropOk false holds every drop (tier
+  and the software-GL render-scale rungs). Defaults 0 / true, restored by resetSteering() at every level start, so a hold that
+  ends (won, lost, quit, restarted) can never leave the next RUN level unable to drop a tier. Tier freezes stay
+  freezeQuality(seconds).
+
+§6.3 render.js
+- setRig('run' | a RENDER.rigs key, s?) — blends the camera to the rig over s seconds of unscaled time (default the rig's
+  tween 1.5; 0 snaps), eased inOutCubic: portrait pose / landscape pose by the preset blend; portrait keeps the preset's
+  horizontal FOV, landscape uses rig.landscape.hFovDeg with the vertical FOV clamped to fovClamp; the count dolly and the
+  framing constraint apply to the follow preset only. The fog moves to rig.fog (far × params.fogFar / WORLD.fog.far: 90 on
+  Low / software GL) through env.setFog over s; 'run' restores the current district's fog. level:start snaps the camera back
+  to 'run' (the district reset sets the fog); idleCamera(true) (quitToTitle) sets 'run' too, the rig easing out over its
+  tween under the title blend (quitToTitle has already applied the district fog). Getter rig. RENDER.rigs.hold: portrait
+  camera (0, 10.8, 10.3) looking down z to −11, its pitch derived from wallZ / wallFrac so the ground at z −3.5 (the centre
+  line of the 0.8 m deep barricade behind its −3.9 face) projects at 71.5 % of the height on EVERY portrait aspect (the
+  preset's FOV differs: 55° at 390×844, 46.3° at 360×640, so one fixed pose cannot hold 69-73 % on both); landscape (0, 9.7,
+  15.9) → (0, 0, −12), hFov 50°, vFov 30-50°; fog 58 / 100. Projected (three r170, build/P2/checks/rig.txt): wall 71.5 % and
+  face line 69.8-70.1 % at 390×844 / 360×640 / 320×568; 2 m sections 94.8 / 86.8 / 77.2 px; landscape wall 73.9-74.2 %,
+  sections 67.7 px (844×390), 58.3 (585×340), 102.1 (1024×594).
+  HOLD SCREEN measurement convention (P6 / P7 screenshot rows): measure the wall line AND the 2 m section widths on the
+  ground centre line z −3.5 (horde-v2's convention; it reproduces horde-v2's own 92.8 / 85.7 / 76.1 px with the spec pose).
+  On the face line z −3.9 the same sections read 75.6 px at 320×568 and 57.4 px at 585×340, under the 76 / 57 px limits,
+  although nothing changed: the margins are thin (z −3.5: 77.2 vs 76 px, 58.3 vs 57 px), so a row that measures on another
+  line reports a false fail. The spec's own portrait pose (horde §2) puts the wall at 68.78 % at 390×844, which is why the
+  rig derives its pitch from wallFrac instead.
+- addWarmable(obj) → Promise: obj (under the scene, hidden or not) gets every program of the committed tier compiled
+  (_compileChunked restricted to obj, a few per frame) and is drawn once out of sight; it is listed in render.warmables.
+  Its out-of-sight draw runs on its own: concurrent addWarmable calls (e.g. Promise.all(crowd.prepare, hold.prepare)) and a
+  tier-change / restore warm-up never cancel one another.
+  Being in the scene it is part of every later tier change (_prepareTier) and context-restore warm-up. removeWarmable(obj)
+  unlists it. Crowd / hold meshes join the scene at their prepare() and are warmed here, so none compile at boot.
+- lightsVersion: increments whenever a light colour / intensity / direction changes (district apply / fade frames, title
+  swing); consumers with copied light uniforms (crowd) refresh when it changes.
+- Icon atlas 512 × 128: RENDER.icons.order in the top cell row, RENDER.icons.row2 (kit, kit2, airstrike, flare, supply) in
+  the third (cell = ICON_COUNT + col; the rows between stay transparent against mip bleed); ofItem 'item.kit' / 'item.kit2'.
+  iconUV / iconDataURL accept either row; the atlas recipe paints both, so a GPU loss restores row 2 too.
+
+§6.4 models.js
+- export tagPart(geo, partId, pivot, hex, emissive?, tag?) and mergeTagged(geos, label) (merges tagPart-ed parts, disposes them).
+
+§6.5 squad.js
+- setFormation('run' | 'wall', opts?) — 'wall': SQUAD.formations.wall (21 columns 0.34 m apart over x ±3.4, rows 0.34 m
+  behind a front row at world z −2.3, filled row by row centre out; the first 40 slots, the front row and the centre of the
+  second, are the shooters); the rows at z ≤ stepBackZ (−1.0) stand opts.stepY / 0.45 m up on the firing step, so their
+  muzzles are at 1.40 m. Gameplay (logicalCount, halfWidth, depth, centerZ, shooterPosition, slotWorld, intersectsCircle,
+  bounds, the D5 drawn set) reads the wall table at once; records are re-anchored about x 0 (squadX → 0) and ease to their new
+  slots over opts.easeS / 1.5 s (smoothstep), the step height with them (the instance matrices draw the step rows at that
+  height). The wall ignores input.targetX and the lane lock. reset() returns to 'run'. Getter formation. In 'wall' the count
+  label sits at SQUAD.formations.wall.label (0, 0.4, 0): over the rear rows, below the barricade and clear of the screen's
+  bottom edge (84.7 % of the height at 390×844, 86.8 % at 844×390). removeSoldiers(n, reason, x, z) defaults z to the front
+  row (the wall's z −2.3), so a hold that passes no position loses front-row soldiers first.
+
+§6.6 troops.js
+- setPlacement(provider | null) — provider.place(key, out { x, y, z, yaw }) → true moves that troop's slot (out arrives
+  holding the formation slot; yaw applies while the troop is not aiming). reset() (every level start, RESTART, QUIT) clears
+  it, so a hold sets it at its dig-in and never leaks it into the next RUN level.
+- The default slots are RUN slots: the sniper, drone and medic follow the formation (centerZ / slotWorld), but the flamer
+  (z = ANIM.flamerFrontOffset = −SQUAD.rowPitch, −0.294) and the APC (z = −(apc.ahead + apc.length / 2) = −5.2) are
+  absolute, anchored to the RUN front row at z 0. In 'wall' (front row z −2.3) the flamer would stand inside the rear ranks
+  and the APC would straddle the barricade (−3.5 … −6.9), so the hold's placement provider MUST place all five (horde §8:
+  sniper and drone as the hold needs, flamer at the wall centre ('4 m' in horde §8), medic unchanged, APC behind the weakest
+  section); return false only for a troop whose default slot is wanted.
+- With no zombie target, the sniper (highestHp, applyHit with pierce 1; the boss keeps the shot when its HP ≥ the unit's),
+  the flamer (nearest + damageInCone) and the drone (nearestOfType('runner') then nearest; its bullets hit providers through
+  weapons) use the first live weapons target provider that offers the method. A flamer burning a provider's units opens
+  its jet and sways like one burning zombies.
+
+§6.7 zombies.js
+- forEachAlive(fn) calls fn(id, type, x, z, hp, yaw).
+- spawn() while ctx.hold.active counts ctx.debug.dropped['zombies.spawnInHold'] and warns once (a hold's units are crowd units).
+
+§6.9 gates.js
+- liveEvents(out, max) → n: the unpassed (non-decorative) events nearest first as reused rows { id, layout, z, lanes } in
+  out[0 … n − 1] (out[0] = activeEvent's event); one row object per event slot. Allocation-free; do not retain the rows.
+
+§6.11 weapons.js
+- setPolicy(p | null) (a level start clears it). p.rate(C) → rounds/s (≤ FIRE.spawnRateCap; the fold keeps the RUN weighted
+  output: w = max(1, C/weightDiv)·target/rate); p.shot(k, SHOT) aims the k-th logical shooter's round — SHOT arrives as
+  { ox, oy, oz = squad.shooterPosition(k), dirX 0, dirZ −1, weight 1, tracerY = p.tracerY or NaN, spread 0, bossOnly false };
+  the round's weight is the folded weight × SHOT.weight; tracerY is the tracer's height at the end of its range (cosmetic);
+  spread (rad) draws ctx.rngShot; bossOnly rounds test only the boss capsule; returning false fires nothing. Under a policy
+  the RUN spread jitter (FIRE.bullet.spreadDeg ± 2°, the minigun's ± 5°) is replaced by SHOT.spread (default 0: no jitter).
+  p.weaponFrame(id, FRAME) (FRAME arrives as { x 0, halfWidth 0, z0 = the muzzle front, z1 = WORLD.spawnZ, tx NaN, tz NaN,
+  radius 0 }; false = the RUN pattern): rocket → with a target (tx, tz) it flies over the zombies, providers, gates and crates
+  (only the boss capsule stops it) and detonates at the target (horde §8: the densest 1 m cell); without one it flies down x
+  to z1 and detonates on the first hit; splash radius (0 = data). The rocket's reach stays WEAPONS.rocket.maxRange (30 m
+  from the launch point): a target farther than that bursts in the air at 30 m on its line, over whatever is there, so the
+  policy searches its densestCell within 30 m of the blob centre (the horde feed band at z −46 … −70 is out of reach).
+  railgun → the bolt down x from z0 to z1 (unlimited targets); laser → beams spread across x ± halfWidth from z0 to z1;
+  shotgun → only the pellet fan narrows, to ± atan(halfWidth / WEAPONS.shotgun.range) (5.1° for 1.25 m, against the RUN
+  ± 10°); the pellets still start at the shooters and fly 14 m, and their x is not clamped. minigun (horde §8 "lane × 3 with
+  half-width 1.6 m") → every minigun round that is not bossOnly ends in the lane: a round whose heading (the policy's aim,
+  then SHOT.spread) would cross the lane's far end — FRAME.z1, or the end of its 42 m reach (FIRE.bullet speed × life) when
+  that is nearer — outside x ± halfWidth is re-aimed from its muzzle at a point of the lane drawn from ctx.rngShot; rounds
+  already aimed into the lane keep their heading. The rounds still start at the shooters (z0 is not used), so a flank
+  shooter's round converges on the lane over its flight: near the wall it is still beside the lane. The × 3 is the
+  minigun's fire config (rateMult 3 with its 0.4 s spin-up, folded by rate(C)); the frame never changes a round's weight or
+  count (node checks: framed and unframed minigun DPS are equal). To detect the active weapon, compare weapons.weapon with
+  the data ids (WEAPONS.minigun.id = 'weapon.minigun', never the bare key). p.pierce → handed to providers.
+- addTarget(provider, priority) / removeTarget(provider); targetCount / targetAt(i). reset() (every level start, RESTART,
+  QUIT; weapons resets first in RESET_ORDER) clears the policy AND every provider: register providers at the hold's dig-in
+  (or after the level's reset), never once at boot. A provider needs hitTestSeg(seg, radius, out { id, x, y, z, t }) and
+  applyHit(id, damage, pierceMax, x, y, z, cause) → leftover (the provider walks its own column: the 1.4.0 "pierce in the
+  crowd provider's applyHit"); optional damageInCircle (rocket blasts), damageInLine (rail, laser), nearest / nearestOfType /
+  highestHp (+ out.hp) / densestCell / damageInCone (troops, the hold policy); alive === 0 skips it (the sweep, rocket
+  blasts, rail / laser lines and the troops). Sweep order: zombies → providers (ascending priority) → boss → gates →
+  crates; the smallest t wins, ties go to the earlier one. Squad rounds pass policy.pierce (1 without a policy), drone
+  rounds 1.
+
+§6.12 fx.js — listens to fx:burst, fx:decal, crowd:kills (§5).
+
+§6.13 audio.js — AUDIO_CUES[id].on cues, audio:loop, music:mode (§5); MUSIC.modes.hold with MUSIC.instruments.brass (the
+  bar chord's root and fifth an octave down, two detuned saws through a low-pass, held a bar; a swell bar: × 1.8, 1.2 s attack).
+  loopActive(id) for tests. A loop plays only while the state is 'playing': the pause menu, the brief overlay, the Android
+  Back pause and every menu silence it, and it re-plays at once on resume.

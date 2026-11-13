@@ -1,0 +1,36 @@
+P9 balance notes (draft for P10's .md docs). Values only; head r8/P9. Numbers: build/P9/ (hm/c3, econ/c3, mx/c3, passcount-c3.txt, peak/c3, static/c3, owner/c3, model/; past L60 and fix round 1: hm/c4, static/c4, model/late/, residuals.json; late economy and fix round 2: econ/late/, static/c5).
+
+What moved in js/data.js
+- BOSSES.ttkBand.under: fromLevel 6 -> 3, tAt {} -> { 3: 9.5, 5: 10.5 } (A17, A18). The under-curve boss floor now runs from L3. L4 is a Horde level, its boss is the hold's.
+- HORDE_GEN.rho: [[4, 0.505], [30, 0.73], [60, 0.865], [120, 0.955]] -> [[4, 0.7], [5, 0.57], [30, 0.73], [60, 0.865], [120, 1.05]].
+  L30-60 is unchanged. Past L60 the slope is 0.0031 a level, not the plan's 0.0015: rho reads +5 % at L90 and +10 % from L120 on (1.05 against 0.955). A fifth row: the L5 row sits beside the plan's rows. L4's row is its own: at the expected shop L4's fodder sits on the 1-HP floor up to about 0.6, so the row weighs on a shop far above L4 (A22). The L5 row lifts L9-23 (L9 +9 %, L13 +7 %, L19 +4 %, L23 +2 %).
+- HORDE_GEN.surges.ns L5 row 2250 -> 2420 (A21, with rho's L5 row).
+- HORDE_GEN.coins: scale [[4, 0.2], [300, 0.2]], lateRef 300, n1 { base 67, per 80, to 13, perLate 47, toLate 60, mult 1.5, round 50 }. The whole crowd pays T(L) = 0.2 x n1(L): L4 120, L9 240, L13 330, L19 420, L23 470, L29 560, L32 600, L39 700, L43 760, L47 810, L52 880, L59 980, and 990 on every level from L60 on (was 172 ... 1,500, flat at 1,500 from L43). GDD: the coin line "coinScale 0.15 -> 0.50, 0.5 N_v1(34)" no longer stands.
+- LEVELS.curve.post.late.eBossCap 1500 -> 1300: E_boss stops at L140 or so. Hold bites are absolute, so a 1,125 squad outlasted them hands-off (L187+ passive clears). With rho's top row at 1.05 this gives 0 errors on L2-300 x 2 seeds (0.955 and 1.0 leave a passive clear on L252).
+
+Tried and rejected (evidence l4/, mx/l3b/, vl-late1.txt)
+- climb.hi 1.7 / 2.5 and debut.enrageS 24 on L4: no effect on the rank-10 clears (the first made them worse in a partial run).
+- ns(4) 1950 / 2100: only 2/72 at best, and it makes the debut denser at the expected shop.
+- gap.lesserFrom 4 on L3: hands-off 9/24, worse than the floor alone.
+- rho(4) 0.8: rank-10 rows clean but the model puts the expected-shop aimerR at 1.1 stars on L4; 0.7 keeps it at 2.0.
+- Brute cap 80 / 120 past L60: no effect on late passive clears.
+- n1.toLate past 60. The first refit ran the crowd total in a line to L300 (L102 1,590, L202 3,000, L299 4,360): income against RUN neighbours +12 to +70 %, crowd share 37-51 %, never measured past L59. On 12 levels L64-299 x 8 seeds against four RUN neighbours each: toLate 60 19 of 21 cells inside +-20 % (at most +21 %), 70 14 (+26 %), 80 11 (+30 %), 90 7 (+34 %), 100 4 (+38 %), with the share about the same count at each (econ/late/sweep.txt).
+- rho 1.135 at L120 with no L60 row (the first P9 head): much harder past L90 for nothing. In engine on L102 / 122 / 148 / 202 / 257 x 4 seeds strongj+aimerR read 11/20 and human+holdHuman 15/20 (1.05: 17/20, 18/20), and the hands-off lines read the same as at 1.05 (3/288; steer then idle 21/96).
+
+Owner-facing wording
+- A hands-off L3 and L5 now meet a tougher boss. A steering player barely notices (human 8/8 on both, strongj 8/8 on L3, 5/8 on L5, where it was 4/8 before this round's difficulty work).
+- Crowd coins are 43-76 % of what they were: about half around L29-47, two thirds past L60 (990 against 1,500). Read at 3 stars, a Horde clear now pays close to its RUN neighbours: 10 of 12 Horde levels to L59 within +-20 % (L4 stays +59 to +77 %, L9 +21 to +28 %), and +7 to +21 % on the 12 levels sampled from L64 to L299 (r8-140 +22 to +42 %).
+- Past about L150 kills are a small part of a Horde clear, 17-22 % as played against the 25-35 % the plan wanted. Both cannot hold there: a late clear already pays about a RUN clear before its crowd, so a 25 % share would mean income +33 %. Income was kept.
+
+Release notes (state these; numbers in residuals.json)
+- Horde past L60 is harder than the plan's line, by design: the crowd's HP load rises about 5 % by L90 and 10 % from L120 on, while the expected squad stops growing at about L140 (E_hold 975). In-engine bots at rank 10 on six levels from L64 to L257: skilled 44/48 and 43/48 clears, against 48/48 and 47/48 on the plan's line, with about a quarter star less. It is a step, not a wall. L60 and below are not affected.
+- Leaving the game running is not fully closed:
+  - L3 still clears hands-off on a known attempt. Spamming RETRY from a fresh session clears it at 2 stars on attempt 5 or 6, because the retry seeds are fixed. The first four attempts fail.
+  - At rank 10, a hands-off replay of L3 clears 13/24 and of L5 8/24.
+  - Past L60 hands-off clears are rare but not zero: 3/288 in engine, one of them inside the first four attempts (L232).
+- A hands-off RETRY still pays coins: about 1,000 on L43, 61 % of the rate of a x0.6 replay clear. It is less than before (1,261) and removing the rest needs a code change, not a value. Past L60 it runs 690-1,529 a failure, 10-17 % of a decent first clear; pooled over 12 sampled levels 1,265 -> 1,119, but L173 and L202 are up 25 % on r8-140 because those lines live longer on this head.
+
+For owner checkpoint 2 (say these plainly; the owner is at rank 10 and is the likeliest to try them)
+- Replaying a cleared L3 hands-off at rank 10 clears 13 of 24 attempts, L5 8 of 24.
+- A fresh hands-off RETRY session clears L3 on attempt 5 or 6.
+- L232 seed 1432 clears hands-off on attempt 3.

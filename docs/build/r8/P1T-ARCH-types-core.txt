@@ -1,0 +1,121 @@
+GATE RUSH 1.4.0 — TYPES CORE (P1T) — draft for docs/ARCHITECTURE.md and docs/GDD.md (P10 folds it in)
+==================================================================================================
+
+1. TYPE MODEL (js/data.js, region "LEVEL_TYPES + LEVEL_ROTATION + helpers")
+- LEVEL_TYPES[key] for the 8 type keys standard, horde, night, chase, escort, nightHorde, nightChase, nightEscort:
+  { base, night, debut, color, badge, bonusMult, enabled, assist[, starThree, runShare] }, plus combos (false), meetAfter (5)
+  and retypeRewardSkip ([]).
+  - base picks the generator (levelgen) and the ModeSystem (level.js MODE_OF: horde -> ctx.hold). night is runtime only.
+  - debut: horde 4, night 7, chase 12, escort 18, nightHorde 47, nightChase 53, nightEscort 58 (first level of the key on the
+    full 1.5.0 map). Debut softeners and the first meeting key on it, never on a level number.
+  - bonusMult: standard 1.0, night 1.10, horde 1.25, chase / escort 1.15, combos base + 0.05.
+  - assist: 'soldiers' (standard, night, chase), 'kits' (horde, nightHorde), 'plates' (escort; not built).
+  - starThree: horde 0.9 (D16); others use data.starThree(L). runShare: horde 0.4 (game-over fraction).
+  - enabled: standard true; everything else false in this build. P8 turns horde and night on (stage 1.4.0).
+- LEVEL_ROTATION: cycle1 / cycle2 code tables (S, H, N, C, E, NH, NC, NE per district slot), nightSlot 3, nightFinales [3, 6],
+  codes. Cycle k >= 3: district d takes slots 2-4 of cycle 2's district ((d - 1 + k - 2) mod 6) + 1, the night modifier on
+  slot 3 when that pattern has none, finale N in districts 3 and 6, S elsewhere.
+- Staged fallback: a disabled base plays standard keeping its night; a night combo plays its base by day unless combos is on
+  and the combo key is enabled; a combo whose base is off plays 'night'.
+- Helpers:
+  - levelTypeOf(L, override, on) -> frozen { key, base, night, slot (1-5), cycle, finale (slot 5), code }; memoized per level
+    when neither override nor on is given. override = a key played instead (level.js passes ?type= only with ?debug=1);
+    on = tools only, { key: bool, combos } replacing the stage flags.
+  - eTargetOf(L, override, on): eBossOf(L), or round5(HORDE_GEN.eHoldShare * eBossOf(L)) on a Horde base.
+  - starThreeOf(L, key): the key's starThree, else starThree(L).
+  - nextLevelOfType(key, fromL, on): first level >= fromL of that key within 60 levels, 0 when none (the Field Guide's
+    'MEET IT ON LEVEL n': 43 for horde and 45 for night from the owner's frontier once enabled).
+- The 1.4.0 map (stage horde + night): L1-60 S 40, H 12 (4 9 13 19 23 29 32 39 43 47 52 59), N 8 (7 14 17 38 45 53 58 60);
+  L61-120 H 64 68 72 77 84 87 93 97 102 109 112 119, N 63 75 78 83 88 90 103 105 108 113 118 120. 1.5.0 stage: L1-60 S 25,
+  H 11, N 6, C 8, E 7, NH 47, NC 53, NE 58.
+
+2. GENERATION (js/levelgen.js)
+- generateLevel(L, seed, base) / levelGenerator(L, seed, base) / levelSteps(L, seed, base); base defaults to levelTypeOf(L).base.
+  - horde: holdgen.holdSpec(L, seed, { debut: L === LEVEL_TYPES.horde.debut }) -> yield* generateRunSteps(L, seed, spec.run)
+    -> holdgen.generateHoldScript(run, spec) (the run's boss replaced by { type: 'hold', at, spec }).
+  - any other base: the campaign attempt loop (unchanged).
+- Every generated campaign script carries base ('standard' | 'horde'), eTarget (E_boss or E_hold), finale ('boss' | 'hold': the
+  event that ends the run) and starMetric ('survivors'). Night scripts are the day scripts. The authored L1 has none of them
+  (level.js reads eTarget as eBoss, finale as 'boss').
+- Generation is deterministic per (L, seed, base). With the type fields stripped, the L1-30 x 3 seeds scripts are identical to
+  r8-140 dbfbe54 (scriptdigest 436a1cf5...); with them the D42 reference becomes 694a0612... .
+
+3. LEVEL RUNNER (js/level.js)
+- Type: start(L, seed) resolves this._type = levelTypeOf(L, ?type= with ?debug=1); endless and the title are a plain run.
+  Script cache and prefetch jobs are keyed `L|seed|base`; the authored L1 is used only for a standard base.
+- MODE_OF = { horde: 'hold' }. A mode level's script events go to level as before; its finale event (script.finale, 'hold')
+  begins the mode: phase = the mode's name ('hold'), mode.begin(script, P_BEGIN) with P_BEGIN = { threat 1, assistK (the
+  REINFORCEMENTS steps; the mode gives them, level adds nothing), firstMeet, seed, runDecisions (counted gate decisions so
+  far), event (the finale event) }. Every other unknown event goes to mode.fireEvent(ev) (a false return warns once).
+- The mode reports through metric() (what the stars count), fraction() (0..1 progress of the mode part), stat(out) (level fills
+  defaults first: holdActions, holdSurgeWindows, eased[3], staggers, lineHeld, kits (left), kills, surgesCleared) and is ended
+  by level with end() when the result is committed (its scene stays until the next reset). A run ends through boss:dead,
+  squad:dead (the usual theatres) or finish(won, cause) from the mode while the run is live (the same theatre first; cause
+  'boss' / 'squad' / the mode's, e.g. 'overrun').
+- Road: stopRoad(seconds, atDistance) — linear stop over seconds, or exactly at atDistance when it lies ahead; resumeRoad(seconds).
+- debugSkip(kind): 'run' (default) moves the road 20 m before the finale event (QA LVL-11 consumes what it jumps over); other
+  kinds go to the running mode's debugSkip. smoke --skip uses it.
+- Coins per type: the level bonus x bonusMult (also the game-over consolation); the survivor bonus counts above
+  survivorFrom x eTarget; crowd:kills batches add run.kills and run.killCoins and are credited as 'kill' coins directly (fx
+  answers crowd:kills itself); a hold clear pays LINE HELD (HORDE_GEN.coins.lineHeldPerL x L, 'bonus') and refunds each kit
+  left (kitRefund, 'refund'). The results breakdown gains bonusMode (LINE HELD), so the chips still add up.
+- Score (D45): the RUN formula + SCORE.hold.lineHeld on a clear with no section ever broken + SCORE.hold.stagger per stagger.
+- Stars: the mode's metric (else survivors) against script.eTarget via starNeed with starThreeOf(L, key).
+- Game-over fraction: a plain run distance / length; a mode level runShare x the run's, once the mode began runShare +
+  (1 - runShare) x mode.fraction().
+- Replay (D21): save.isReplay(L, typeKey) (cleared in that type, or listed in retypeRewardSkip) — a re-typed level's first
+  new-type clear pays full; retypeReward = cleared before but not a replay.
+- First meeting (D34): save.meetType(key) at every run start records modes[key].metAtFrontier = highestUnlocked the first time;
+  firstMeet = modes[key].clears === 0 && metAtFrontier >= debut + meetAfter. level.firstMeet / level.type are public.
+- REINFORCEMENTS (D30 / D35 / A1 / A7): _runCounted() — counted gate decisions >= max(minDecisions, minShare x events reached),
+  or, once a mode began, mode.stat holdActions >= LEVELS.curve.assist.holdActions over >= holdSurges surge windows. A counted
+  fail adds to _assistStreak; a run left alone neither adds nor resets. Steps k = min(cap, fails - assistAfterFails + 1) with
+  cap assistMaxSteps ('soldiers') or HORDE_GEN.assist.maxSteps ('kits'). 'soldiers': + ceil(assistStartFrac x E_boss x k) at
+  the start (unchanged); 'kits': nothing at the start, k reaches the mode as assistK (and run.assistK).
+- item:grant { id, x, z } of a PICKUPS.eventItems item adds its kits to run.kits (the hold starts with them).
+- Payloads: level:start / complete / failed gain typeKey, base, night, finale, eTarget, stat (a copy), cause, firstMeet,
+  retypeReward, assistK; complete also metric; failed also counted (the fail joined the streak). district:change gains
+  modeKey ('' at the title), modeName (STRINGS.modes[key] once the types text defines it) and modeColor.
+- _applyDistrict(seconds, night) also calls render.setNight(night, seconds) once the renderer has it (P5).
+
+4. READINESS GATE (D8, ARCH §6)
+- level.ready(L, seed): the script is authored (standard L1) or cached, and _partsReady(type): render.programsReady(
+  render.variantForLevel(night)) when the renderer has the night API, and every PREP_OF[base] system's programsReady
+  (horde: crowd, hold).
+- level.prepareFor(L, seed) -> Promise (never rejects) resolving to ready(L): the script generated in START_SLICE_MS timer tasks
+  (the prefetch queue's job) plus render.preparePrograms(v) / crowd.prepare() / hold.prepare() for what is not ready.
+- requestStart / requestRestart (PLAY, NEXT, LEVELS tile, RETRY, REPLAY, RESTART) start at once only when ready(L); otherwise
+  the menu button keeps its .starting spinner while the script generates and the programs compile, and the run starts once both
+  are done (a state change drops it, as before). Boot with ?level=N awaits prepareFor behind the boot screen. A bare start()
+  (tools, the harness) still starts and warns once 'level.unprepared' if programs are missing.
+
+5. SAVE v2 (js/save.js; SAVE_VERSION 2, additive)
+- Level records { stars, bestSurvivors, bestScore, bestCoins, clears, t (type key), metric[, prev { t, bestSurvivors,
+  bestScore, bestCoins, metric }] }. modes { <8 keys>: { runs, clears, kills, bestKills, metAtFrontier } }. settings gain
+  nightBright and leftHanded (false).
+- v1 -> v2: every record t 'standard', metric = bestSurvivors; modes.standard.clears = all clears, metAtFrontier 1; nothing reset.
+- recordLevel(level, { stars, survivors, score, coins, typeKey, metric }): a clear in another type than rec.t moves the bests to
+  rec.prev and starts the new type's; stars stay max; modes[typeKey].clears++. isReplay(level, typeKey, skip); meetType(key);
+  recordModeRun(key, kills).
+- A 1.3.0 build reading a v2 blob keeps it byte-identical (tools/check-save.js runs the 1.3.0 migrate from git 441104b).
+
+6. ITEMS
+- PICKUPS.items gains 'item.kit' and 'item.kit2'; PICKUPS.eventItems { 'item.kit': { kind 'event', kits 1 }, 'item.kit2': { kind
+  'event', kits 2 } }. pickups.grantItem emits item:grant { id, x, z } for them (no system call, no warning), then item:pickup
+  as for any item (fx icon flight; level's NEW card / hint).
+- HINTS 'item.kit' / 'item.kit2', CODEX pickups entries with NEW cards (unlock L4 / L13: the Horde debut and the first Horde
+  level from HORDE_GEN.run.kitsLaneFrom on the 1.4.0 map).
+
+7. TOOLS
+- tools/check-save.js (new): the save v2 checks (migration, replay rule, re-typed first clears, metAtFrontier, rec.prev, the 1.3.0
+  migrate round trip, sanitation).
+- tools/validate-levels.js: default L1-60; --typesOn [list|all], --type <key>, --rotation (map L1-120, R1-R8 to L300 at the
+  checked flags, the 1.4.0 and the 1.5.0 stage, eBossOf = curve.eBoss to L300); every script must carry base / eTarget of its
+  type; a Horde script is checked as its run phase (holdsim.runPartOf against runCurve) plus validateHoldSection (runs 3, D37).
+  R1 finale on a standard base; R2 slot 1 S; R3 type debuts = LEVEL_TYPES debut, never slot 1 / 5; R4 no repeated special base,
+  no consecutive night; R5 (1.5.0 stage) every 10 levels from L31 hold every special base and night; R6 triples L8, x3 / ÷3 L11
+  on a standard base, zombie debuts L1-3 / 5 / 6 and the Twins L16 as S; R7 no pickup debut on a Horde level or on
+  TEACHING.noPickup (L4, L7, L18; A14 put the railgun on L12, CHASE's 1.5.0 slot); R8 every boss debuts on a standard or
+  Horde level.
+- tools/check-codex.js (f): every kind-'event' item is grantable, quotes its kits in entry / card / hint, has a NEW card, and its
+  unlock is its first Horde level.

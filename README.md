@@ -4,7 +4,7 @@ The zombie gate-runner from the mobile ads, built as the real game. Your squad m
 
 It runs in any modern phone or desktop browser and installs to the home screen like an app. Everything is generated in code: the 3D models, textures, effects and sound. There are no image, model or audio files to download.
 
-This is version 1.3.0.
+This is version 1.4.0.
 
 ## What's in the game
 
@@ -17,7 +17,11 @@ This is version 1.3.0.
   - Troops: sniper, medic, flamethrower trooper, drone turret and APC.
 - **Weapons you fire when you choose.** A picked-up weapon is stored, not started. Up to two wait in the slot behind the round FIRE button at the bottom right, and each one runs its full time from the moment you fire it. A third pickup while the slot is full pays 25 coins, and so does each weapon still unused when you win a level. Save a rocket for the boss if you like.
 - **A Field Guide.** The "?" on the title and in the pause panel opens a guide to every control, gate, special, zombie and boss you have met, with the real numbers, and marks what is new.
-- **30 campaign levels in six districts.** Level 1 is the ad, played straight. Every five levels the road moves to a new district with its own light, fog, props and weather: Sunset Boulevard (drifting dust), Overcast Highway (rain), Night City (falling ash under neon), Toxic Industrial (spores), Ash Wasteland (embers) and Frozen Outskirts (snow).
+- **A campaign that keeps climbing.** Thirty levels cross six districts, and after level 30 the road goes round them again and keeps getting harder. Level 1 is the ad, played straight. Every five levels the road moves to a new district with its own light, fog, props and weather: Sunset Boulevard (drifting dust), Overcast Highway (rain), Night City (falling ash under neon), Toxic Industrial (spores), Ash Wasteland (embers) and Frozen Outskirts (snow).
+- **Horde levels.** Marked with planks on the level grid, first on level 4. A short gate run ends at a barricade, and your squad holds it against three surges of thousands of zombies and then a boss. Drag to sweep your fire along the wall, hold still to focus it, and tap REPAIR to spend a repair kit on a broken section. Supply crates and your stored weapons help.
+- **Night levels.** Marked with a crescent, first on level 7. The squad's flashlights light the road, zombie eyes glow in the dark, and crates launch flares. In Night City the finale is a BLACKOUT.
+- **Boss fights on a clock.** A countdown runs beside the boss bar. If it reaches zero the boss is ENRAGED and eats more soldiers every second, so a big squad that kills fast is the way through.
+- **You have to play it.** From about level 3, a squad left to walk by itself loses. Steering to the right gates is what wins.
 - **Endless mode.** It unlocks after level 10. The road is generated as you go, rotates through all six districts, and sends a mini-boss every fifth stretch of road. While a mini-boss is alive, the next gates and waves wait. The horde keeps growing, in numbers more than toughness, until it overruns your squad. How far you get is your score.
 - **A shop with permanent upgrades.** Start squad, fire rate, damage, coin multiplier and boss damage, ten ranks each. Each card says what a rank buys, the price of the rank after it, and how many runs away an upgrade is. The results screen shows what you earned and how many survivors each star needs. Your progress is saved on the device.
 - **Juice everywhere.** Muzzle flashes, tracers, bloom, screen shake, a slot-machine count ticker, gate pops, coin flights, haptics, synthesized sound effects and a live music track.
@@ -48,7 +52,7 @@ The installed app opens full screen in portrait, keeps your saves, and works off
 
 1. Make the change, then run the checks: `node tools/smoke.js --scenario all` and `node tools/validate-levels.js`.
 2. Bump `VERSION` in `sw.js` (and the version in `js/main.js` and `package.json`), then run `node tools/package.js --check`. The packager refuses a changed build under an unchanged `VERSION`, so installed phones always pick up the update.
-3. Commit, including `dist/`, and push. The site updates about a minute later; installed apps show an "Update ready" pill and switch on the next launch.
+3. Commit, including `dist/`, and push. The site updates about a minute later; installed apps show an "Update — tap to reload" pill and switch on the next launch.
 
 The `dist/` folder also works on any other HTTPS static host, such as Netlify or Cloudflare Pages.
 
@@ -60,7 +64,7 @@ The `dist/` folder also works on any other HTTPS static host, such as Netlify or
 |---|---|
 | `index.html` | The app page: PWA shell, import map and the full UI markup |
 | `artifact.html` | The same game without the page wrapper, for embedding (generated) |
-| `js/` | 22 ES modules: engine, rendering, models, gameplay systems, UI, audio, save and level generation |
+| `js/` | 26 ES modules: engine, rendering, models, gameplay systems, UI, audio, save and level generation |
 | `css/game.css` | All UI styling |
 | `sw.js`, `manifest.webmanifest`, `icons/` | Offline support and install metadata |
 | `docs/GDD.md` | Game design document: every rule and number |

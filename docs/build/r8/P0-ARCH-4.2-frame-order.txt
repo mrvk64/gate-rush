@@ -1,0 +1,47 @@
+ARCHITECTURE.md §4.2 "Frame (Engine.frame(now)), in this exact order" — 1.4.0 draft by P0
+===========================================================================================
+
+Replace B and D (and the reset order note) with:
+
+B. if (state.is('playing')) {
+     acc += time.dt; n = 0
+     while (acc >= STEP && n < WORLD.maxSubSteps) {
+       level.step(STEP)          // distance, roadSpeed lerp, script events (spawns), run-up, boss hand-off, E(z)
+       squad.step(STEP)          // steering, commit lock, the logical formation's world mirrors, invulnerability, armor
+       troops.step(STEP)
+       weapons.step(STEP)        // muzzles from the logical shooter slots; spread from ctx.rngShot
+       zombies.step(STEP)
+       crowd.step(STEP)          // 1.4.0: the Horde crowd (returns at once while inactive)
+       boss.step(STEP)
+       gates.step(STEP)
+       pickups.step(STEP)
+       hold.step(STEP)           // 1.4.0: the hold rules (returns at once while inactive)
+       acc -= STEP; n++
+     }
+     ...
+   }
+C. fx.update(time.dt, time.unscaledDt)
+D. squad.render(alpha); zombies.render(alpha); crowd.render(alpha); boss.render(alpha); gates.render(alpha);
+   pickups.render(alpha); weapons.render(alpha); troops.render(alpha); hold.render(alpha)   // instance writes only
+E. render.update(time.dt)
+(F–I unchanged)
+
+A system whose `active` is false returns at the top of step and render (crowd and hold outside a Horde hold), so a RUN
+level runs exactly the 1.3.0 frame.
+
+RESET ORDER (LevelRunner._resetSystems, level start and quitToTitle):
+fx, weapons, zombies, crowd, hold, boss, gates, pickups, troops, squad (squad last, so its squad:count start event sees
+an empty world).
+
+§6.5 squad.js addendum — the logical formation (D5, A13a)
+- L = min(C, SQUAD.slotCapacity) logical slots, V = min(C, quality vmax) drawn soldiers. Gameplay uses L only:
+  halfWidthAt[L], depthAt[L], frontOffset[L], the contact box, and the 40 shooters = the min(L, 40) front-most of the
+  first L slots (rebuilt with every count change, in _emitCount); shooterPosition(k) is that slot's muzzle.
+- The drawn set (_syncWant, rebuilt when L or V changes): V ≥ L → slots [0, L) (1.3.0 behaviour); V < L → the 40
+  shooter slots, then per side ≤ min(10, (V − 40)/6) row ends — the outermost column first, front to back by stride —
+  then the remaining budget by a fixed interior priority (the z order by bit-reversed index, so any prefix spreads
+  over the rows and one soldier more or less moves ≈ 1.5 drawn soldiers). Measured in node from the real slot table
+  (build/P0/tools/drawsweep.mjs, C = 1..330 on every tier): drawn = V, every shooter drawn, the drawn width equals the
+  logical width, no empty run longer than 2 rows (Low at C 300: 40 shooters + 6 row ends + 14 interior).
+- Reconciliation: records occupy exactly the drawn set; displaced records walk to the nearest vacant drawn slot
+  (_relocate), dissolving rim-first only when none is left (settle), and reserves step up from behind the logical rear.

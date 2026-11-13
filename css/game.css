@@ -1215,10 +1215,14 @@ html.reduced-motion .btn.starting::after, html.reduced-motion #btn-play.starting
   }
   #btn-fire.busy .fire-key { display: none; }
 }
-/* the hint pill moves left, clear of the button, while it shows (same bottom band) */
-#hud.fire-on #hint {
-  right: calc(var(--fire-right) + var(--fire-size) + 10 * var(--u));
-  max-width: min(calc(var(--hint-maxw) - var(--safe-left) - var(--safe-right)), calc(100% - var(--safe-left) - var(--fire-right) - var(--fire-size) - 18 * var(--u)));
+/* the hint pill moves left, clear of the button, while it shows (same bottom band). r8 (P7): through --hint-l / --hint-r, so the
+   HUD kit's action button (bottom-left, #hud.action-on) and the Left-handed mirror (html.left-handed: FIRE bottom-left, the
+   action button bottom-right) keep it clear of both corners — TYPES-UI region */
+#hud.fire-on { --hint-r: calc(var(--fire-right) + var(--fire-size) + 10 * var(--u)); }
+#hud.fire-on #hint, #hud.action-on #hint {
+  left: var(--hint-l, 0px);
+  right: var(--hint-r, 0px);
+  max-width: min(calc(var(--hint-maxw) - var(--safe-left) - var(--safe-right)), calc(100% - max(var(--hint-l, 0px), var(--safe-left)) - max(var(--hint-r, 0px), var(--safe-right)) - 8 * var(--u)));
 }
 
 /* tutorial hint (round-2 QA UI-18): a compact pill bottom-anchored at safe-bottom + JUICE.ui.hintBottomPx (28 design
@@ -1462,7 +1466,7 @@ html.reduced-motion .btn.starting::after, html.reduced-motion #btn-play.starting
   font-size: var(--fs-micro);
   line-height: 1.2;
   letter-spacing: 0.14em;
-  color: var(--db-accent);
+  color: var(--db-kick, var(--db-accent));   /* r8 (P7): a typed run's kicker wears the type's colour (ui) */
   text-shadow: 0 1px 0 rgba(4, 7, 14, 0.8), 0 0 8px var(--db-glow);
   white-space: nowrap;
 }
@@ -1668,7 +1672,7 @@ html.reduced-motion .btn.starting::after, html.reduced-motion #btn-play.starting
   background: var(--d-accent, var(--primary));
   box-shadow: 0 0 0 1.5px rgba(4, 7, 14, 0.75), 0 0 6px var(--d-accent, var(--primary));
 }
-/* round 5: "Update ready — tap to reload" (sw.js v4): a small non-blocking pill at the bottom centre; the title stack
+/* round 5: the update pill, "Update — tap to reload" since 1.4.0 (sw.js v4): a small non-blocking pill at the bottom centre; the title stack
    gives it a row of its own while it is up (.has-update) */
 #btn-update {
   position: absolute;
@@ -3111,6 +3115,674 @@ input[type="checkbox"].toggle:checked::before { transform: translateX(calc(26 * 
   }
   #debug.menu { display: none; }             /* menus / results keep their buttons in the thumb zone */
 }
+
+/* ==== r8 REGION TYPES-UI (P7) ==== */
+/* 1.4.0 level types: badges, briefing rows, the HUD kit (P7 may also edit sections 8, 11, 12b and 13) */
+
+/* the level types' badges (ui paintBadge: .tt + .tt-<LEVEL_TYPES badge>, --tt-color = the type's colour): HORDE an orange disc
+   with two crossed planks, NIGHT a violet disc with a pale crescent, BLACKOUT that crescent struck by a lightning slash.
+   CSS-drawn (no glyph that needs a fallback font, the UI-19 lesson); each place sets its size (--tt-size). A 1.5.0 type
+   (chevrons, truck, a night combo's chip) draws as a plain disc in its colour until its own art lands */
+.tt {
+  --tt-color: #FF7A2F;
+  --tt-size: max(18px, calc(22 * var(--u)));
+  position: relative;
+  display: inline-block;
+  flex: none;
+  width: var(--tt-size);
+  height: var(--tt-size);
+  border-radius: 50%;
+  background: radial-gradient(circle at 36% 28%, rgba(255, 255, 255, 0.38), rgba(255, 255, 255, 0) 55%), var(--tt-color);
+  box-shadow: 0 0 0 2px var(--outline), 0 2px 3px rgba(0, 0, 0, 0.45);
+  vertical-align: middle;
+}
+.tt-planks::before, .tt-planks::after {      /* HORDE: two planks nailed across the disc */
+  content: "";
+  position: absolute;
+  left: 13%;
+  right: 13%;
+  top: 50%;
+  height: 21%;
+  margin-top: -10.5%;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #FFE9BE 0%, #E9BC74 60%, #C8913F 100%);
+  box-shadow: 0 0 0 1.5px #4A2208;
+  transform: rotate(34deg);
+}
+.tt-planks::after { transform: rotate(-34deg); }
+.tt-crescent, .tt-blackout {                 /* NIGHT: a pale moon cut by a disc in the badge's own colour */
+  background:
+    radial-gradient(circle at 64% 35%, var(--tt-color) 0 26%, rgba(0, 0, 0, 0) 27.5%),
+    radial-gradient(circle at 48% 50%, #F4F0FF 0 32%, rgba(244, 240, 255, 0) 33.5%),
+    radial-gradient(circle at 36% 28%, rgba(255, 255, 255, 0.3), rgba(255, 255, 255, 0) 55%),
+    var(--tt-color);
+}
+.tt-blackout::before, .tt-blackout::after {  /* BLACKOUT: a lightning slash over the crescent (dark rim under a yellow bolt) */
+  content: "";
+  position: absolute;
+  inset: 8%;
+  background: #1A0F2E;
+  clip-path: polygon(60% 0, 18% 58%, 44% 58%, 32% 100%, 84% 38%, 56% 38%, 74% 0);
+}
+.tt-blackout::after { inset: 15%; background: #FFD23F; }
+.ci.ci-type { --tt-size: calc(44 * var(--u)); }   /* the Field Guide's LEVEL TYPES rows (section 12b codex icons) */
+
+/* LEVELS (section 11 tiles): the badge in the top-left corner (the finale skull keeps the top-right), greyscale while locked;
+   a night level's tile is navy with a 1 px blue rim and two star dots (PLAN night UI); the D21 ring — a white ring with a glow
+   in the type's colour — sits around a cleared level that now plays another type, until its first clear in it */
+.tile > .tile-type { position: absolute; top: calc(-7 * var(--u)); left: calc(-7 * var(--u)); --tt-size: calc(26 * var(--u)); z-index: 1; }
+.tile.locked > .tile-type { filter: grayscale(1) brightness(0.7); }
+.tile.night:not(.locked) {
+  background:
+    radial-gradient(circle at 23% 27%, #FFFFFF 0 1.4px, rgba(255, 255, 255, 0) 2.2px),
+    radial-gradient(circle at 79% 63%, #DCE6FF 0 1.1px, rgba(220, 230, 255, 0) 1.9px),
+    linear-gradient(180deg, #24315F 0%, #141C3A 55%, #0F1530 100%);
+  box-shadow:
+    inset 0 0 0 1px #6E86C8,
+    inset 0 2px 0 rgba(255, 255, 255, 0.16),
+    0 5px 0 #0A0F24,
+    0 8px 12px rgba(0, 0, 0, 0.35);
+}
+.tile.night.current { box-shadow: inset 0 0 0 1px #6E86C8, 0 0 0 3px var(--level-current), 0 5px 0 #8A5410, 0 0 10px rgba(255, 176, 46, 0.4); }
+.tile.retype .tile-band::after {
+  content: "";
+  position: absolute;
+  inset: calc(-5 * var(--u));
+  border-radius: calc(20 * var(--u));
+  border: 2.5px solid #FFFFFF;
+  box-shadow: 0 0 9px 1px var(--tt-color, var(--primary)), inset 0 0 6px var(--tt-color, var(--primary));
+}
+/* legend line 2 under the skull legend: a chip per type the map plays, then the ring (when some tile wears it) */
+#levels-legend2 {
+  flex: none;
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: calc(4 * var(--u)) calc(14 * var(--u));
+  margin-top: calc(-8 * var(--u));
+  max-width: calc(100% - 16px);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.08em;
+}
+#levels-legend2 .lg-item { display: inline-flex; align-items: center; gap: calc(6 * var(--u)); white-space: nowrap; }
+#levels-legend2 .tt { --tt-size: max(16px, calc(20 * var(--u))); }
+#levels-legend2 .lg-ring {
+  flex: none;
+  width: max(16px, calc(20 * var(--u)));
+  height: max(16px, calc(20 * var(--u)));
+  border-radius: calc(6 * var(--u));
+  border: 2.5px solid #FFFFFF;
+  background: #2B4E99;
+  box-shadow: 0 0 6px rgba(255, 255, 255, 0.55);
+}
+
+/* PLAY (the frontier) and NEXT (the level after the results') wear the type badge of the level they start */
+.btn > .btn-tt { position: absolute; top: calc(-11 * var(--u)); right: calc(-9 * var(--u)); --tt-size: max(26px, calc(30 * var(--u))); z-index: 1; }
+
+/* the briefing card (#scr-brief, the paused state 'brief'): kicker, badge + name in the type's colour (ui writes --tt-color /
+   --tt-glow), tagline, three numbered rows, the ★★★ goal and GOT IT. Modal (the run is paused under it); a short landscape box
+   lays the rows out side by side (below) and the card scrolls if it still cannot fit */
+#scr-brief {
+  --tt-color: #FF7A2F;
+  --tt-glow: rgba(255, 122, 47, 0.35);
+  pointer-events: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  scrollbar-width: none;
+  justify-content: center;
+  justify-content: safe center;
+}
+#scr-brief::-webkit-scrollbar { display: none; }
+#scr-brief .panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(10 * var(--u));
+  width: min(calc(340 * var(--u)), calc(100% - 16px));
+  padding: calc(18 * var(--u)) calc(18 * var(--u)) calc(22 * var(--u));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 0 0 2px var(--tt-color),
+    0 0 34px var(--tt-glow),
+    0 18px 44px rgba(0, 0, 0, 0.5);
+}
+#brief-kicker {
+  font-family: var(--font-body);
+  font-weight: 800;
+  font-size: var(--fs-micro);
+  line-height: 1.2;
+  letter-spacing: 0.18em;
+  color: var(--tt-color);
+  color: color-mix(in srgb, var(--tt-color) 62%, #FFFFFF);
+  text-shadow: 0 1px 0 rgba(4, 7, 14, 0.8), 0 0 8px var(--tt-glow);
+}
+#scr-brief .brief-head { display: flex; align-items: center; justify-content: center; gap: calc(12 * var(--u)); }
+#brief-badge { --tt-size: calc(44 * var(--u)); }
+#brief-name { padding-bottom: 4px; }
+#brief-tagline {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: var(--fs-h3);
+  line-height: 1.1;
+  letter-spacing: 0.04em;
+  text-align: center;
+  color: #FFFFFF;
+  text-shadow: var(--stroke-2), 0 0 14px var(--tt-glow);
+  text-wrap: balance;
+}
+#brief-rows {
+  list-style: none;
+  margin: calc(2 * var(--u)) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: calc(7 * var(--u));
+  width: 100%;
+  counter-reset: brief;
+}
+#brief-rows > li {
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--u));
+  min-height: calc(40 * var(--u));
+  padding: calc(6 * var(--u)) calc(12 * var(--u)) calc(6 * var(--u)) calc(8 * var(--u));
+  border-radius: calc(12 * var(--u));
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.07);
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: max(14px, calc(16px * var(--ui) * var(--text-scale)));
+  line-height: 1.15;
+  letter-spacing: 0.03em;
+  text-align: left;
+  color: #FFFFFF;
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.6);
+  counter-increment: brief;
+}
+#brief-rows > li::before {                   /* the row's number in the type's colour */
+  content: counter(brief);
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: calc(26 * var(--u));
+  height: calc(26 * var(--u));
+  border-radius: 50%;
+  background: var(--tt-color);
+  box-shadow: 0 0 0 2px var(--outline);
+  color: #0B0F1A;
+  font-size: max(13px, calc(15px * var(--ui)));
+  text-shadow: none;
+}
+#brief-goal { color: var(--coin); font-family: var(--font-display); font-weight: 400; letter-spacing: 0.04em; }
+#btn-brief-ok { margin-top: calc(4 * var(--u)); }
+@media (orientation: landscape) and (max-height: 500px) {
+  #scr-brief .panel { width: min(calc(660 * var(--u)), calc(100% - 16px)); gap: calc(6 * var(--u)); padding: calc(12 * var(--u)) calc(18 * var(--u)) calc(16 * var(--u)); }
+  #brief-name { font-size: var(--fs-h2); }
+  #brief-badge { --tt-size: calc(34 * var(--u)); }
+  #brief-rows { flex-direction: row; gap: calc(8 * var(--u)); }
+  #brief-rows > li { flex: 1 1 0; min-width: 0; align-items: flex-start; font-size: max(13px, calc(15px * var(--ui) * var(--text-scale))); }
+}
+
+/* ---- the HUD KIT (section 8 HUD; a mode's generic HUD, written by ui from hud:* events) ----
+   counter: a big line under the progress bar (power-up row, banner pill and NEW card drop a row while it shows; under the boss
+   bar while that is up). Anchors: 56 px bubbles (48 px on landscape phones) centred on the mode's projected points — they take
+   no pointer (engine's tap classifier finds the tap, ui hit-tests it), so a drag over them still aims. Action: the round
+   bottom-left button (64 px, a kit badge), FIRE's mirror; Left-handed swaps the two corners. Banner: a centred card. */
+#hud {
+  --act-size: max(64px, calc(64 * var(--u)));
+  --act-left: calc(var(--safe-left) + 14 * var(--u));
+  --counter-h: calc(max(22px, calc(28px * var(--ui) * var(--text-scale))) + 8 * var(--u));
+}
+#hud-counter {
+  top: calc(var(--safe-top) + var(--icon-btn) + 8px + max(12px, calc(14 * var(--u))) + 8 * var(--u));
+  left: 0;
+  right: 0;
+  margin: 0 auto;
+  width: max-content;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: max(22px, calc(28px * var(--ui) * var(--text-scale)));
+  line-height: 1;
+  letter-spacing: 0.04em;
+  color: #FFFFFF;
+  text-shadow: var(--stroke-2), 0 3px 0 var(--outline), 0 0 12px rgba(0, 0, 0, 0.5);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  contain: layout;
+  z-index: 2;
+}
+#hud.counter-on #powerups, #hud.counter-on #district-banner, #hud.counter-on #newcard { top: calc(var(--safe-top) + var(--icon-btn) + 32 * var(--u) + var(--counter-h)); }
+#hud.counter-on.pu-on #district-banner, #hud.counter-on.pu-on #newcard { top: calc(var(--safe-top) + var(--icon-btn) + 32 * var(--u) + var(--counter-h) + var(--pill-h) + 8 * var(--u)); }
+#hud.boss-on #hud-counter { top: calc(var(--safe-top) + 110 * var(--u) + max(14px, calc(18 * var(--u))) + 10 * var(--u)); }
+#hud.boss-on.counter-on #powerups { top: calc(var(--safe-top) + 110 * var(--u) + max(14px, calc(18 * var(--u))) + 12 * var(--u) + var(--counter-h)); }
+/* with Large text the boss bar sits 14u lower (section 8): the counter and the row under it go with it */
+@media not all and (orientation: landscape) and (max-height: 500px) {
+  html.large-text #hud.boss-on #hud-counter { top: calc(var(--safe-top) + 124 * var(--u) + max(14px, calc(18 * var(--u))) + 10 * var(--u)); }
+  html.large-text #hud.boss-on.counter-on #powerups { top: calc(var(--safe-top) + 124 * var(--u) + max(14px, calc(18 * var(--u))) + 12 * var(--u) + var(--counter-h)); }
+}
+
+#hud-anchors { inset: 0; z-index: 3; contain: layout; }
+#hud-labels { inset: 0; z-index: 3; contain: layout; }
+.hud-label {                                 /* hud:pill with text: a short label ('BREACH!') centred on a projected point */
+  position: absolute;
+  translate: -50% -50%;
+  padding: 1px calc(10 * var(--u)) 2px;
+  border-radius: calc(10 * var(--u));
+  background: rgba(8, 12, 22, 0.86);
+  box-shadow: 0 0 0 2px var(--danger);
+  color: #FFFFFF;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: max(14px, calc(17px * var(--ui) * var(--text-scale)));
+  line-height: 1.2;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+#hud-anchors > .anchor {
+  --anchor: max(56px, calc(56 * var(--u)));
+  --an-rim: var(--secondary);
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: grid;
+  place-items: center;
+  width: var(--anchor);
+  height: var(--anchor);
+  margin: calc(var(--anchor) / -2) 0 0 calc(var(--anchor) / -2);
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 32%, rgba(52, 68, 104, 0.95), rgba(12, 18, 32, 0.95) 72%);
+  box-shadow: 0 0 0 3px var(--an-rim), 0 4px 0 rgba(4, 7, 14, 0.8), 0 6px 14px rgba(0, 0, 0, 0.45);
+}
+#hud-anchors .an-icon {                      /* a wrench (CSS): a handle and a ring head with a notch */
+  position: relative;
+  width: 52%;
+  height: 52%;
+  transform: rotate(-45deg);
+}
+#hud-anchors .an-icon::before {
+  content: "";
+  position: absolute;
+  left: 40%;
+  top: 34%;
+  width: 20%;
+  height: 66%;
+  border-radius: 999px;
+  background: #F4F1EA;
+  box-shadow: 0 0 0 1.5px #0B0F1A;
+}
+#hud-anchors .an-icon::after {
+  content: "";
+  position: absolute;
+  left: 22%;
+  top: 0;
+  width: 56%;
+  height: 44%;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 18%, rgba(0, 0, 0, 0) 0 30%, #F4F1EA 31%);
+  box-shadow: 0 0 0 1.5px #0B0F1A;
+  -webkit-mask: linear-gradient(90deg, #000 0 36%, transparent 36% 64%, #000 64%) top / 100% 46% no-repeat, linear-gradient(#000, #000) bottom / 100% 55% no-repeat;
+  mask: linear-gradient(90deg, #000 0 36%, transparent 36% 64%, #000 64%) top / 100% 46% no-repeat, linear-gradient(#000, #000) bottom / 100% 55% no-repeat;
+}
+#hud-anchors .an-label {
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 5 * var(--u));
+  transform: translateX(-50%);
+  padding: 1px calc(8 * var(--u)) 0;
+  border-radius: calc(9 * var(--u));
+  background: var(--an-rim);
+  box-shadow: 0 0 0 2px var(--outline);
+  color: #0B0F1A;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: max(12px, calc(13px * var(--ui) * var(--text-scale)));
+  line-height: 1.15;
+  letter-spacing: 0.05em;
+  text-align: center;
+  width: max-content;
+  max-width: calc(var(--anchor) + 18px);     /* two lines rather than touching the next section's chip (76 px apart on a 320 px phone) */
+}
+#hud-anchors .an-label:empty { display: none; }
+#hud-anchors > .an-repair { --an-rim: var(--success); }
+#hud-anchors > .an-repair::after {           /* a halo pulses outward (compositor-only), like FIRE's ready ring */
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 3px solid var(--success-hi);
+  animation: fire-halo 1.2s ease-out infinite;
+  will-change: transform, opacity;
+}
+html.reduced-motion #hud-anchors > .an-repair::after { animation: none; opacity: 0.7; transform: none; }
+@media (prefers-reduced-motion: reduce) { #hud-anchors > .an-repair::after { animation: none; opacity: 0.7; transform: none; } }
+#hud-anchors > .an-gap { --an-rim: var(--primary); }
+#hud-anchors > .an-gap .an-icon, #hud-anchors > .an-nokits .an-icon { opacity: 0.45; }
+#hud-anchors > .an-nokits { --an-rim: var(--danger); animation: an-shake 0.6s ease-in-out infinite; }
+#hud-anchors > .an-nokits .an-label { color: #FFFFFF; }
+@keyframes an-shake { 0%, 60%, 100% { transform: translateX(0); } 70% { transform: translateX(-4px); } 80% { transform: translateX(4px); } 90% { transform: translateX(-2px); } }
+
+/* the action button (hud:action) — the pointer contract's HUD rule (section 2: every #hud child but pause / FIRE ignores the
+   pointer) is out-ranked here (3 ids), so only this button itself takes pointers; the engine never steers from a button */
+#ui #hud #btn-action { pointer-events: auto; }
+#btn-action {
+  top: auto;
+  right: auto;
+  left: var(--act-left);
+  bottom: var(--fire-bottom);
+  width: var(--act-size);
+  height: var(--act-size);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 30%, rgba(52, 68, 104, 0.96), rgba(12, 18, 32, 0.96) 72%);
+  box-shadow: 0 4px 0 rgba(4, 7, 14, 0.85), 0 8px 18px rgba(0, 0, 0, 0.45);
+  color: var(--text);
+  cursor: pointer;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+  z-index: 4;
+  contain: layout;
+  transition: transform var(--dur-press) ease-out, box-shadow var(--dur-press) ease-out;
+}
+#btn-action:active { transform: translateY(3px) scale(0.97); box-shadow: 0 1px 0 rgba(4, 7, 14, 0.85), 0 3px 8px rgba(0, 0, 0, 0.4); }
+#btn-action > span { position: absolute; pointer-events: none; }
+#btn-action .act-ring { inset: 0; border-radius: 50%; box-shadow: inset 0 0 0 calc(5 * var(--u)) var(--success); }
+#btn-action .act-disc { inset: calc(9 * var(--u)); border-radius: 50%; background: radial-gradient(circle at 40% 35%, #FFFFFF 0%, #DCE2EC 55%, #B9C2D2 100%); box-shadow: inset 0 -2px 0 rgba(11, 15, 26, 0.35); }
+#btn-action .act-icon { inset: calc(14 * var(--u)); background-size: contain; background-repeat: no-repeat; background-position: center; filter: drop-shadow(0 1px 0 rgba(0, 0, 0, 0.6)); }
+#btn-action .act-label {
+  left: 50%;
+  bottom: calc(-7 * var(--u));
+  transform: translateX(-50%);
+  padding: calc(1 * var(--u)) calc(9 * var(--u)) 0;
+  border-radius: calc(9 * var(--u));
+  background: linear-gradient(180deg, var(--success-hi), var(--success-lo));
+  box-shadow: 0 0 0 2px var(--outline), 0 2px 0 2px rgba(4, 7, 14, 0.6);
+  color: #062010;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: max(12px, calc(14px * var(--ui) * var(--text-scale)));
+  line-height: 1.15;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+#btn-action .act-label:empty { display: none; }
+#btn-action .act-badge {
+  top: calc(-5 * var(--u));
+  right: calc(-5 * var(--u));
+  min-width: max(24px, calc(28 * var(--u)));
+  height: max(24px, calc(28 * var(--u)));
+  padding: 0 calc(5 * var(--u));
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(180deg, var(--success-hi), var(--success-lo));
+  box-shadow: 0 0 0 2px var(--outline), 0 2px 0 2px rgba(4, 7, 14, 0.6);
+  color: #062010;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: max(13px, calc(16px * var(--ui) * var(--text-scale)));
+  line-height: 1;
+}
+#btn-action.disabled { cursor: default; }
+#btn-action.disabled .act-ring { box-shadow: inset 0 0 0 calc(5 * var(--u)) #4A5468; }
+#btn-action.disabled .act-disc { opacity: 0.55; }
+#btn-action.disabled .act-icon { opacity: 0.45; filter: grayscale(0.8); }
+#btn-action.disabled .act-badge { background: linear-gradient(180deg, var(--danger-hi), var(--danger-lo)); color: #FFFFFF; }
+#btn-action:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+#hud.action-on { --hint-l: calc(var(--act-left) + var(--act-size) + 10 * var(--u)); }
+/* Left-handed (settings leftHanded, html.left-handed): FIRE bottom-left, the action button bottom-right, the hint between */
+html.left-handed #btn-fire { right: auto; left: var(--mirror-l); }
+html.left-handed #btn-action { left: auto; right: var(--mirror-r); }
+html.left-handed #hud { --mirror-l: calc(var(--safe-left) + 14 * var(--u)); --mirror-r: calc(var(--safe-right) + 14 * var(--u)); --hint-l: 0px; --hint-r: 0px; }
+html.left-handed #hud.fire-on { --hint-l: calc(var(--mirror-l) + var(--fire-size) + 10 * var(--u)); }
+html.left-handed #hud.action-on { --hint-r: calc(var(--mirror-r) + var(--act-size) + 10 * var(--u)); }
+html.left-handed #hud.fire-on.action-on { --hint-l: calc(var(--mirror-l) + var(--fire-size) + 10 * var(--u)); --hint-r: calc(var(--mirror-r) + var(--act-size) + 10 * var(--u)); }
+
+#hud-banner {
+  --hb-color: var(--primary);
+  --hb-glow: rgba(255, 176, 46, 0.32);
+  top: 22%;
+  left: 0;
+  right: 0;
+  margin: 0 auto;
+  width: max-content;
+  max-width: calc(100% - 32px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(2 * var(--u));
+  padding: calc(8 * var(--u)) calc(26 * var(--u)) calc(11 * var(--u));
+  border-radius: calc(22 * var(--u));
+  background:
+    radial-gradient(70% 90% at 50% 120%, var(--hb-glow), rgba(0, 0, 0, 0) 70%),
+    linear-gradient(180deg, rgba(26, 38, 64, 0.88), rgba(8, 12, 22, 0.88));
+  box-shadow: 0 0 0 2px var(--hb-color), inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 6px 18px rgba(0, 0, 0, 0.45);
+  contain: layout;
+  z-index: 3;
+}
+#hud-banner .hb-kicker {
+  font-family: var(--font-body);
+  font-weight: 800;
+  font-size: var(--fs-micro);
+  line-height: 1.2;
+  letter-spacing: 0.16em;
+  color: var(--hb-color);
+  text-shadow: 0 1px 0 rgba(4, 7, 14, 0.8);
+  white-space: nowrap;
+}
+#hud-banner .hb-text {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: var(--fs-h2);
+  line-height: 1.05;
+  letter-spacing: 0.04em;
+  text-align: center;
+  text-transform: uppercase;
+  color: #FFFFFF;
+  text-shadow: var(--stroke-2), 0 3px 0 var(--outline), 0 0 16px var(--hb-glow);
+  text-wrap: balance;
+}
+
+/* the progress bar as a mode's cells (hud:progress 'segments': dividers at k / n, no squad marker or special ticks) and its
+   barricade end icon (a Horde run's road ends at the wall: two planks and a brace in the skull's place) */
+#progress-segs { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+#progress-segs > i {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 3px;
+  margin-left: -1.5px;
+  border-radius: 1px;
+  background: rgba(4, 7, 14, 0.92);
+  box-shadow: 1px 0 0 rgba(255, 255, 255, 0.28);
+}
+#progress.segments #progress-squad, #progress.segments #progress-ticks { display: none; }
+/* a portrait phone: the label's row is shared with the coin pill and a hold's "NEXT SURGE 16" is long: it starts at the bar's left end and
+   sets tighter, so the countdown stays clear of a 7-digit wallet, with Large text too */
+@media (orientation: portrait) { #progress.segments #progress-label { align-self: flex-start; letter-spacing: 0.02em; } }
+#progress-skull.barricade {
+  background: radial-gradient(circle at 50% 38%, #4E3018 0%, #24160A 72%);
+  box-shadow: 0 0 0 2px #FF7A2F, 0 0 0 4px rgba(4, 7, 14, 0.7), 0 3px 6px rgba(0, 0, 0, 0.5);
+}
+#progress-skull.barricade::before {          /* two planks */
+  left: 18%;
+  right: 18%;
+  top: 27%;
+  height: 46%;
+  border-radius: 0;
+  background:
+    linear-gradient(180deg, #E9BC74, #C8913F) top / 100% 36% no-repeat,
+    linear-gradient(180deg, #E9BC74, #C8913F) bottom / 100% 36% no-repeat;
+}
+#progress-skull.barricade::after {           /* the brace */
+  left: 22%;
+  right: 22%;
+  top: 46%;
+  height: 12%;
+  border-radius: 1px;
+  background: #F2D29A;
+  transform: rotate(-28deg);
+}
+
+/* the enrage clock (boss:fight enrageAt → seconds to the enrage) at the boss bar's top-right, red in its last seconds; at
+   boss:enrage it becomes the ENRAGED tag. The name keeps clear of it (#bossbar.has-clock, below) */
+#boss-clock {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 5 * var(--u));
+  display: inline-flex;
+  align-items: center;
+  gap: calc(4 * var(--u));
+  padding: 1px calc(8 * var(--u)) 1px calc(6 * var(--u));
+  border-radius: 999px;
+  background: rgba(8, 12, 22, 0.84);
+  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.26);
+  color: #FFFFFF;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: var(--fs-small);
+  line-height: 1.25;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  z-index: 2;
+}
+#boss-clock::before {                        /* a clock face */
+  content: "";
+  flex: none;
+  width: 0.95em;
+  height: 0.95em;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 2px currentColor;
+  background:
+    linear-gradient(currentColor, currentColor) 50% 22% / 2px 34% no-repeat,
+    linear-gradient(currentColor, currentColor) 66% 50% / 30% 2px no-repeat;
+}
+#boss-clock.warn {
+  color: #FFE3E6;
+  background: rgba(130, 14, 28, 0.92);
+  box-shadow: 0 0 0 1.5px var(--danger), 0 0 10px rgba(255, 59, 78, 0.6);
+  animation: rage-name 0.6s ease-in-out infinite;
+  will-change: opacity;
+}
+#boss-clock.tag {
+  padding: 1px calc(10 * var(--u));
+  background: linear-gradient(180deg, var(--danger-hi), var(--danger-lo));
+  box-shadow: 0 0 0 2px var(--outline), 0 0 12px rgba(255, 59, 78, 0.75);
+  letter-spacing: 0.08em;
+  animation: rage-name 0.6s ease-in-out infinite;
+  will-change: opacity;
+}
+#boss-clock.tag::before { display: none; }
+/* the name's row: the clock's slot (--bc-room: its widest face, ENRAGED, in the clock's own type, so it grows with Large text) stays
+   free on the right, the same width stands on the left to keep a short name centred, and only that left spacer gives way to a long
+   name ("COLOSSUS PRIME", Large text): the name moves off the centre as far as it must, and is never cut before the bar's end */
+@media not all and (orientation: landscape) and (max-height: 500px) {
+  #bossbar.has-clock { --bc-room: calc(var(--fs-small) * 4.7 + 24 * var(--u)); }
+  #bossbar.has-clock #boss-name { display: flex; justify-content: center; padding: 0; }
+  #bossbar.has-clock #boss-name::before, #bossbar.has-clock #boss-name::after { content: ""; flex: 0 0 var(--bc-room); }
+  #bossbar.has-clock #boss-name::before { flex-shrink: 1; }
+  #bossbar.has-clock #boss-name > span { flex: none; max-width: calc(100% - var(--bc-room)); padding: 2px 4px 3px; overflow: hidden; text-overflow: ellipsis; }
+}
+/* a short landscape phone: the bar is 105-170 px wide and the name already runs past it (r7, below); no room for a slot beside the name.
+   The clock steps under the track's right end, over the buildings, and the name keeps the whole row */
+@media (orientation: landscape) and (max-height: 500px) {
+  #boss-clock { top: calc(100% + 5 * var(--u)); bottom: auto; }
+}
+
+/* results (section 13): a typed clear's "LEVEL 43" kicker over its title, the Horde kills line, the coaching line of a fail
+   with no play under it (D30), and a long game-over title (LINE OVERRUN) a size down so it stays one line on a phone */
+#complete-kicker {
+  margin-bottom: calc(-6 * var(--u));
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: var(--fs-h3);
+  line-height: 1;
+  letter-spacing: 0.08em;
+  color: var(--text);
+  text-shadow: var(--stroke-2), 0 3px 0 var(--outline);
+  white-space: nowrap;
+}
+/* a short portrait phone: the stack reaches the top row, and a big wallet would run into the centred kicker. It joins that row, right
+   of Home; the title keeps its place (the margin stands in for the kicker's slot) */
+@media (orientation: portrait) and (max-height: 640px) {
+  #complete-kicker { position: absolute; left: calc(var(--safe-left) + var(--icon-btn) + 10px); top: calc(var(--safe-top) + (var(--icon-btn) - var(--fs-h3)) / 2); margin: 0; }
+  #complete-kicker:not([hidden]) ~ #complete-title { margin-top: var(--fs-h3); }
+}
+#complete-line { margin-top: calc(-4 * var(--u)); color: #FFFFFF; font-variant-numeric: tabular-nums; }
+/* the separator of a list that may wrap (_fillParts): a plain space drawn as a dot; ending a line it collapses, and the dot with it */
+.part-gap {
+  word-spacing: 0.62em;
+  background: radial-gradient(circle, currentColor 0.075em, transparent 0.1em) center / 100% 100% no-repeat;
+}
+#gameover-tip {
+  max-width: min(calc(340 * var(--u)), calc(100% - 32px));
+  margin: calc(-6 * var(--u)) 0 calc(4 * var(--u));
+  padding: calc(6 * var(--u)) calc(16 * var(--u)) calc(7 * var(--u));
+  border-radius: calc(20 * var(--u));
+  background: linear-gradient(180deg, rgba(26, 38, 64, 0.88), rgba(8, 12, 22, 0.88));
+  box-shadow: 0 0 0 2px var(--secondary), 0 0 14px rgba(46, 155, 255, 0.35);
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: max(14px, calc(17px * var(--ui) * var(--text-scale)));
+  line-height: 1.15;
+  letter-spacing: 0.04em;
+  text-align: center;
+  color: #FFFFFF;
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.6);
+  text-wrap: balance;
+}
+#scr-gameover h1.long { font-size: var(--fs-h1); }
+
+/* SETTINGS: a row's note under its label (Night brightness: "Brighter flashlights. You still see as far.") */
+#row-night .row-label { padding: calc(5 * var(--u)) 0; }
+#scr-settings .row-sub {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: var(--fs-micro);
+  line-height: 1.25;
+  color: var(--text-muted);
+  text-wrap: pretty;
+}
+
+/* landscape phones: 48 px bubbles; the counter under the top row (beside the pause button while the boss bar shares it) */
+@media (orientation: landscape) and (max-height: 500px) {
+  #hud-anchors > .anchor { --anchor: max(48px, calc(48 * var(--u))); }
+  #hud-counter { top: calc(var(--safe-top) + var(--icon-btn) + 2 * var(--u)); }
+  #hud.boss-on #hud-counter { left: calc(var(--safe-left) + var(--icon-btn) + 12px); right: auto; margin: 0; top: calc(var(--safe-top) + var(--icon-btn) + 2 * var(--u)); }
+  #hud.boss-on.counter-on #powerups { top: calc(var(--safe-top) + var(--icon-btn) + 12px + var(--counter-h)); }
+  #hud.counter-on #district-banner, #hud.counter-on.pu-on #district-banner { top: calc(var(--safe-top) + var(--icon-btn) + 12px + var(--counter-h)); }
+  #hud-banner { top: 26%; padding: calc(6 * var(--u)) calc(22 * var(--u)) calc(9 * var(--u)); }
+  /* a typed clear's extra lines stay inside a landscape phone: smaller stars and lines */
+  #complete-kicker { margin-bottom: calc(-4 * var(--u)); font-size: var(--fs-small); }
+  #complete-kicker:not([hidden]) ~ #complete-title { font-size: var(--fs-h2); }
+  #complete-kicker:not([hidden]) ~ #stars { height: calc(40 * var(--u)); }
+  #complete-kicker:not([hidden]) ~ #stars > i { width: calc(32 * var(--u)); height: calc(32 * var(--u)); }
+  #complete-kicker:not([hidden]) ~ #stars > i:nth-child(2) { width: calc(40 * var(--u)); height: calc(40 * var(--u)); margin-bottom: calc(4 * var(--u)); }
+  #complete-line { margin-top: 0; font-size: var(--fs-h3); }
+}
+
+/* */
+/* */
+/* ==== r8 REGION HORDE (P6) ==== */
+/* the hold draws on the HUD kit (TYPES-UI region: bar cells, counter, bubbles, REPAIR, banner, labels); its section bars, lane */
+/* band and crate rings are world marks (js/hold.js) */
+/* a lesson in a portrait hold rests over the squad's rear rows, above the count label and under the wall's section bars, at the */
+/* full width: between REPAIR and FIRE a portrait phone leaves it 128-178 px, and it stood 5-7 lines tall over the count */
+@media (orientation: portrait) {
+  #hud.action-on #hint { left: 0; right: 0; bottom: 21%; max-width: calc(var(--hint-maxw) - var(--safe-left) - var(--safe-right)); }
+}
+/* */
+/* ==== r8 REGION NIGHT (P5) ==== */
+/* night-only overrides */
+/* */
+/* */
 
 /* =============================================================================================
    15. Accessibility: reduced motion, large text, coarse/short viewports

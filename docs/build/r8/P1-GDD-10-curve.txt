@@ -1,0 +1,85 @@
+GDD §10 DIFFICULTY CURVE — 1.4.0 changes (draft by P1; P10 folds this into docs/GDD.md §10; numbers re-measured by P1M)
+===========================================================================================================================
+
+Retitle: "§10. Difficulty curve (campaign levels 1–30 and beyond)".
+
+THE CURVE KEEPS RISING (F12, LEVELS.curve.post / post.late; levelgen.curve(L) is the one curve)
+- loopAfter is retired: the script cache key, the generator, the leak band, the prefetch, the boss rotation and the finale
+  test all use the real level number. Geometry keeps its L30 caps (1,400 m, 14 gate events, 12 m/s, E_start 10).
+- E_boss(L): 1.3.0's to L30 (600 from L20), +10 per level to 900 at L60, +5 per level to 1,500 at L180, flat after;
+  data.eBossOf(L) === curve(L).eBoss on L1–300 (the validator enforces it). Wave population +0.15 per level past L30 (28 at
+  L60), then +0.05 to 32 (L140); run-up +0.5 per level (45 at L60), then +0.1 to 50 (L110). Calibration 1.53 at L30, 1.75 at
+  L60, 1.85 at L260; shop exponent profileExp 0.50 / 0.53 / 0.56 at L30 / L60 / L260. Leak bands 0.28–0.32 to L45, 0.29–0.33
+  to L120, 0.30–0.34 to L180, 0.31–0.35 after. Endless keeps its own curve (bands read at most at L45).
+- Replace "After L30 the campaign loops at L30 parameters" with the above.
+
+THE TEACHING LADDER (PLAN D9 + amendment A14; one headline per level; validate-levels checks every rule)
+- Brute waves L4 → L6 (solo introduction on L6). Triple gates L7 → L8. ×3 L6 → L11 and ÷3 L8 → L11, one lesson on L11
+  (both features on two gates of that level). The Hulk Twins debut L17 → L16.
+- Pickup NEW cards (index L−1 of PICKUP_SCHEDULE, null = none): shotgun 1, armor 2, minigun 3, sniper 5, medic 6, flamer 8,
+  rocket 10, railgun 12 (A14: L11 keeps the ×3 / ÷3 lesson), laser 14, drone 15, magnet 16, booster 17, chip 20, APC 21.
+  No pickup debut on a Horde level (L4, 9, 13, 19 …) or on L4 / L7 / L18. Each special's own unlock level equals its
+  schedule level (the FIELD GUIDE's "MEET IT ON LEVEL n"). Endless keeps the 1.3.0 delivery order (LEVELS.endless.pickups).
+- Before L11 the gate generator never makes a ÷3: where the gap rule (below) needs a ÷ lane under the pick, the ÷2 keeps its
+  value and its ×1 rung moves past the full intake (still within what a full squad lands), else it becomes a −B lesser evil.
+- Update the level table: L4 "— (HORDE in 1.4.0)", L6 "brute, medic", L7 "— (NIGHT)", L8 "triple gates, flamethrower",
+  L9 "brute pairs (HORDE)", L10 "rocket; endless unlocks", L11 "×3 and ÷3 gates, runner packs", L12 "railgun", L13 "— (HORDE)",
+  L15 "drone", L16 "Hulk Twins, magnet, crawler swarms" (boss Hulk Twins), L17 "booster" (boss Juggernaut), L20 "chip",
+  L21 "APC".
+
+GATES: STEERING MUST MATTER (F12 + 1.4.0)
+- Gap rule: every lane but the design pick shrinks until its full-intake outcome is ≤ gap(L) × the pick's (0.60 at L3, 0.62 at
+  L9, 0.64 from L20); all-red pairs get it from L3 except on L5.
+- OG (D27, GATE_RULES.generation.openerGapShops ['expected', 'max']): the opener's gap is applied again at the start squads
+  of the expected shop and of rank 10 (25), so a bigger start squad never finds a lane far above the pick at gate 1 (RUN
+  levels and the Horde run phase; never endless).
+- Fixed-position lines (never steers / held left / held right, full intake) are checked at the expected shop and at rank 10
+  against a model of the boss (levelgen.bossOutcome); a line near or past the boss's win line costs the attempt score, a
+  line that clears gets the 32-attempt budget and the side repair (mirroring pairs / triples, last gate first; each mirror
+  re-simulates the declared line before it is validated, and a rejected mirror restores it).
+- Shop-surplus compensation (D26, LEAK_MODEL.surplusExp 1.0): in the campaign, wave / guard / run-up / minion HP scale with
+  util.shopComp(p, pExp(L), profileExp(L), 1.0) — p^profileExp up to the expected shop (data.expectedRanksOf: the tester
+  ranks to L30, rank 10 after), and the surplus above it answered in full. Upgrades past the expected shop still raise the
+  start squad and the boss fight, but no longer weaken the waves. Nothing changes from L31 (the expected shop is rank 10).
+- D31: a best attempt with validator errors gets the long budget; if a full-intake line is still above its limit, its richest
+  lane loses one design grid step at a time (re-validated) until the script validates. 0 error scripts on L2–120 × 8 seeds,
+  L6–8 × 24 seeds and L2–300 × 2 seeds (validate-levels --seeds).
+- Generation is sliced (D39): levelgen.levelSteps / generateRunSteps yield after every modelled moment and validation stretch;
+  a slice starts no step unless the predicted step — the larger of the last one and 0.3 × the job's largest (SLICE_JOB_SHARE)
+  — plus 1.5 ms still fits its 8 ms. Measured: 53 ms per level on desktop; at 4× CPU slice p95 7.2 ms (RUN L2–60, 81 slices a
+  level, +8 % over the plain last-step rule's 7.9 ms) and 7.7 ms (Horde run phases). A share of 0.5 gave 6.5 / 7.2 ms for +34 %
+  slices (a longer cold-start spinner), 0 gave 7.9 / ≈ 8.1 ms (build/P1/gen/fr1).
+
+FAIL-STREAK ASSIST ("REINFORCEMENTS") — only for a player who played (D30 as amended by A1)
+- Replace "after 2 consecutive failures" with: after 2 consecutive COUNTED failures. A failed run counts only with ≥ max(3,
+  minShare·gate events reached) counted gate decisions (LEVELS.curve.assist; minShare 0 until P1M measures it). A gate decision
+  is counted at most once per gate event, at its commit, when the steering target travelled ≥ 2 m or changed lane while that
+  event was the active one. A run left alone counts nothing and neither adds to nor resets the streak; a single swipe counts
+  one decision at most. level.activity { decisions, eventsReached } holds the run's counts (later level types add theirs with
+  level.addActivity). RETRY still plays a fresh road after every failure.
+- Measured (build/P1/activity): idle and held lines 0 decisions; a one-swipe line exactly 1; the decent / skilled bots 3–7 of
+  7–14 events (counted on 11 of 12 runs each); the decent bot at shop rank 0 on L20 failed twice (counted) and started its
+  third attempt with +48 soldiers; idle and one-swipe sequences never got the assist.
+- Open for P1M before release (verifier r1; cause corrected in fix round 2): the counter credits only 1–7 of a decent
+  player's 7–14 gate events (strongj / human on L7, L10, L20: 50 / 55 of 120). The commit→pass stretch is not the cause:
+  gates.activeEvent stays on an event until it passes at z ≥ 0, 4 m after its commit at WORLD.gateCommitZ, and the steering
+  target moved 0.0 m in that stretch on all 24 probe runs. Every uncounted event is one where the target stayed in the lane
+  nearest it at the event's activation and travelled < 2 m (135 of 135; median 1.1–1.2 m). Two kinds (build/P1/activity/
+  actcause-fr2*): (1) SINGLE gate events — one gate across the whole road, no choice to make — are 28 of the 120 events and
+  count 0; they still add to eventsReached; (2) pairs where the pick is the side the target already leans to: the harness bots
+  steer only toward the active event and drift back to the road centre (± their jitter) while no event is live, so a pick on
+  the near side is reached in < 2 m (42 of 92 pairs uncounted for strongj, 37 of 92 for human). A beginner who fails early on
+  a short level (3–4 events reached) can stay under minDecisions 3, get no REINFORCEMENTS and be told "STEER TO PICK YOUR
+  GATES" (P7) although they steered (strongj L7 seed 1307 counted 1 of 7; that run cleared, a failed one like it would not
+  count). The counting matches A1 as written. P1M measures the counted share of FAILED runs for strongj and human (A1 pass: ≥ 90 %) and, only if needed, changes values
+  (minDecisions / minShare / minTravelM); a minShare > 0 should be measured against multi-lane events only, since singles
+  can never be decisions.
+
+THE HORDE RUN PHASE (generator side; PLAN §B / D28)
+- levelgen.generateRunSteps(L, seed, opts) builds the run before a hold on runCurve(L, opts): gates events on 140 + 100·(gates − 1)
+  m, a 5-zombie run-up, the design line ending at E_hold (eEnd); fixed lines ≤ 0.80·E_hold at the expected shop and rank 10, a
+  line ≥ 0.84·E_hold gets the long budget and the side repair. Model, 12 Horde levels × 8 seeds: 0 invalid, expected-shop
+  lines ≤ 0.82·E_hold on 95 of 96 and ≤ 0.86 on 96 of 96.
+
+Validator status: `node tools/validate-levels.js` reports 0 errors (warnings are fixed-line and leak-band notes); the summary
+prints the error-script count and the teaching ladder's rules.

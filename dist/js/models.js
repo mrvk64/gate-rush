@@ -471,8 +471,9 @@ function fillColor(arr, hex) {
 /**
  * Gives a primitive the character attribute set: `color` (linear rgb), `aPart` (part id, + 0.5 when
  * emissive), `aPivot` (joint position); deletes `uv`/`uv1` (ARCH §6.4). Returns the same geometry.
+ * 1.4.0: exported (ARCH §3).
  */
-function tagPart(geo, partId, pivot, hex, emissive = false, tag = TAG.NONE) {
+export function tagPart(geo, partId, pivot, hex, emissive = false, tag = TAG.NONE) {
   if (geo.hasAttribute('uv')) geo.deleteAttribute('uv');
   if (geo.hasAttribute('uv1')) geo.deleteAttribute('uv1');
   if (!geo.hasAttribute('normal')) geo.computeVertexNormals();
@@ -525,6 +526,9 @@ function mergeAll(geos, label) {
   merged.name = label;
   return merged;
 }
+
+/** 1.4.0 (ARCH §3): merges tagPart-ed geometries (disposes them). */
+export function mergeTagged(geos, label) { return mergeAll(geos, label); }
 
 /** Tags every part descriptor and merges them into one character geometry. */
 function mergeParts(parts, label) {

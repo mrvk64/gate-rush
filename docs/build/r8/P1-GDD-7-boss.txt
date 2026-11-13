@@ -1,0 +1,58 @@
+GDD §7 BOSS — 1.4.0 changes (draft by P1; P10 folds this into docs/GDD.md §7)
+================================================================================
+
+Replace the table-HP sentence with:
+Every level ends with a boss. Table HP = 24·E_boss(L), ×1.25 on finales (every 5th level: data.isFinale(L) = L % 5 === 0 is
+the only finale test), rounded to 50; Colossus Prime's ×1.25 never stacks with the finale's. At spawn: table × count scale
+× shop scale. In the campaign the count scale never goes below the table (BOSSES.squadScale.minMult 1.0) and the shop scale
+is the full clamp(m^0.9, 1, 10) at any squad size (BOSSES.shopScale.fade false; endless mini-bosses keep the 1.3.0 fade).
+
+New paragraph — the under-curve floor (r8v2, BOSSES.ttkBand.under, level._bossUnderFloor):
+A campaign squad that reaches the boss below the target (C < E_boss) meets at least t·mult·(E_boss/C)^3 seconds of fight
+against its own fire: HP ≥ round50(DPS(E)·t·mult·(E/C)^2), DPS(E) = E·fire rate·damage·boss damage·0.8, mult = the table's
+finale / Prime multiple, C/E floored at 0.3. t = 11.5 s from L6 to L60, rising 0.005 s per level to 12.5 s at L260
+(under.tAt can override single levels: the L5 experiment). A squad at 0.9·E kills a regular boss in ≈ 15.8 s of fire, at 0.8·E
+in 22.5 s, at 0.7·E in 33.5 s, at 0.6·E in 53 s — past the enrage. effStatic (1.0) multiplies the floor, decided at the boss's
+spawn, only for a run that did not play its gates (fewer counted gate decisions than the assist rule of §10) and for the
+generator's never-steering model lines; it stays 1.0 because the P1 boss audit fixed the static squads' extra damage at its
+source (below).
+
+New paragraph — ENRAGE (replaces the 45 s safety valve in the campaign; BOSSES.valve.campaign):
+20 s after the fight starts (26 s on a finale) the boss walks to 3 m and chews round(chew·(1 + n)) soldiers in second n,
+chew = max(3, round(0.05·E_boss)); the squad keeps firing. Slow archetypes enrage later for a squad arriving near full size:
+Colossus and Colossus Prime +6 s, Hulk Twins +8 s, in full from 0.95·E_boss and none below 0.8·E_boss (an under-curve squad
+keeps the plain 20 / 26 s). boss.js emits 'boss:enrage' { after, extra } when it starts (after = seconds from boss:fight,
+extra = the archetype's part), and 'boss:fight' carries enrageAt (the same seconds) for the HUD countdown. Measured: L12
+(Hulk) squad pinned at 0.6·E_boss at the fight — boss:enrage 19.98 s after boss:fight, L15 (finale) 26 s (smoke,
+build/P1/smoke/fr1/enrage-L12, enrage-L15; fix round 2: build/P1/smoke/fr2/enrage-L12). Endless mini-bosses keep the 45 s
+valve (3 soldiers/s).
+FIELD GUIDE (fix round 2): the TOO SLOW entry (boss.valve, 'bosses' section, marked seen at the first chew) now reads
+BOSSES.valve.campaign and the endless valve: "After 20 s of fight (26 s on a finale; slow bosses may wait a bit longer) the
+boss walks in and eats more soldiers every second. Endless: 45 s, 3 a second." 1.3.0's line ("After 45 s of fight … eats 3
+soldiers a second") described only the endless valve once the campaign enrage shipped. No doc lists the entry texts (§14's
+Field guide row describes the screen); the numbers stay read from data.js and check-codex checks the entry.
+Tables (fix round 2): in the §7 beat table replace the 'Safety valve | fight > 45 s' row with two rows —
+  | Enrage (campaign) | fight > 20 s (26 s on a finale; Colossus / Prime +6 s, Twins +8 s for a squad ≥ 0.8·E_boss, in full
+  at 0.95·E_boss) | Boss advances to 3 m and chews round(chew·(1 + n)) soldiers in second n, chew = max(3, round(0.05·E_boss)),
+  while being shot point blank; each chew: floater, red vignette pulse. The run is lost only when C = 0 | — |
+  | Safety valve (endless mini-bosses) | fight > 45 s | as 1.3.0: 3 soldiers/s | — |
+and in §0's Boss row replace "safety valve chews 3 soldiers/s" with "the campaign boss enrages after 20 s (26 s on a finale)
+and chews a growing share of the squad; endless mini-bosses keep the 45 s valve (3 soldiers/s)". ARCHITECTURE §6 (boss.js):
+the "Safety valve: after valve.after 45 s" sentence gains "; a campaign boss uses spec.valveAfter / chew / chewRamp
+(level._fireBoss from BOSSES.valve.campaign) and emits boss:enrage".
+
+Campaign attacks: the Hulk slam kills 5 % of C (min 3) + L/2; the Spitter Queen's globs 2 % of C each (campaign only).
+
+Sniper vs bosses (the P1 boss audit, D18; amend §8.3's sniper row): a boss shot is capped at 5 % (before the boss-damage
+upgrade) of boss.capHp, set at the spawn = the boss HP before the floors (table × count scale × shop scale) for a squad at or
+above E_boss, and the HP at exactly E_boss × C/E_boss under the curve — the sniper's boss damage never grows with the floors.
+At C ≥ E_boss this is 1.3.0's cap whenever the TTK floor does not bind; where it binds (big squads past ≈ 1.3·E_boss, finale
+bosses) the cap stays at the unfloored HP, a deliberate change from 1.3.0 (the floor sets the shortest fight; a cap riding on
+it shortened that fight again). Before, the cap was 5 % of the boss's floor-raised max
+HP, so an under-curve squad that drove through a sniper lane took 12.5 % of any boss per free shot at rank 10 and beat the
+under-curve floor (live boss DPS up to 7× the squad formula; every other source ≤ 1.14×). Endless mini-bosses keep the max-HP
+cap. Audit report: build/P1/audit.txt.
+
+Rotation (data.bossIdOf): L1–L30 from BOSSES.rotation with the Hulk Twins debut moved to L16 (L17 the Juggernaut); past L30
+a finale cycles the six district finale bosses (L35 Spitter Queen, L40 Juggernaut, L45 Colossus, L50 Prime, L55 Twins, L60
+Prime, L65 Queen …) and every other level loops L21–L29's bosses. Update the archetype table: "Hulk Twins (L16, L25, L29)".

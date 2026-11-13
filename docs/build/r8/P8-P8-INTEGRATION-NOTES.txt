@@ -1,0 +1,63 @@
+P8 integration notes (draft for docs/ARCHITECTURE.md and docs/BALANCE.md; P10 folds them in)
+==========================================================================================
+
+Endless (A16, D22)
+- levelgen.generateChunk runs with the module flag endlessGen set (try/finally around chunkEvents). While set, applyGap is a no-op, which also covers gainOf (it materialises gates through
+  the same path), and the layout weights come from LEVELS.endless.layoutWeights, the 1.3.0 values. Endless gates are back to 1.3.0; only the accepted D11-19 wave splits (F12's WAVE_WEIGHTS L30 row) remain.
+
+Readiness
+- level._runRequest re-checks _partsReady after its parts resolve, up to REQ_PREP_TRIES rounds. A prepare can resolve with programs missing (context loss, tier commit, dead run). After the
+  last round start() plays on with its 'level.unprepared' warning, so a spinner never hangs.
+- An abandoned Horde tile: crowd.prepare and hold.prepare carry a { dead } run through render.addWarmable(obj, run); level._beginRun calls cancelPrepare() on both when the run's base has no
+  crowd (endless too). The prepare stops between chunks, stays unready, and the next prepare() finishes it from the program cache. The night equivalent is render.setNight killing its run.
+
+Stage flags
+- LEVEL_TYPES.horde.enabled and .night.enabled are true. chase, escort and the combos stay off for 1.5.0.
+- ui.js isBlackout reads NIGHT.blackout.districts, the same data render.setNight uses, so the badge and the lamps cannot drift apart.
+
+Tools
+- smoke --matrix [filter]: 3 types x High / Medium / Low / software x phone / landscape, one Chrome per cell, lock free between cells. Writes matrix.json. See the header of tools/smoke.js.
+- harness/p8: real.mjs (a plain URL, real taps, event log, bots), seq.mjs (scenes fresh, owner, ownerprev, retype, idle, assist, sweep), dbgcopy.mjs, boottime.mjs (D46 row), reqcheck.mjs, gates.sh, mkpreview.sh, seedpage.mjs.
+
+Lessons and the pause card (fix round 1)
+- hold.sweep is marked by the drag itself: hold._sampleLane calls hold._done('hold.sweep') when _sweepM reaches HORDE lessons.sweepM, next to _release. hint:release alone leaves a pill under HINT_MARK_S unmarked (level.js relies on that for subjects that merely passed), so a player who obeyed within 1.5 s met it again on every Horde.
+- STRINGS.pause.controlsKeysHold / controlsTouchHold: ui._fillPauseControls picks them while hold.active, so the card names sweep and REPAIR in a hold and steer in the run part of the same level.
+
+Preview (harness/p8/mkpreview.sh)
+- Three trees under E:/Temp/claude/r8build: preview (plain, starts at L1), preview-owner (first-run owner-like save), preview-debug (preview-owner with &debug=1 appended in js/main.js, for a host that never passes a query string). The title is rewritten in the copies only; the repo's artifact.html stays Gate Rush.
+
+Test-tool notes
+- p6/holdrace.mjs does not race anything: under ?type=horde the override applies to every level, L1 included, so its second tap waits for the same prepare. p8/race.mjs is the same tool without ?type (a real Horde tile, a real day tile).
+- A lesson read by nobody is shown again (ui._attended, r7): a bot that acts only through the input fields is not attending. seq.mjs sends a real touch every 3 s, except in the idle scene.
+- A ?debug=1 run never shows the briefing unless ?typesPreview=1 is set too (P7), so the smoke matrix plays straight through; the briefing rows are in seq.mjs on a plain URL.
+
+Row 31, economy (fix round 2; a FAILED reading, handed to P9)
+- The first report's "+7 %" on L43 was a tool error: coins.mjs took the premium off the whole payout. The premium is on the level bonus only (level.js starRaw). coins.mjs now takes it off bonusStars, adds a 3-star figure, the +-20 % verdict against the RUN neighbours and the crowd's share, and exits 1 on a miss.
+- The share is the crowd's coins AS CREDITED (real.mjs wraps level._onCrowdKills and reads breakdown.kills across it, so coinMult is in). All of it lands in phase 'hold', so ECONOMY.bossFightKillMult never touches it.
+- Readings: P8/r2/coins.txt, head ab62b1e, one bot run per level, so a reading and not a rate. fresh raises ranks between levels (coinMult 1.4 on L3, 1.5 on L4). A 'before' figure is the income without the premium; 'at 3 stars' rebuilds the star line.
+    L4  horde 3 stars  680 against L3 360 +89 %; L5 190 +258 % (a 1-star bot run; at 3 stars 295, +131 %)
+    L9  horde 3 stars  1,263 against L8 1,026 +23 %; L10 1,030 +23 % (at 3 stars 1,150, +10 %)
+    L43 horde 2 stars  5,589 against L44 4,259 +31 %; at 3 stars 6,039, +42 %
+    L7  night 2 stars  521 against L6 442 +18 %; L8 1,026 -49 % (at 3 stars -40 %). RUN itself steps from 442 to 1,026 across L6-L8, so this is mostly that step.
+    L45 night 2 stars  3,839 against L44 4,259 -10 %; at 3 stars 4,309, +1 %. Inside the band.
+    Crowd share (band 25-35 %): L4 37.2 %, L9 41.3 %, L39 55.8 and 56.2 %, L43 53.0 %. All kill coins, the RUN part included: L4 39.4 %, L9 52.4 %, L39 70 %, L43 71.3 %.
+- The knob is HORDE_GEN.coins.scale, now [[4, 0.15], [30, 0.5]]. Total raw crowd coin = scale x n1(L); past L30 it is pinned to 0.5 x n1(34) = 1,500 raw, so it stops growing and rank 10 pays x2.
+- Estimates only, nothing below was run: holding every other bucket, a 30 % share needs the crowd coin at about x0.72 on L4, x0.61 on L9, x0.38 on L43 and x0.34 on L39 (x0.26 to x0.48 across the 25-35 % band at L39-43). That is roughly scale [[4, 0.11], [30, 0.19]]. L43 would then pay about 3,830, about 3,720 before premium: -13 % against L44 as played and about -2 % at 3 stars. L9 about 1,050, about +2 %. L4 stays high at about +69 % against L3, because its non-crowd income (446) already beats L3's 360, so L4 needs its own look (piles 88, level bonus, LINE HELD 40).
+- Share depends on rank: coinMult scales kills and boss only, so a low-rank player's share is lower than these. Fix which shop the row is read at before fitting. Verifier r2 estimated about 41 % at L43 with coinMult 1; not measured here.
+- The same pass owns idle coins on RETRY (A22): the four idle L43 attempts kept 1,482, 1,089, 1,836 and 1,865 coins.
+
+For P9's checks
+- validate-levels --from 121 --to 300 is not in any chain after P8 and fails today: 4 errors (L187, L207, L232, L277, passive clears at 0.70-0.83 E_hold). Row 2 fails past L120. P9 must add this range to its run.
+
+For the main session (publish)
+- The trees come from r8/P8 at ab62b1e and the plan says export r8-140. After the squash merge: bash harness/p8/mkpreview.sh r8-140, then node harness/p8/mkfilelist.mjs <out.json>. git archive reads the ref from the P8 worktree, so nothing there needs to move.
+- The page plus the 27 files in the manifest (26 js, css/game.css) are enough: verifier r2 smoked exactly that tree, clean, 0 failed requests.
+- Steer the owner to preview-owner for play. preview-debug is for the overlay only: a debug run skips the briefing unless ?typesPreview=1 is set, so that copy never shows the first-meeting flow.
+
+For owner checkpoint 2 (from the existing D18 / B1 rule, not new in P8)
+- At rank 10 on L7, seed 1007, 215 soldiers met a 53,200 HP Hulk and 52 soldiers met 564,350 HP (level.js _bossUnderFloor, (E/C)^2, minRatio 0.3), so one bad last gate makes that boss unwinnable. Worth one line to the owner.
+
+Test-tool notes (fix round 2)
+- seq retype RETRIES until the clear on both the first run and the replay (up to 8): the bot's L7 outcome on seed 1007 turns on its last gates, so one loss proved nothing. A lost attempt is now a row (record untouched), and x0.6 is read exactly from bonusStars on a clear.
+- dbgcopy loads artifact.html, where the seed lives, so it can read hl 43. Only the local server's /favicon.ico 404 is forgiven.
+- The level:complete payload's score can be fractional (37076.6); the screen and rec.bestScore are integers in the runs read. Harmless, left alone.

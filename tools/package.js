@@ -2,6 +2,14 @@
 // Builds dist/ — exactly the files a static host needs to serve Gate Rush as an installable web app (PWA).
 // Usage: node tools/package.js            → dist/ (index.html, artifact.html, manifest, sw.js, css/, js/, icons/)
 //        node tools/package.js --check    → also verifies every file sw.js pre-caches exists in dist/
+//        node tools/package.js --lint     → 1.4.0 (A12, D46): NO build — checks that sw.js PRECACHE and index.html's
+//                                           modulepreload list name exactly the js/*.js files, and prints the js/ download
+//                                           size: raw bytes and gzip bytes (zlib level 9, summed per file — what a server
+//                                           sends; the concatenated figure is printed beside it). Writes nothing, unless
+//                                           --size-log <file> [--label <text>] appends one size row to that file.
+//                                           --vs <file> (read only) or --size-log also print the change against the
+//                                           log's newest row (the r8-140 head; every merge appends one); --allow <KB>
+//                                           (1 KB = 1000 B) then FAILs when js/ raw grew by more (D46 allowances).
 // Upload the dist/ folder to any static host with HTTPS (Netlify Drop, GitHub Pages, Cloudflare Pages, Vercel …).
 //
 // Round 5 (r5-ui-sw needsOtherGroup 4) — the release rule is enforced here: sw.js v4 serves every precached file
@@ -15,9 +23,60 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import zlib from 'node:zlib';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DIST = path.join(ROOT, 'dist');
+
+if (process.argv.includes('--lint')) process.exit(lint());
+
+/** --lint: the PRECACHE / modulepreload lists against js/, and the js/ raw / gzip bytes. Returns the exit code. */
+function lint() {
+  const js = fs.readdirSync(path.join(ROOT, 'js')).filter((f) => f.endsWith('.js')).sort();
+  const sw = fs.readFileSync(path.join(ROOT, 'sw.js'), 'utf8');
+  const pre = /\bPRECACHE\s*=\s*\[([\s\S]*?)\]/.exec(sw);
+  const precached = new Set(pre ? [...pre[1].matchAll(/["']\.\/js\/([^"']+\.js)["']/g)].map((m) => m[1]) : []);
+  const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+  const preloaded = new Set([...html.matchAll(/<link\b[^>]*rel="modulepreload"[^>]*href="js\/([^"]+\.js)"/g)].map((m) => m[1]));
+  const problems = [];
+  for (const [name, set] of [['sw.js PRECACHE', precached], ['index.html modulepreload', preloaded]]) {
+    const missing = js.filter((f) => !set.has(f)), stale = [...set].filter((f) => !js.includes(f));
+    if (missing.length) problems.push(`${name} is missing ${missing.join(', ')}`);
+    if (stale.length) problems.push(`${name} lists files not in js/: ${stale.join(', ')}`);
+  }
+  let raw = 0, gz = 0;
+  const bufs = [];
+  for (const f of js) { const b = fs.readFileSync(path.join(ROOT, 'js', f)); bufs.push(b); raw += b.length; gz += zlib.gzipSync(b, { level: 9 }).length; }
+  const cat = zlib.gzipSync(Buffer.concat(bufs), { level: 9 }).length;
+  const n = (v) => v.toLocaleString('en-US');
+  console.log(`package --lint: ${js.length} js files; PRECACHE ${js.filter((f) => precached.has(f)).length}/${js.length}, modulepreload ${js.filter((f) => preloaded.has(f)).length}/${js.length}`);
+  console.log(`package --lint: js/ raw ${n(raw)} B, gzip ${n(gz)} B (zlib 9 per file; concatenated ${n(cat)} B)`);
+  const arg = (k) => { const i = process.argv.indexOf(k); return i > 0 && process.argv[i + 1] ? process.argv[i + 1] : null; };
+  const logFile = arg('--size-log'), allow = arg('--allow'), ref = logFile || arg('--vs');
+  const rows = ref && fs.existsSync(ref) ? fs.readFileSync(ref, 'utf8').split('\n').filter((l) => /\| raw \d+ \| gzip \d+/.test(l)) : [];
+  let delta = '';
+  if (rows.length) {
+    const last = rows[rows.length - 1], sg = (v) => (v >= 0 ? '+' : '') + n(v);
+    const dr = raw - Number(/raw (\d+)/.exec(last)[1]), dg = gz - Number(/gzip (\d+)/.exec(last)[1]);
+    delta = `raw ${sg(dr)} gzip ${sg(dg)} vs ${last.split(' | ')[1]}`;
+    if (allow) {
+      const over = dr - Math.round(Number(allow) * 1000);
+      delta += `, allowance ${allow} KB ${over > 0 ? `OVER by ${n(over)} B` : 'OK'}`;
+      if (over > 0) problems.push(`js/ raw grew ${n(dr)} B: ${n(over)} B over the ${allow} KB allowance (D46: trim, or the steward rebalances)`);
+    }
+    console.log(`package --lint: ${delta}`);
+  } else if (allow) problems.push('--allow needs --vs or --size-log naming a size log with at least one row');
+  if (logFile) {
+    let rev = '?';
+    try { rev = execFileSync('git', ['-C', ROOT, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim(); } catch { rev = '?'; }
+    const label = arg('--label') || rev;
+    fs.appendFileSync(logFile, `${new Date().toISOString().slice(0, 16).replace('T', ' ')} | ${label} | ${rev} | ${js.length} files | raw ${raw} | gzip ${gz} | concat-gzip ${cat}${delta ? ' | ' + delta : ''}\n`);
+    console.log(`package --lint: size row appended to ${logFile}`);
+  }
+  for (const p of problems) console.error('package --lint: ' + p);
+  console.log(problems.length ? `package --lint: FAIL (${problems.length})` : 'package --lint: OK');
+  return problems.length ? 1 : 0;
+}
 
 // Rebuild artifact.html from index.html first so both shells match.
 execFileSync(process.execPath, [path.join(ROOT, 'tools/build-artifact.js')], { stdio: 'inherit', cwd: ROOT });

@@ -41,11 +41,13 @@
 // level runner may call from step() (solveWaveHp, expectedHits, gateDefaults, laneOutcome)
 // allocate at most one small object per call (solveWaveHp accepts an `out` object to allocate nothing).
 
-import { Rng, clamp, roundDesign } from './util.js';
+import { Rng, clamp, roundDesign, shopComp } from './util.js';
 import {
   WORLD, GATE_RULES, ZOMBIES, LEAK_MODEL, WAVE_WEIGHTS, WAVE_PATTERNS, WAVE_RULES, LEAK_BANDS,
-  BOSSES, PICKUP_SCHEDULE, PICKUPS, LEVELS, HINTS, UPGRADES, FIRE,
+  BOSSES, PICKUP_SCHEDULE, PICKUPS, LEVELS, HINTS, UPGRADES, FIRE, bossIdOf, isFinale, expectedRanksOf, lateRise, bossUnderT, eBossOf, enrageExtra,
+  LEVEL_TYPES, levelTypeOf,
 } from './data.js';
+import { holdSpec, generateHoldScript } from './holdgen.js';
 
 // ---------------------------------------------------------------------------------------------
 // Generator knobs (round 5: every former DATA-MISSING literal now lives in data.js). Each read falls back to the round-4
@@ -94,6 +96,8 @@ const WEAK_LINE_FAIL = num(CURVE_DATA.weakLineFail, 0.02);
 const GEN_ATTEMPTS = num(GENERATOR_DATA.attempts, 24);
 const GEN_ATTEMPTS_WEAK = Math.max(GEN_ATTEMPTS, num(GENERATOR_DATA.weakAttempts, GEN_ATTEMPTS));
 const SPEC_TRIES = num(GENERATOR_DATA.specTries, 8);
+// LEVELS.curve.generator.shrinkSteps — r8 (D31): the most grid steps shrinkGreedy takes.
+const SHRINK_STEPS = num(GENERATOR_DATA.shrinkSteps, 40);
 const GB = GENERATOR_DATA.gainBand || {};
 function gainTol(b, lo, hi) { return { lo: Math.log(num(b && b[0], lo)), hi: Math.log(num(b && b[1], hi)) }; }
 const GAIN_TOL = {
@@ -361,31 +365,33 @@ function waveSharesAt(L) {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Difficulty curve for campaign level L (L > LEVELS.curve.loopAfter uses L = loopAfter).
+ * Difficulty curve for campaign level L (r8v2: the real level; past L30 LEVELS.curve.post, past L60 post.late).
  * @returns {{ L, len, v, gates, waves, pop, eStart, s0Assumed, eBoss, bossHp, bossId, milestone, band, bandMid, runup, newest, bandIdx }}
  */
 export function curve(L) {
   const c = LEVELS.curve;
-  const Lc = clamp(Math.floor(Number.isFinite(L) ? L : 1), 1, c.loopAfter);
+  const Lc = Math.max(1, Math.floor(Number.isFinite(L) ? L : 1));   // r8v2: loopAfter retired
+  const po = c.post, over = po && Lc > po.from ? Lc - po.from : 0;   // r8: levels past L30
   const len = Math.min(c.len.cap, c.len.base + c.len.per * (Lc - 1));
-  const v = Math.min(WORLD.speed.cap, WORLD.speed.base + WORLD.speed.perLevel * (Lc - 1));
+  let v = Math.min(WORLD.speed.cap, WORLD.speed.base + WORLD.speed.perLevel * (Lc - 1));
+  if (po && Lc > po.speedFrom) v = Math.min(po.speedCap, v + po.speedPer * (Lc - po.speedFrom));
   const gates = Math.round(len / c.gatesPer);
   const waves = Lc >= c.wavesEqualGatesFrom ? gates : gates - 1;
-  const pop = Math.min(c.pop.cap, c.pop.base + Lc);
+  const pop = over > 0 ? Math.min(po.popCap, Math.round(c.pop.cap + po.popPer * over)) + Math.floor(lateRise(Lc, 'pop')) : Math.min(c.pop.cap, c.pop.base + Lc);
   const eStart = Math.min(c.eStart.cap, c.eStart.base + c.eStart.per4 * Math.floor((Lc - 1) / 4));
   const s0Assumed = c.s0Assumed(Lc);
-  const eBoss = Math.min(c.eBoss.cap, roundE(c.eBoss.base * Math.pow(c.eBoss.growth, Lc - 1)));
-  const bossId = BOSSES.rotation[Math.min(Lc, BOSSES.rotation.length) - 1];
+  const eBoss = Math.min(over > 0 ? po.eBossCap : c.eBoss.cap, roundE(Math.min(c.eBoss.cap, c.eBoss.base * Math.pow(c.eBoss.growth, Math.min(Lc, po ? po.from : Lc) - 1)) + (over > 0 ? po.eBossPer * over : 0))) + roundE(lateRise(Lc, 'eBoss'));
+  const bossId = bossIdOf(Lc);                                // r8v2: finales cycle the district finale bosses past L30
   const arch = resolveArchetype(bossId);
-  const milestone = BOSSES.milestones.indexOf(Lc) !== -1;
+  const milestone = isFinale(Lc);
   // D9: the milestone ×1.25 and an archetype hpMult (Colossus Prime) never stack
   const mult = Math.max(milestone ? BOSSES.milestoneMult : 1, (arch && arch.hpMult) ? arch.hpMult : 1);
-  const bossHp = roundBossHp(BOSSES.hpPerE * eBoss * mult);
+  const bossHp = roundBossHp((BOSSES.hpPerE + (over > 0 ? po.hpPerEPer * over : 0)) * eBoss * mult);
   const band = bandFor(Lc);
   return {
     L: Lc, len, v, gates, waves, pop, eStart, s0Assumed, eBoss, bossHp, bossId, milestone,
     band, bandMid: (band[0] + band[1]) / 2,
-    runup: Math.min(c.runup.cap, c.runup.base + Lc),   // run-up horde size (GDD §6.2: 15 + L, cap 30)
+    runup: over > 0 ? Math.min(po.runupCap, Math.round(c.runup.cap + po.runupPer * over)) + Math.floor(lateRise(Lc, 'runup')) : Math.min(c.runup.cap, c.runup.base + Lc),   // run-up horde size (GDD §6.2: 15 + L, cap 30)
     newest: newestType(Lc),
     bandIdx: bandIndexFor(Lc),
   };
@@ -823,10 +829,10 @@ function chooseLane(ev, E, hits, bandMid, mode, out) {
     const fv = lane.op === 'item' ? E * FACE_ITEM.mult + FACE_ITEM.add : laneOutcome(lane, Eg, 0);
     if (fv > faceVal) { faceVal = fv; faceIdx = i; faceAfter = after; faceLoss = loss; }
   }
-  if (mode === 'nosteer') {
+  if (mode === 'nosteer' || mode === 'fixL' || mode === 'fixR') {
     // round-3 QA LVL-22: a squad that never steers commits to the lane nearest the road centre (gates._nearestLane: ties
     // to the left) — lane 0 of a pair or single, the middle lane of a triple
-    const i = lanes.length === 3 ? 1 : 0;
+    const i = mode === 'fixL' ? 0 : mode === 'fixR' ? lanes.length - 1 : (lanes.length === 3 ? 1 : 0);   // r8: fixed-position lines
     let loss = 0;
     if (ev.guards) for (let g = 0; g < ev.guards.length; g++) if (ev.guards[g].lane === i) loss += bandMid * unitStats(ev.guards[g].units, _stats).bites;
     out.idx = i; out.after = laneOutcome(lanes[i], Math.max(1, E - loss), hits); out.guardLoss = loss;
@@ -1010,6 +1016,12 @@ function pushSample(samples, at, e, force) {
  * @returns {{ samples:{at:number,e:number}[], final:number, rows:object[] }}
  */
 function simulate(moments, p, mode, hooks) {
+  const it = simulateSteps(moments, p, mode, hooks);
+  for (;;) { const r = it.next(); if (r.done) return r.value; }
+}
+
+/** r8v2: simulate as a generator (yields after every moment when hooks.slice). */
+function* simulateSteps(moments, p, mode, hooks) {
   const samples = [{ at: 0, e: Math.max(1, Math.round(p.E0)) }];
   const rows = [];
   let E = p.E0;
@@ -1056,7 +1068,7 @@ function simulate(moments, p, mode, hooks) {
       const st = unitStats(ev.units, _stats);
       let leak;
       // the full-intake profiles fire f·d times the base DPS (leak is linear in the squad DPS, so scale E)
-      const Ed = (mode === 'max' || mode === 'nosteer') && p.dpsMult > 0 ? E * p.dpsMult : E;
+      const Ed = (mode === 'max' || mode === 'nosteer' || mode === 'fixL' || mode === 'fixR') && p.dpsMult > 0 ? E * p.dpsMult : E;
       if (ev.hp) leak = expectedLeak(Ed, p.v, ev.units, ev.hp, ev.hpMult, wc, p.bandMid);
       else if (ev.hpMult && ev.hpMult > 0) leak = leakOfRatio(survivorFactor(p.bandMid) / ev.hpMult);
       else leak = p.bandMid;
@@ -1069,6 +1081,7 @@ function simulate(moments, p, mode, hooks) {
       if (!m.ev.mini) { final = E; sawBoss = true; }
       rows.push({ kind: 'boss', at: m.ev.at, d: m.d, eBefore: E, eAfter: E, ev: m.ev });
     }
+    if (hooks && hooks.slice) yield i;                         // r8v2: a slice boundary after every moment the generator shapes
   }
   if (!sawBoss) final = E;
   pushSample(samples, p.len, final, true);
@@ -1091,6 +1104,7 @@ function pairEligible(pat, L, E, arrival) {
     case 'plusMult':
       return true;
     case 'minusDiv':                                         // two red lanes: "lesser evil" from L3; no ÷ in the first 150 m of L1–3
+      if (runRules !== null && (runRules.noDiv || runRules.noLesser)) return false;   // r8: a run phase without ÷ / lesser evils (L4)
       return L >= GEN.rules.lesserEvilFrom && E >= GEN.noRedBelowE
         && !(L <= GEN.rules.noDivLevels && arrival < GEN.rules.noDivBeforeM);
     case 'multMinus':
@@ -1145,7 +1159,8 @@ function rollSpec(rng, spec, L, E, bandIdx, item) {
     return spec;
   }
 
-  const lw = bandIdx === 0 ? GEN.layoutWeights.early : GEN.layoutWeights.mid;
+  const lwAll = endlessGen ? LEVELS.endless.layoutWeights : GEN.layoutWeights;   // r8 (D22): endless keeps its 1.3.0 layouts
+  const lw = bandIdx === 0 ? lwAll.early : lwAll.mid;
   let wPair = lw.pair, wSingle = lw.single, wTriple = lw.triple;
   if (!tripleEligible(L, E)) { wPair += wTriple; wTriple = 0; }      // L4–6: the triple weight folds into pair
   const li = weightedIndex(rng, [wPair, wSingle, wTriple]);
@@ -1209,6 +1224,80 @@ function guardUnits(pop, delta, bandMid) {
  * the multi-lane events only (QA LVL-16: singles no longer consume a side); triples put the + lane on that edge.
  * Returns the event; `spec.best` receives the better lane's index.
  */
+/** r8 difficulty: the gap a lane that is not the design line's pick must keep below it at full intake (table by level). */
+export function gapLimit(L) {
+  const gp = GATE_RULES.generation.gap;
+  if (!gp || !gp.max || L < gp.fromLevel) return 0;
+  const t = gp.max;
+  if (L <= t[0][0]) return t[0][1];
+  for (let i = 1; i < t.length; i++) if (L <= t[i][0]) { const a = t[i - 1], b = t[i]; return a[1] + (b[1] - a[1]) * (L - a[0]) / (b[0] - a[0]); }
+  return t[t.length - 1][1];
+}
+function gridDown(v) { const g = v < 30 ? 1 : v < 100 ? 5 : 10; return Math.max(1, Math.floor(v / g) * g); }
+function gridUp(v) { const g = v < 30 ? 1 : v < 100 ? 5 : 10; return Math.max(1, Math.ceil(v / g) * g); }
+/**
+ * r8 difficulty: every non-pick lane of a multi-lane event shrinks until its FULL-INTAKE outcome is ≤ gap·(the pick's): + lanes lose
+ * cap / value, × lanes cap (or become + lanes), − lanes their flip payoff, ÷ lanes climb; item lanes stay. Returns the lanes changed.
+ */
+function applyGap(lanes, rich, E, v, gap) {
+  if (endlessGen || !(gap > 0) || lanes.length < 2) return 0;   // r8 (D22): the gap rule is the campaign's (gainOf goes through here too)
+  for (let i = 0; i < lanes.length; i++) if (lanes[i].op === 'item') return 0;
+  const gp = GATE_RULES.generation.gap;
+  const tiny = !!(gp && gp.minE > 0 && E < gp.minE);            // r8: a tiny squad is never handed a lethal non-pick (only + / × shrink)
+  if (gp && gp.lesserFrom > 0 && (applyGap.L < gp.lesserFrom || (gp.lesserSkip && gp.lesserSkip.indexOf(applyGap.L) !== -1))) { let reds = 0; for (let i = 0; i < lanes.length; i++) if (lanes[i].op === '-' || lanes[i].op === '/') reds++; if (reds === lanes.length) return 0; }   // r8: early lesser-evil pairs keep their values
+  const burst = GATE_RULES.intakePerSec * (Number.isFinite(GATE_RULES.intakeWindowS) ? GATE_RULES.intakeWindowS : 0);
+  const h = Math.min(windowCapacity(v), windowIntake(E, v) + burst);
+  const lim = gap * laneOutcome(lanes[rich], E, h);
+  let n = 0;
+  for (let i = 0; i < lanes.length; i++) {
+    if (i === rich) continue;
+    let l = lanes[i];
+    if (laneOutcome(l, E, h) <= lim + 0.5) continue;
+    n++;
+    if (l.op === 'x') {
+      let M = l.cap;
+      while (M > l.value && E * M > lim) M--;
+      if (E * M <= lim) { l.cap = M; continue; }
+      const room = Math.floor(lim - E);                       // x2 itself is too good: a small + lane instead
+      l = lanes[i] = { op: '+', value: Math.max(1, gridDown(Math.max(GEN.minValue, room / 2))), cap: 0 };
+      l.cap = Math.max(l.value, room);
+      if (laneOutcome(l, E, h) <= lim + 0.5) continue;
+    }
+    if (l.op === '+') {
+      const room = Math.floor(lim - E);
+      if (room >= GEN.minValue) { l.cap = Math.max(1, room); if (l.value > l.cap) l.value = gridDown(l.cap); if (l.cap < l.value) l.cap = l.value; continue; }
+      if (tiny) { l.cap = l.value; continue; }
+      if (runRules !== null && runRules.noTwoRed) {           // r8: a run phase without two-red events keeps the + lane
+        let reds = 0;
+        for (let j = 0; j < lanes.length; j++) if (j !== i && isRedLane(lanes[j])) reds++;
+        if (reds > 0) { l.cap = l.value; continue; }
+      }
+      l = lanes[i] = { op: '-', value: GEN.minValue, flipCap: 1 };   // no + lane fits under the gap: a red lane
+    }
+    if (tiny && (l.op === '-' || l.op === '/')) continue;
+    if (l.op === '-') {
+      if (lim >= E) { l.flipCap = Math.max(1, Math.min(l.flipCap || l.value, Math.floor(lim - E))); continue; }
+      l.flipCap = 1;
+      l.value = Math.min(GEN.maxValue, gridDown(0.85 * E), gridUp(Math.max(l.value, h + (E - lim))));   // never more than 0.85·E (no one-gate wipe)
+      continue;
+    }
+    if (l.op === '/') {                                       // ÷ pumps to ×1 at most (never past it when unflippable)
+      if (lim >= E) { l.step = Math.max(l.step, Math.ceil(h / 2) + 1); continue; }
+      if (applyGap.L < P_MINUSDIV.divThreeFrom) {
+        // r8 teaching: no ÷3 before L11 — the ÷2's ×1 rung moves past the full intake (QA LVL-27 reach kept), else −B
+        const st = Math.ceil(h) + 1;
+        if (st <= expectedHits(E, v) / GATE_RULES.hits.fraction && Math.ceil(E / l.value) <= lim + 0.5) { l.step = Math.max(l.step, st); continue; }
+        l = lanes[i] = { op: '-', value: GEN.minValue, flipCap: 1 };
+        l.value = Math.min(GEN.maxValue, gridDown(0.85 * E), gridUp(Math.max(l.value, h + (E - lim))));
+        continue;
+      }
+      l.value = GATE_RULES.div.ladder[0];
+      l.step = Math.max(l.step, Math.ceil(h / 2) + 1);
+    }
+  }
+  return n;
+}
+
 function materializeGate(spec, E, L, v, pop, bandIdx, bandMid) {
   if (spec.sizeE > 0) E = spec.sizeE;                       // QA LVL-30: the opener is sized from s0Assumed(L)
   ensureEligible(spec, L, E);
@@ -1273,6 +1362,15 @@ function materializeGate(spec, E, L, v, pop, bandIdx, bandMid) {
   const probe = { lanes, guards: null };
   chooseLane(probe, E, DESIGN_HITS * H, bandMid, 'face', _choice);
   const rich = _choice.idx;
+  applyGap.L = L; applyGap(lanes, rich, E, v, gapLimit(L));   // r8 difficulty
+  // r8 (D27, OG): the opener's gap again at the start squads of GATE_RULES.generation.openerGapShops ('expected', 'max' = rank 10)
+  const og = GEN.openerGapShops;
+  if (spec.idx === 0 && spec.og && og && og.length) {      // campaign / run-phase openers only (spec.og), never an endless chunk's
+    for (let i = 0; i < og.length; i++) {
+      const eS = Math.max(E, UPGRADES.squad.effect(og[i] === 'max' ? UPGRADES.squad.ranks : expectedRanksOf(L)[0]));
+      if (eS > E) applyGap(lanes, rich, eS, v, gapLimit(L));
+    }
+  }
 
   let ordered, bestIdx, guardIdx = -1;
   const side = (spec.side | 0) % 2;                           // GDD §1 / QA LVL-16: alternated by the caller over pairs and triples
@@ -1473,6 +1571,7 @@ function openerDraw(L, seed) {
     const pat = pats[Math.max(0, weightedIndex(r, weights))];
     const o = { pat, u1: r.next(), u2: r.next(), M: GATE_RULES.mult.base, sizeE, key: '' };   // a welcoming x2, never an x3 opener
     const spec = newSpec(0, 0);
+    spec.og = true;                                          // r8 (D27): the opener's gap at the bigger shops' start squads
     spec.kind = 'pair'; spec.pat = pat; spec.u1 = o.u1; spec.u2 = o.u2; spec.M = o.M; spec.sizeE = sizeE;
     if (pat === 'itemPlus') spec.item = 'coins';
     o.key = openerKey(materializeGate(spec, sizeE, L, c.v, c.pop, c.bandIdx, c.bandMid).lanes);
@@ -1483,10 +1582,12 @@ function openerDraw(L, seed) {
   return { pat: out.pat, u1: out.u1, u2: out.u2, M: out.M, sizeE: out.sizeE, key: out.key };
 }
 
-/** The level's specials: the newly unlocked one first, then distinct draws from the unlocked bag (repeats only when the bag is exhausted). */
+/** The level's specials: the newly unlocked one first, then distinct draws from the unlocked bag (repeats only when the bag is exhausted;
+ *  r8: a null schedule entry = no pickup debut). */
 function rollPickupItems(rng, L) {
   const n = Math.min(PICKUPS.perLevel.cap, PICKUPS.perLevel.base + Math.floor(L / PICKUPS.perLevel.perLevels));
-  const unlocked = PICKUP_SCHEDULE.slice(0, Math.min(L, PICKUP_SCHEDULE.length));
+  const unlocked = [];
+  for (let i = 0; i < PICKUP_SCHEDULE.length && i < L; i++) if (PICKUP_SCHEDULE[i]) unlocked.push(PICKUP_SCHEDULE[i]);
   const guaranteed = L <= PICKUP_SCHEDULE.length ? PICKUP_SCHEDULE[L - 1] : null;
   const items = [];
   if (guaranteed) items.push(guaranteed);
@@ -1553,13 +1654,13 @@ function assignSide(spec, gx) {
  */
 function choiceMode(mode) {
   if (mode === 'cautious') return 'cautious';
-  if (mode === 'nosteer') return 'nosteer';
+  if (mode === 'nosteer' || mode === 'fixL' || mode === 'fixR') return mode;
   return mode === 'max' ? 'greedy' : 'face';
 }
 
 /** Weighted hits a modelled line lands on its lane: cautious 0.3·H, design/greedy hitsAssumed·H, max = full intake. */
 function lineHits(mode, E, v, fire) {
-  if (mode === 'max' || mode === 'nosteer') {                // the full intake plus the bucket the gate starts with
+  if (mode === 'max' || mode === 'nosteer' || mode === 'fixL' || mode === 'fixR') {                // the full intake plus the bucket the gate starts with
     const burst = GATE_RULES.intakePerSec * (Number.isFinite(GATE_RULES.intakeWindowS) ? GATE_RULES.intakeWindowS : 0);
     return Math.min(windowCapacity(v), windowIntake(E, v, fire) + burst);
   }
@@ -1788,11 +1889,129 @@ function annotateMoments(moments, bandMid) {
   }
 }
 
-/** The gate feature (mult3 / triple / div3) still owed by the attempt being built (QA LVL-5); null when none. */
-let featurePending = null;
+/** r8: the run-phase rules (noDiv / noTwoRed / noLesser) of the gate being sized, set by buildAttemptSteps around one gate's
+ *  synchronous selection (never across a slice), read by pairEligible and applyGap; else null. */
+let runRules = null;
+/** r8 (D22, A16): true while generateChunk runs (synchronous, like runRules): no gap rule, LEVELS.endless.layoutWeights. */
+let endlessGen = false;
 
-/** Builds one candidate script for level L from a forked rng (the attempt loop lives in generateLevel). */
-function buildAttempt(L, seed, c, rng) {
+/**
+ * r8 difficulty: the fixed-position lines at full intake with profile pf — never steers (pair lane 0, triple centre), held
+ * hard left, held hard right. Returns the finals.
+ */
+export function fixedLines(events, v, pf) {
+  const moments = buildMoments(events, v);
+  const a = simulate(moments, pf, 'nosteer', null).final;
+  const l = simulate(moments, pf, 'fixL', null).final;
+  const r = simulate(moments, pf, 'fixR', null).final;
+  return { C: a, L: l, R: r, max: Math.max(a, l, r) };
+}
+/** r8v2: the campaign's live shop-compensation exponent at level L (LEAK_MODEL.profileExpByLevel, piecewise linear). */
+export function profileExpOf(L) {
+  const t = LEAK_MODEL.profileExpByLevel;
+  if (!t || !t.length) return LEAK_MODEL.profileExp;
+  if (L <= t[0][0]) return t[0][1];
+  for (let i = 1; i < t.length; i++) if (L <= t[i][0]) return t[i - 1][1] + (t[i][1] - t[i - 1][1]) * (L - t[i - 1][0]) / (t[i][0] - t[i - 1][0]);
+  return t[t.length - 1][1];
+}
+/** r8v2: a shop (ranks [squad, fireRate, damage, coinMult, bossDamage]) as the numbers the models need. */
+export function shopOf(rk) {
+  const fire = UPGRADES.fireRate.effect(rk[1]), dmg = UPGRADES.damage.effect(rk[2]), bd = UPGRADES.bossDamage.effect(rk[4]);
+  return { s0: UPGRADES.squad.effect(rk[0]), fire, dmg, bd, p: (fire / FIRE.rateBase) * dmg, m: (fire / FIRE.rateBase) * dmg * bd };
+}
+/**
+ * r8v2 (B1 model): does a squad of C kill the level-L campaign boss with shop sh before the enrage chew wipes it? Mirrors
+ * level._bossHpScale / _bossUnderFloor / _bossTtkBand and boss.js's enrage; DPS C·f·d·bd·acc·bossEff (generous, attacks
+ * ignored). Returns { win, ttk }.
+ */
+export function bossOutcome(L, C, E, sh, c) {
+  if (!(C > 0) || !(E > 0)) return { win: false, ttk: Infinity };
+  const fx = GEN.fixedLines || {};
+  const band = BOSSES.ttkBand, sq = BOSSES.squadScale, ss = BOSSES.shopScale;
+  const r = C / E;
+  const table = c && c.bossHp > 0 ? c.bossHp : roundBossHp(BOSSES.hpPerE * E);
+  const mult = table / (BOSSES.hpPerE * E);
+  let hp = table * clamp(Math.pow(r, sq ? sq.exp : 0.6), 1, sq ? sq.maxMult : 2) * clamp(Math.pow(sh.m, ss ? ss.exp : 0.9), 1, ss ? ss.maxMult : 10);
+  const acc = band ? band.acc : 0.8;
+  const uf = band && band.under;
+  // r8 (D18 / A2): fixed lines never steer, so the floor carries under.effStatic
+  if (uf && bossUnderT(L) > 0 && r < 1) hp = Math.max(hp, E * sh.fire * sh.dmg * sh.bd * acc * bossUnderT(L) * mult * Math.pow(1 / Math.max(uf.minRatio || 0.25, r), (uf.k || 2) - 1) * (uf.effStatic > 1 ? uf.effStatic : 1));
+  const dps1 = sh.fire * sh.dmg * sh.bd * acc;
+  if (band && band.weakMin > 0) hp = Math.max(hp, C * dps1 * band.weakMin * Math.pow(sh.m, -band.shopExp));
+  if (band && r >= band.fromRatio) hp = Math.max(hp, C * dps1 * (isFinale(L) ? band.milestoneMin : band.min) * Math.pow(sh.m, -band.shopExp));
+  const eff = fx.bossEff > 0 ? fx.bossEff : 1.4;
+  const vc = BOSSES.valve && BOSSES.valve.campaign;
+  const extra = c && c.bossId ? enrageExtra(vc, c.bossId, r) : 0;   // r8v2: as level._fireBoss
+  const tEnr = (vc ? (isFinale(L) && vc.afterMilestone > 0 ? vc.afterMilestone : vc.after) + extra : BOSSES.valve.after) + (fx.bossWalkS >= 0 ? fx.bossWalkS : 1.5);
+  const dps = C * dps1 * eff;
+  if (hp <= dps * tEnr) return { win: true, ttk: hp / dps };
+  let left = hp - dps * tEnr, n = C, k = 0;
+  const chew = Math.max(BOSSES.valve.perSec, Math.round((vc ? vc.perSecFrac : 0) * E));
+  const ramp = vc && vc.rampPerSec > 0 ? vc.rampPerSec : 0;
+  while (k < 60) {
+    n -= Math.round(chew * (1 + ramp * k)); k++;
+    if (n <= 0) return { win: false, ttk: Infinity };
+    left -= n * dps1 * eff;
+    if (left <= 0) return { win: true, ttk: tEnr + k };
+  }
+  return { win: false, ttk: Infinity };
+}
+/** r8 (D26): a fixed line's DPS multiplier against the live waves, p / util.shopComp (p^(1 − exp) where that is the plain power). */
+function compDps(p, pExp, exp) {
+  const s = LEAK_MODEL.surplusExp;
+  return s > 0 && p > pExp && pExp > 0 ? p / shopComp(p, pExp, exp, s) : Math.pow(p, 1 - exp);
+}
+const _rWinCache = new Map();
+/** r8v2: the smallest arrival ratio C/E_boss that beats the level-L boss with shop sh in bossOutcome (bisection, cached). */
+export function bossWinRatio(L, sh, c) {
+  const key = L + '|' + c.eBoss + '|' + sh.fire + '|' + sh.dmg + '|' + sh.bd;
+  let v = _rWinCache.get(key);
+  if (v !== undefined) return v;
+  const E = c.eBoss;
+  let lo = 0.05, hi = 3;
+  if (!bossOutcome(L, hi * E, E, sh, c).win) v = hi;
+  else { for (let i = 0; i < 20; i++) { const mid = (lo + hi) / 2; if (bossOutcome(L, mid * E, E, sh, c).win) hi = mid; else lo = mid; } v = hi; }
+  if (_rWinCache.size > 512) _rWinCache.clear();
+  _rWinCache.set(key, v);
+  return v;
+}
+/**
+ * r8v2 (B2): the fixed-position lines at the expected shop (expectedRanksOf(L)) and, with GEN.fixedLines.shops 'max', rank 10,
+ * each with compDps (D26), its start squad and fire rate, against bossOutcome. excess = max over shops of (max line / E_boss −
+ * min(cap, rWin − margin)) (> 0: too close to the win line); win = a line clears in the model. r8 (D28): a run phase's `run`
+ * replaces the boss model by run.fixed.lim / win × run.ref (and its shops, maxFrom).
+ */
+export function fixedCheck(L, events, v, c, E0, len, waveModel, calibL, run) {
+  const fx = GEN.fixedLines;
+  const fo = run && run.fixed ? run.fixed : null;
+  const ref = fo && run.ref > 0 ? run.ref : c.eBoss;
+  const shops = fo && fo.shops ? fo.shops : fx.shops;
+  const out = { shops: [], max: 0, excess: -Infinity, win: false, limitFrac: 0, excessSum: 0, winCount: 0 };
+  const list = [expectedRanksOf(L)];
+  if (shops && shops.indexOf('max') !== -1 && L >= (fo && fo.from >= 0 ? fo.from : (fx.maxFrom || 0))) { const e = list[0]; if (e[0] + e[1] + e[2] + e[4] < 40) list.push([10, 10, 10, 10, 10]); }
+  const pe = profileExpOf(L);
+  const pExp = shopOf(list[0]).p;
+  const margin = fx.margin >= 0 ? fx.margin : 0.05;
+  for (let i = 0; i < list.length; i++) {
+    const sh = shopOf(list[i]);
+    const pf = { v, bandMid: c.bandMid, E0: Math.max(E0, sh.s0), len, waveModel, calibL, fire: sh.fire, dpsMult: compDps(sh.p, pExp, pe) };
+    const fl = fixedLines(events, v, pf);
+    const rWin = fo ? fo.win : bossWinRatio(L, sh, c);
+    const lim = fo ? fo.lim : Math.min(fx.cap > 0 ? fx.cap : 9, rWin - margin);
+    const ex = fl.max / ref - lim;
+    const win = fl.max >= rWin * ref;
+    out.shops.push({ ranks: list[i], C: fl.C, L: fl.L, R: fl.R, max: fl.max, rWin, lim, win });
+    if (fl.max > out.max) out.max = fl.max;
+    if (ex > out.excess) { out.excess = ex; out.limitFrac = lim; }
+    const wt = i === 0 ? 1 : (fx.maxWeight >= 0 ? fx.maxWeight : 1);   // r8v2: the expected shop weighs 1, rank 10 maxWeight
+    if (ex > 0) out.excessSum += wt * ex;                   // r8v2: every shop's excess counts (the score), not only the worst
+    if (win) { out.win = true; out.winCount += wt; }
+  }
+  return out;
+}
+
+/** Builds one candidate script for level L from a forked rng (the loop: attemptSteps); r8v2: yields after every modelled moment. */
+function* buildAttemptSteps(L, seed, c, rng) {
   const len = c.len, v = c.v, G = c.gates, W = c.waves, pop = c.pop, bandMid = c.bandMid, bandIdx = c.bandIdx;
   const cc = LEVELS.curve;
   const g = { L: c.L, v, pop, bandIdx, bandMid };
@@ -1896,6 +2115,9 @@ function buildAttempt(L, seed, c, rng) {
 
   // --- pickups: PICKUPS.gateShare by item lane (only where the item|+A pattern exists, i.e. band ≥ 1), the rest by crate
   const items = rollPickupItems(rng, c.L);
+  // r8: a run phase's guaranteed crate (holdgen: 'item.kit') rides the earliest crate on the design half, like a new special
+  const rr = c.rules || null;
+  if (rr && rr.crate) items.unshift(rr.crate);
   // QA LVL-30: the opener (pattern bag GATE_RULES.generation.opener, sized from s0Assumed, never the previous level's);
   // an item | +A opener carries the last non-guaranteed special of the level (one delivery fewer below)
   const opener = openerDraw(c.L, seed);
@@ -1903,6 +2125,7 @@ function buildAttempt(L, seed, c, rng) {
     if (opener.pat === 'itemPlus' && items.length >= 2) { opener.item = items.pop(); }
     else if (opener.pat === 'itemPlus') opener.pat = 'plusMult';
     specs[0].opener = opener;
+    specs[0].og = true;                                      // r8 (D27): OG applies to this opener (materializeGate)
   }
   const rangeLo = cc.pickupRange[0] * len, rangeHi = Math.min(cc.pickupRange[1] * len, runupAt - PICKUP_CLEAR_M);
   const inRange = [];
@@ -1925,7 +2148,7 @@ function buildAttempt(L, seed, c, rng) {
   // QA LVL-26 (GDD §8, round-1 LVL-7): the guaranteed (newly unlocked) special always rides the earliest CRATE, which is
   // placed on the design half below — an item lane paired with a richer +A is skipped by a player following the gates.
   // The other items fill the remaining deliveries in order.
-  const guaranteed = c.L <= PICKUP_SCHEDULE.length ? PICKUP_SCHEDULE[c.L - 1] : null;
+  const guaranteed = rr && rr.crate ? rr.crate : (c.L <= PICKUP_SCHEDULE.length ? PICKUP_SCHEDULE[c.L - 1] : null);
   if (guaranteed && items[0] === guaranteed) {
     let ci = -1;
     for (let i = 0; i < deliveries.length; i++) if (deliveries[i].kind === 'crate') { ci = i; break; }
@@ -1944,6 +2167,11 @@ function buildAttempt(L, seed, c, rng) {
       // QA LVL-24: the hint shows once the crate is ~40 m out (30 m after its spawn), not at the horizon
       if (!crateHinted) { crates.push({ at: crates[crates.length - 1].at + CRATE_HINT_AFTER_M, type: 'hint', id: 'crate' }); crateHinted = true; }
     }
+  }
+  // r8: from kitsLaneFrom a run phase carries one rr.kitsLane item lane (holdgen: 'item.kit2')
+  if (rr && rr.kitsLane && rr.kitsLaneFrom > 0 && c.L >= rr.kitsLaneFrom) {
+    if (laneSlots.length > 0) specs[laneSlots[0]].item = rr.kitsLane;
+    else if (inRange.length > 0) specs[inRange[0]].item = rr.kitsLane;
   }
 
   // --- coin lines: one per COIN_LINE_EVERY_GATES gate events, after that gate's wave has made contact
@@ -1974,17 +2202,24 @@ function buildAttempt(L, seed, c, rng) {
   // shadow lines (QA LVL-1): the full-intake line of a fresh profile and the cautious line, re-traced alongside the design
   // line so selectSpec can keep the first under LINE_GUARDS.maxTarget·E_boss and the second above cautiousTarget·E_boss
   const sh = { Emax: Math.max(c.eStart, profileAt(0).s0), Ecaut: c.eStart };
+  // QA LVL-5: the level that introduces a gate feature (GATE_RULES.generation.newFeature) shows it on one gate (r8: L11 has two)
+  const nf = GEN.newFeature;
+  const features = [];
+  if (nf.mult3 === c.L) features.push('mult3');
+  if (nf.triple === c.L) features.push('triple');
+  if (nf.div3 === c.L) features.push('div3');
   const hooks = {
     gate(m, E) {
       const s = m.spec;
       const target = gateTarget(m, E, c.eBoss);
       gx.tol = gainTolerance(m.gatesLeft);
       gx.last = m.gatesLeft === 1;
-      if (featurePending && s.idx >= 1 && !s.item) {
-        const eligible = featurePending === 'mult3' || E >= GEN.noRedBelowE;
-        const paced = (!(featurePending === 'div3' && gx.prev && isRedOnly(gx.prev.kind, gx.prev.pat))
-          && !(featurePending === 'mult3' && gx.prev && gx.prev.kind === 'single')) || m.gatesLeft <= 2;
-        if (eligible && paced) { s.feature = featurePending; featurePending = null; }
+      const fp = features.length > 0 ? features[0] : null;
+      if (fp && s.idx >= 1 && !s.item) {
+        const eligible = fp === 'mult3' || E >= GEN.noRedBelowE;
+        const paced = (!(fp === 'div3' && gx.prev && isRedOnly(gx.prev.kind, gx.prev.pat))
+          && !(fp === 'mult3' && gx.prev && gx.prev.kind === 'single')) || m.gatesLeft <= 2;
+        if (eligible && paced) { s.feature = fp; features.shift(); }
       }
       const n = Math.max(1, m.gatesLeft);
       _shadow.active = true;
@@ -1992,10 +2227,13 @@ function buildAttempt(L, seed, c, rng) {
       _shadow.Ecaut = sh.Ecaut;
       _shadow.lnMaxAllow = Math.log(Math.max(1, LINE_GUARDS.maxTarget * c.eBoss) / Math.max(1, sh.Emax)) / n;
       _shadow.lnCautReq = Math.log(Math.max(1, LINE_GUARDS.cautiousTarget * c.eBoss + m.lossAfter) / Math.max(1, sh.Ecaut)) / n;
-      selectSpec(rng, s, E, target, gx);
-      _shadow.active = false;
-      assignSide(s, gx);
-      m.ev = materializeGate(s, E, c.L, v, pop, bandIdx, bandMid);
+      runRules = c.rules || null;                            // r8: a run phase's pattern rules (never left set: endless reads them)
+      try {
+        selectSpec(rng, s, E, target, gx);
+        _shadow.active = false;
+        assignSide(s, gx);
+        m.ev = materializeGate(s, E, c.L, v, pop, bandIdx, bandMid);
+      } finally { runRules = null; }
       guardWc.calib = p.calibL * earlyCalib(m.d / Math.max(1, len), bandMid);
       if (m.ev.guards) for (let i = 0; i < m.ev.guards.length; i++) m.ev.guards[i].hp = solveWaveHp(E, v, m.ev.guards[i].units, bandMid, null, guardWc);
       sh.Emax = lineAfter(m.ev, sh.Emax, v, bandMid, 'max');
@@ -2031,12 +2269,9 @@ function buildAttempt(L, seed, c, rng) {
       sh.Ecaut = Math.max(1, sh.Ecaut - expectedLeak(sh.Ecaut, v, m.ev.units, m.ev.hp, m.ev.hpMult, wc, bandMid) * bites);
     },
   };
-  // QA LVL-5: the level that introduces a gate feature (GATE_RULES.generation.newFeature) shows it on one gate
-  const nf = GEN.newFeature;
-  featurePending = nf.mult3 === c.L ? 'mult3' : nf.triple === c.L ? 'triple' : nf.div3 === c.L ? 'div3' : null;
-  simulate(moments, p, 'greedy', hooks);
+  hooks.slice = true;
+  yield* simulateSteps(moments, p, 'greedy', hooks);           // r8v2: one slice per modelled moment
   _shadow.active = false;
-  featurePending = null;
 
   // QA LVL-7: the guaranteed (newly unlocked) special's crate sits on the half of the lane the design line takes at the
   // gate the player is lining up for when the crate arrives (the next gate whose armed window it precedes or overlaps,
@@ -2083,58 +2318,259 @@ function buildAttempt(L, seed, c, rng) {
 
   // the declared line IS the re-simulated design line of the finished events (validator parity)
   const trace = simulate(buildMoments(events, v), p, 'greedy', null);
-  return {
+  const script = {
     id: c.L, name: 'Level ' + L, seed, length: len, roadSpeed: v, eBoss: c.eBoss, line: 'greedy',
     expected: trace.samples, events,
   };
+  if (c.run) script.run = c.run;                             // r8: a run phase carries its options (validateLevel rebuilds runCurve)
+  return script;
 }
 
 /**
- * Generated campaign level (L ≥ 2; L1 is authored in LEVELS.authored; L > LEVELS.curve.loopAfter uses the
- * loopAfter curve). Deterministic for (L, seed): the generator forks `seed` per attempt, re-rolls until
- * validateLevel().ok and otherwise returns the best-scoring attempt (fewest errors, then fewest warnings,
- * then closest cautious landing to E_boss).
+ * The attempt score (lower is better): errors, warnings, a weak line under CAUTIOUS_FLOOR, the fixed lines' excess (r8v2: over
+ * the checked shops, + winPenalty per clearing shop) and the design line's distance from E_boss.
  */
-export function generateLevel(L, seed) {
-  const gen = levelGenerator(L, seed);
+function attemptScore(res, c) {
+  const fxs = GATE_RULES.generation.fixedLines;
+  const ratio = res.designFinal > 0 ? res.designFinal / c.eBoss : 1e-6;
+  let nsx = 0;
+  if (res.noSteerHigh && fxs) {
+    const ex = res.fixedExcessSum !== undefined ? res.fixedExcessSum : (res.fixedExcess !== undefined ? res.fixedExcess : res.noSteerFinal / c.eBoss - res.fixedLimit);
+    nsx = ex * (fxs.penaltyPerExcess || 10) + (res.fixedWinCount !== undefined ? res.fixedWinCount : (res.fixedWin ? 1 : 0)) * (fxs.winPenalty || 0);
+  }
+  return res.errors.length * 100 + res.warnings.length * 0.05 + (res.weakLow ? 1 : 0) + (res.noSteerHigh ? NO_STEER_PENALTY + nsx : 0) + Math.abs(Math.log(ratio));
+}
+
+/** r8v2 (B2): mirrors a pair / triple gate event in place — lanes reversed, guards follow (values never change). */
+function mirrorGates(ev) {
+  const n = ev.lanes.length;
+  ev.lanes.reverse();
+  if (ev.guards) for (let g = 0; g < ev.guards.length; g++) ev.guards[g].lane = n - 1 - ev.guards[g].lane;
+}
+
+/**
+ * r8v2 (B2) side repair: a fixed line still clears the boss in the model — mirror the pair / triple events, last first, keeping a
+ * mirror only when the re-validated (sliced) script stays valid and scores lower. Returns { score, res } (res null: no change).
+ * r8: each trial is re-declared first (a mirror moves the design lane); a rejected one gets its line back.
+ */
+function* repairSides(script, c, score, passes) {
+  const gates = [];
+  for (let i = 0; i < script.events.length; i++) { const e = script.events[i]; if (e && e.type === 'gates' && e.lanes && e.lanes.length >= 2) gates.push(e); }
+  let best = null;
+  for (let p = 0; p < passes; p++) {
+    let improved = false;
+    for (let i = gates.length - 1; i >= 0; i--) {
+      const line = script.expected;
+      mirrorGates(gates[i]);
+      redeclare(script, c);
+      yield 0;
+      const res = yield* validateSteps(script);
+      const sc = attemptScore(res, c);
+      if (res.ok && sc < score - 1e-9) { score = sc; best = res; improved = true; } else { mirrorGates(gates[i]); script.expected = line; }
+      yield 0;
+    }
+    if (!improved || (best && !best.fixedWin)) break;
+  }
+  return { score, res: best };
+}
+
+/** r8: script.expected re-simulated from its events (validator parity). */
+function redeclare(script, c) {
+  const v = script.roadSpeed;
+  script.expected = simulate(buildMoments(script.events, v), { v, bandMid: c.bandMid, E0: c.eStart, len: script.length, waveModel: true, calibL: levelCalib(c.L) }, 'greedy', null).samples;
+}
+
+/**
+ * Generated campaign level (L ≥ 2; L1 is authored in LEVELS.authored). Deterministic for (L, seed): the generator forks `seed` per attempt, re-rolls until
+ * validateLevel().ok and otherwise returns the best-scoring attempt (fewest errors, then fewest warnings,
+ * then closest cautious landing to E_boss). r8 (P1T): and for its base (default levelTypeOf(L).base; levelSteps).
+ */
+export function generateLevel(L, seed, base) {
+  const gen = levelGenerator(L, seed, base);
   let script = null;
   while (script === null) script = gen.step();
   return script;
 }
 
 /**
- * Round-2 cross-group (UI-19 / LVL-18 follow-up): generateLevel as resumable steps, one generation attempt
- * (buildAttempt + validateLevel) per step(), so level.js's idle prefetch can spread a generation over several idle
- * callbacks instead of one 100+ ms task. step() returns null while more attempts are due and the chosen script once
- * finished (and on every later call). The attempt order, forks and stop rules are exactly generateLevel's, so the
- * result is identical (validate-levels' determinism check covers both).
+ * Round-2 cross-group (UI-19 / LVL-18 follow-up): generateLevel as resumable steps for level.js's idle prefetch: step() returns
+ * null while work is due, then the script (and on every later call). r8 (D39): one step() = one slice of levelSteps.
  */
-export function levelGenerator(L, seed) {
-  const Ln = Math.max(1, Math.floor(Number.isFinite(L) ? L : 1));
-  const c = curve(Ln);
-  const seedU = (Number.isFinite(seed) ? seed : LEVELS.seedBase + Ln) >>> 0;
-  const base = new Rng(seedU);
-  let best = null;
-  let k = 0;
-  let done = false;
+export function levelGenerator(L, seed, base) {
+  const it = levelSteps(L, seed, base);
+  let done = false, script = null;
   return {
     get done() { return done; },
     step() {
-      if (done) return best.script;
-      const rng = base.fork(FORK_ATTEMPT_BASE + k * FORK_ATTEMPT_STEP);
-      const script = buildAttempt(Ln, seedU, c, rng);
-      const res = validateLevel(script);
-      const ratio = res.designFinal > 0 ? res.designFinal / c.eBoss : 1e-6;
-      // QA LVL-27: a weak-shooter line under CAUTIOUS_FLOOR costs an attempt more than a plain warning
-      const score = res.errors.length * 10 + res.warnings.length * 0.05 + (res.weakLow ? 1 : 0) + (res.noSteerHigh ? NO_STEER_PENALTY : 0) + Math.abs(Math.log(ratio));
-      if (best === null || score < best.score) best = { script, score, ok: res.ok, noSteerHigh: !!res.noSteerHigh, weakLow: !!res.weakLow };
-      if (res.ok && res.warnings.length === 0) done = true;
-      else if (res.ok && !(best.noSteerHigh) && !(best.weakLow) && k >= GEN_ATTEMPTS / 4 - 1) done = true;   // a valid script with warnings: a few more tries for a clean one (round-3: more while the no-steer line is too high; round 5: or the weak line is under CAUTIOUS_FLOOR)
-      k++;
-      if (k >= (best.weakLow ? GEN_ATTEMPTS_WEAK : GEN_ATTEMPTS)) done = true;   // round 5: a weak-line shortfall gets the longer budget
-      return done ? best.script : null;
+      if (done) return script;
+      const r = it.next();
+      if (!r.done) return null;
+      done = true; script = r.value;
+      return script;
     },
   };
+}
+
+/**
+ * r8 (D39): campaign level L as a generator, one yield per slice. P1T: dispatched on its base (default levelTypeOf(L).base) — a
+ * Horde level is holdgen.holdSpec → generateRunSteps (yield*) → holdgen.generateHoldScript, any other base the attempt loop.
+ * The script carries base, eTarget (what its stars count against), finale (the event that ends the run: 'boss' | 'hold') and
+ * starMetric (ARCH §7).
+ */
+export function* levelSteps(L, seed, base) {
+  const Ln = Math.max(1, Math.floor(Number.isFinite(L) ? L : 1));
+  const seedU = (Number.isFinite(seed) ? seed : LEVELS.seedBase + Ln) >>> 0;
+  if ((base || levelTypeOf(Ln).base) === 'horde') {
+    const spec = holdSpec(Ln, seedU, { debut: Ln === LEVEL_TYPES.horde.debut });
+    return typed(generateHoldScript(yield* generateRunSteps(Ln, seedU, spec.run), spec), 'horde', spec.eTarget, 'hold');
+  }
+  const script = yield* attemptSteps(Ln, seedU, curve(Ln));
+  return typed(script, 'standard', script.eBoss, 'boss');
+}
+
+/** r8 (P1T): a generated campaign script's type fields (the stars count survivors at the finale against eTarget). */
+function typed(script, base, eTarget, finale) {
+  return Object.assign(script, { base, eTarget, finale, starMetric: 'survivors' });
+}
+
+/**
+ * r8 (PLAN §B, D28 / D39): a Horde level's RUN PHASE, sliced like levelSteps, on runCurve(L, opts = holdgen.holdSpec().run): the
+ * E-trace ends at eEnd, fixed lines stay ≤ lim·ref, a line ≥ win·ref gets the long budget and the side repair.
+ */
+export function* generateRunSteps(L, seed, opts) {
+  const Ln = Math.max(1, Math.floor(Number.isFinite(L) ? L : 1));
+  const seedU = (Number.isFinite(seed) ? seed : LEVELS.seedBase + Ln) >>> 0;
+  return yield* attemptSteps(Ln, seedU, runCurve(Ln, opts));
+}
+
+/** r8 (D39): generateRunSteps in one call (tools; the runtime slices it). */
+export function generateRun(L, seed, opts) {
+  const it = generateRunSteps(L, seed, opts);
+  for (;;) { const r = it.next(); if (r.done) return r.value; }
+}
+
+/**
+ * r8 (D28): curve(L) for a run phase — `gates` events on LEVELS.curve.runPhase lenBase + lenPerGate·(gates − 1) m, waves = gates
+ * (from wavesEqualGatesFrom; else gates − 1), eBoss = eEnd; `run` = the normalised opts (validateLevel rebuilds it; `rules`).
+ */
+export function runCurve(L, opts) {
+  const b = curve(L);
+  const o = opts || {};
+  const rp = LEVELS.curve.runPhase;
+  const fd = rp.fixed || {}, fo = o.fixed || {};
+  const G = Math.max(1, Math.floor(Number(o.gates)) || 1);
+  const eEnd = o.eEnd > 0 ? o.eEnd : b.eBoss;
+  const fixed = { lim: fo.lim > 0 ? fo.lim : fd.lim, win: fo.win > 0 ? fo.win : fd.win,
+    shops: Array.isArray(fo.shops) ? fo.shops.slice() : (GEN.fixedLines.shops || ['expected']).slice(),
+    from: fo.from >= 0 ? fo.from : fd.from, repairFrom: fo.repairFrom >= 0 ? fo.repairFrom : fd.repairFrom };
+  const run = { gates: G, eEnd, ref: o.ref > 0 ? o.ref : eEnd, fixed };
+  for (const k of ['noDiv', 'noTwoRed', 'noLesser']) if (o[k]) run[k] = true;
+  if (typeof o.crate === 'string') run.crate = o.crate;
+  if (typeof o.kitsLane === 'string' && o.kitsLaneFrom > 0) { run.kitsLane = o.kitsLane; run.kitsLaneFrom = o.kitsLaneFrom; }
+  return Object.assign({}, b, {
+    len: rp.lenBase + rp.lenPerGate * (G - 1), gates: G, waves: b.L >= LEVELS.curve.wavesEqualGatesFrom ? G : G - 1,
+    eBoss: eEnd, bossHp: roundBossHp(BOSSES.hpPerE * eEnd), runup: rp.runup, run, rules: run,
+  });
+}
+
+/**
+ * The attempt loop of levelSteps / generateRunSteps (the former levelGenerator body): build and validate attempts (sliced),
+ * keep the best attemptScore, then the side repair (a fixed-line clear) or the D31 shrink.
+ */
+function* attemptSteps(Ln, seedU, c) {
+  const base = new Rng(seedU);
+  const fxs = GATE_RULES.generation.fixedLines;
+  const repairFrom = c.run ? c.run.fixed.repairFrom : (fxs && fxs.repairFrom) || 0;
+  let best = null, bestFix = null;                           // r8 (D31): bestFix = the best excess-only attempt (excessOnly)
+  for (let k = 0; ;) {
+    const it = buildAttemptSteps(Ln, seedU, c, base.fork(FORK_ATTEMPT_BASE + k * FORK_ATTEMPT_STEP));
+    let r = it.next();
+    while (!r.done) { yield; r = it.next(); }               // r8v2: one modelled moment per slice
+    const script = r.value;
+    yield;                                                   // the validation is the next slice
+    const vit = validateSteps(script);
+    let vr = vit.next();
+    while (!vr.done) { yield; vr = vit.next(); }             // r8v2: the validation is spread over slices too
+    const res = vr.value;
+    // QA LVL-27: a weak-shooter line under CAUTIOUS_FLOOR costs an attempt more than a plain warning (attemptScore)
+    const score = attemptScore(res, c);
+    if (best === null || score < best.score) best = { script, score, ok: res.ok, noSteerHigh: !!res.noSteerHigh, weakLow: !!res.weakLow, fixedWin: !!res.fixedWin };
+    if (!res.ok && excessOnly(res) && (bestFix === null || score < bestFix.score)) bestFix = { script, score };
+    let done = false;
+    if (res.ok && res.warnings.length === 0) done = true;
+    else if (res.ok && !(best.noSteerHigh) && !(best.weakLow) && k >= GEN_ATTEMPTS / 4 - 1) done = true;   // a valid script with warnings: a few more tries for a clean one (round-3: more while the no-steer line is too high; round 5: or the weak line is under CAUTIOUS_FLOOR)
+    else if (fxs && fxs.shops && best.ok && !best.fixedWin && !best.weakLow && k >= (fxs.softStopAt > 0 ? fxs.softStopAt : GEN_ATTEMPTS) - 1) done = true;   // r8v2: a soft excess gets softStopAt attempts
+    k++;
+    // round 5: a weak-line shortfall gets the longer budget (r8v2: so does a fixed line that clears; r8, D31: and errors)
+    if (k >= ((best.weakLow || best.fixedWin || !best.ok) ? GEN_ATTEMPTS_WEAK : GEN_ATTEMPTS)) done = true;
+    if (!done) { yield; continue; }
+    if (best.ok && best.fixedWin && fxs && fxs.repairPasses > 0 && Ln >= repairFrom) {
+      // r8v2 (B2): a best attempt whose fixed line still clears the boss in the model gets the side repair, one slice at a time
+      yield;
+      const rit = repairSides(best.script, c, best.score, fxs.repairPasses);
+      let rr = rit.next();
+      while (!rr.done) { yield; rr = rit.next(); }
+      if (rr.value.res) { best.score = rr.value.score; best.fixedWin = !!rr.value.res.fixedWin; }
+    } else if (!best.ok && bestFix !== null) {
+      // r8 (D31): errors left — the best attempt with only full-intake excesses is shrunk and wins when it validates
+      yield;
+      if (yield* shrinkGreedy(bestFix.script, c)) return bestFix.script;
+    }
+    return best.script;
+  }
+}
+
+/**
+ * r8 (D31): a full-intake line above its limit after the long budget — its richest lane loses a grid step (shrinkLane), the
+ * script is re-declared and re-validated (sliced), until valid or SHRINK_STEPS. In place; true when valid.
+ */
+function* shrinkGreedy(script, c) {
+  for (let n = 0; n < SHRINK_STEPS; n++) {
+    const vit = validateSteps(script);
+    let vr = vit.next();
+    while (!vr.done) { yield; vr = vit.next(); }
+    const res = vr.value;
+    if (res.ok) return true;
+    let rows = null, worst = 0;                              // the full-intake line furthest above its limit
+    for (let i = 0; i < res.maxLines.length; i++) {
+      const ml = res.maxLines[i];
+      if (ml.ratio - ml.limit > worst) { worst = ml.ratio - ml.limit; rows = ml.rows; }
+    }
+    if (rows === null) return false;                         // the errors are not a full-intake excess: nothing to shrink
+    let pick = null, gain = 0;
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (row.kind !== 'gate') continue;
+      const lane = row.ev.lanes[row.lane];
+      if (row.eAfter - row.eBefore > gain && canShrink(lane)) { gain = row.eAfter - row.eBefore; pick = lane; }
+    }
+    if (pick === null) return false;
+    shrinkLane(pick);
+    redeclare(script, c);
+    yield;
+  }
+  return false;
+}
+/** r8 (D31): every error of `res` is a full-intake line above its limit (what shrinkGreedy repairs). */
+function excessOnly(res) {
+  let n = 0;
+  for (let i = 0; i < res.maxLines.length; i++) if (res.maxLines[i].ratio > res.maxLines[i].limit) n++;
+  return n > 0 && n === res.errors.length;
+}
+/** r8 (D31): shrinkLane can take a step off this lane. */
+function canShrink(lane) {
+  if (lane.op === '+') return lane.cap > lane.value || lane.value > GEN.minValue;
+  if (lane.op === 'x') return lane.cap > lane.value;
+  if (lane.op === '-') return (lane.flipCap | 0) > 1;
+  return false;
+}
+/** r8 (D31): one grid step off a lane's payoff (+ cap, then value; × cap; − flip). */
+function shrinkLane(lane) {
+  if (lane.op === '+') {
+    if (lane.cap > lane.value) lane.cap = Math.max(lane.value, gridDown(lane.cap - 1));
+    else { lane.value = Math.max(GEN.minValue, gridDown(lane.value - 1)); lane.cap = lane.value; }
+  } else if (lane.op === 'x') lane.cap = lane.cap - 1;
+  else if (lane.op === '-') lane.flipCap = Math.max(1, gridDown(lane.flipCap - 1));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2150,7 +2586,7 @@ function endlessGates(D) {
 /**
  * Per-chunk parameters for difficulty index D (1-based): speed, E(z) (unrounded, the same formula the level
  * runner uses for expectedSquad()), gate/wave counts, population, mini-boss data and the campaign-equivalent
- * level (endlessUnlock + D, capped at LEVELS.count for type weights; leak bands beyond L30 equal L30's).
+ * level (endlessUnlock + D, capped at LEVELS.count for type weights; r8v2: leak bands at most at LEVELS.endless.bandMaxLevel).
  */
 export function endlessParams(D) {
   const e = LEVELS.endless;
@@ -2193,7 +2629,7 @@ export function endlessParams(D) {
   }
   const popWave = waves > 0 ? Math.max(1, Math.ceil(need / waves)) : pop;
   const Leq = Math.min(LEVELS.count, LEVELS.endlessUnlock + Dn);
-  const band = bandFor(LEVELS.endlessUnlock + Dn);
+  const band = bandFor(Math.min(LEVELS.endlessUnlock + Dn, LEVELS.endless.bandMaxLevel || Infinity));   // r8v2: endless keeps its band
   const rot = BOSSES.endlessRotation;
   return {
     D: Dn, v, e: E, eGate, gates, waves, pop, popBase, miniBoss, afterMiniBoss, Leq, band, bandMid: (band[0] + band[1]) / 2, bandIdx: bandIndexFor(Leq), chunk: e.chunk,
@@ -2297,6 +2733,12 @@ function endlessGateBase(D) {
  * E-trace; every miniBossEvery-th chunk ends with a mini-boss (`mini: true`, HP = miniBossHpPerE·E, minionHp baked).
  */
 export function generateChunk(D, seed, startAt) {
+  endlessGen = true;
+  try { return chunkEvents(D, seed, startAt); } finally { endlessGen = false; }
+}
+
+/** generateChunk's body, run with endlessGen set. */
+function chunkEvents(D, seed, startAt) {
   const p = endlessParams(D);
   const seedU = (Number.isFinite(seed) ? seed : 1) >>> 0;
   const rng = new Rng(seedU).fork(FORK_CHUNK_BASE + p.D * FORK_CHUNK_STEP);
@@ -2370,7 +2812,8 @@ export function generateChunk(D, seed, startAt) {
   // specials (QA LVL-9): drawn from the bag unlocked at the chunk's equivalent level; about PICKUPS.gateShare of the
   // deliveries ride an item | +A gate (never the chunk's first gate — the rubber band may rewrite it), the rest a crate
   const bag = [];
-  for (let i = 0; i < PICKUP_SCHEDULE.length && i < L; i++) bag.push(PICKUP_SCHEDULE[i]);
+  const sched = LEVELS.endless.pickups || PICKUP_SCHEDULE;   // r8: endless keeps its own (1.3.0) unlock order
+  for (let i = 0; i < sched.length && i < L; i++) if (sched[i]) bag.push(sched[i]);
   const crateItems = [];
   for (let k = 0; k < ENDLESS_CRATES_PER_CHUNK; k++) {
     const item = rng.pick(bag);
@@ -2999,6 +3442,12 @@ function checkPoolOverlap(events, v, errors, warnings) {
  * Result: { ok, errors, warnings, trace:[{at, e, note}], cautiousFinal, greedyFinal, declaredFinal, gates:[…], waves:[…] }.
  */
 export function validateLevel(script) {
+  const it = validateSteps(script);
+  for (;;) { const r = it.next(); if (r.done) return r.value; }
+}
+
+/** r8v2: validateLevel as a generator — it yields between whole simulations (the scratch objects are free at every yield). */
+function* validateSteps(script) {
   const errors = [], warnings = [], trace = [];
   const out = { ok: false, errors, warnings, trace, cautiousFinal: 0, greedyFinal: 0, designFinal: 0, designMode: 'cautious', declaredFinal: 0, maxLines: [], gates: [], waves: [] };
   if (!script || typeof script !== 'object') { errors.push('script is not an object'); return out; }
@@ -3010,9 +3459,13 @@ export function validateLevel(script) {
   if (!(eBoss > 0)) errors.push('eBoss must be > 0');
   if (!Number.isFinite(script.seed)) warnings.push('seed is missing');
   if (typeof script.name !== 'string') warnings.push('name is missing');
-  const c = curve(Math.max(1, L || 1));
+  // r8: a run phase (script.run) is checked against its runCurve
+  const run = !endless && script.run && typeof script.run === 'object' ? script.run : null;
+  const c = run ? runCurve(Math.max(1, L || 1), run) : curve(Math.max(1, L || 1));
   // QA LVL-34: the authored L1 (GDD §11) is checked against its own declared line and values, not the generator rules
   const authored = !endless && script.line !== 'greedy' && !!LEVELS.authored[L];
+  // r8v2: the title caption's "★★★ at N" reads data.eBossOf(L) before the script exists — it must be the curve's E_boss
+  if (!endless && !authored && !run && L >= 1 && eBossOf(L) !== c.eBoss) errors.push(`eBossOf(${L}) = ${eBossOf(L)} differs from curve(${L}).eBoss = ${c.eBoss}`);
 
   // expected[]
   if (!Array.isArray(script.expected) || script.expected.length === 0) errors.push('expected[] is empty');
@@ -3062,7 +3515,8 @@ export function validateLevel(script) {
       case 'runup': {
         const total = validateUnits(ev.units, tag, errors, warnings);
         if (ev.units) for (const k in ev.units) if ((ev.units[k] | 0) > 0 && k !== 'walker' && k !== 'runner') warnings.push(`${tag}: run-up hordes are walkers and runners only (${k})`);
-        if (total > LEVELS.curve.runup.cap) warnings.push(`${tag}: run-up has ${total} zombies (cap ${LEVELS.curve.runup.cap})`);
+        const rcap = Math.max(LEVELS.curve.runup.cap, endless ? 0 : c.runup);   // r8v2: the post-L30 table raises the cap
+        if (total > rcap) warnings.push(`${tag}: run-up has ${total} zombies (cap ${rcap})`);
         if (ev.bursts !== undefined && !(Number.isInteger(ev.bursts) && ev.bursts >= 1)) errors.push(`${tag}: bursts must be ≥ 1`);
         if (ev.burstGap !== undefined && !(ev.burstGap > 0)) errors.push(`${tag}: burstGap must be > 0`);
         if (ev.pattern !== undefined && !WAVE_PATTERNS[ev.pattern]) errors.push(`${tag}: unknown pattern '${ev.pattern}'`);
@@ -3164,6 +3618,7 @@ export function validateLevel(script) {
 
   // E-trace (campaign only)
   if (!endless && errors.length === 0) {
+    yield 0;                                                   // r8v2: slice boundary (structural checks done)
     const moments = buildMoments(events, v);
     const E0 = script.expected[0].e;
     const p = { v, bandMid: c.bandMid, E0, len, waveModel: script.line === 'greedy', calibL: script.line === 'greedy' ? levelCalib(L) : 0 };
@@ -3171,7 +3626,9 @@ export function validateLevel(script) {
     // weak-shooter line (best lane at 0.3·H) as the survivability check; the authored L1 declares its cautious line (GDD §11)
     const designMode = script.line === 'greedy' ? 'greedy' : 'cautious';
     const caut = simulate(moments, authored ? { v, bandMid: c.bandMid, E0, len, waveModel: false, declared: script.expected } : p, designMode === 'greedy' ? 'weak' : 'cautious', null);
+    yield 1;                                                   // r8v2: slice boundary
     const greedy = simulate(moments, p, 'greedy', null);
+    yield 2;                                                   // r8v2: slice boundary
     const design = designMode === 'greedy' ? greedy : caut;
     out.designMode = designMode;
     out.cautiousFinal = caut.final;
@@ -3215,6 +3672,7 @@ export function validateLevel(script) {
       const base = profileAt(0);
       const pm = { v, bandMid: c.bandMid, E0: Math.max(E0, pr.s0), len, waveModel: p.waveModel, calibL: p.calibL, fire: pr.fire, dpsMult: (pr.fire * pr.dmg) / (base.fire * base.dmg) };
       const mx = simulate(moments, pm, 'max', null);
+      yield 3;                                                 // r8v2: slice boundary
       out.maxLines.push({ id: prof.id, final: mx.final, ratio: mx.final / eBoss, limit: prof.maxRatio, rows: mx.rows });
       if (L >= 2 && mx.final > prof.maxRatio * eBoss) {
         errors.push(`full-intake greedy line (${prof.id}) reaches the boss with ${Math.round(mx.final)} = ${Math.round(mx.final / eBoss * 100)} % of E_boss ${eBoss} (limit ${Math.round(prof.maxRatio * 100)} %)`);
@@ -3233,11 +3691,18 @@ export function validateLevel(script) {
     // full intake, fresh profile) must reach the boss below GATE_RULES.generation.noSteerMax·E_boss
     if (!authored && L >= 2 && GEN.noSteerMax > 0) {
       const b0 = profileAt(0);
-      const ns = simulate(moments, { v, bandMid: c.bandMid, E0: Math.max(E0, b0.s0), len, waveModel: p.waveModel, calibL: p.calibL, fire: b0.fire, dpsMult: 1 }, 'nosteer', null);
+      const pfx = { v, bandMid: c.bandMid, E0: Math.max(E0, b0.s0), len, waveModel: p.waveModel, calibL: p.calibL, fire: b0.fire, dpsMult: 1 };
+      const fxc = GEN.fixedLines && GEN.fixedLines.shops && L >= GEN.fixedLines.fromLevel ? fixedCheck(L, events, v, c, E0, len, p.waveModel, p.calibL, run) : null;   // r8v2
+      yield 4;                                                 // r8v2: slice boundary
+      const fl = fxc ? null : (GEN.fixedLines ? fixedLines(events, v, pfx) : null);   // r8: every fixed-position line
+      const ns = fxc ? { final: fxc.max } : fl ? { final: fl.max } : simulate(moments, pfx, 'nosteer', null);
       out.noSteerFinal = ns.final;
-      if (ns.final > GEN.noSteerMax * eBoss) {
+      out.fixed = fxc || fl;
+      out.fixedLimit = fxc ? fxc.limitFrac : GEN.noSteerMax;   // r8: below fixedLines.fromLevel (L2) the no-steer limit
+      if (fxc) { out.fixedExcess = fxc.excess; out.fixedWin = fxc.win; out.fixedExcessSum = fxc.excessSum; out.fixedWinCount = fxc.winCount; }
+      if (fxc ? fxc.excess > 0 : ns.final > GEN.noSteerMax * eBoss) {
         out.noSteerHigh = true;
-        warnings.push(`no-steer line (centre lane, full intake) reaches the boss with ${Math.round(ns.final)} = ${Math.round(ns.final / eBoss * 100)} % of E_boss ${eBoss} (limit ${Math.round(GEN.noSteerMax * 100)} %: steering must matter)`);
+        warnings.push(`no-steer line (centre lane, full intake) reaches the boss with ${Math.round(ns.final)} = ${Math.round(ns.final / eBoss * 100)} % of E_boss ${eBoss} (limit ${Math.round((fxc ? fxc.limitFrac : GEN.noSteerMax) * 100)} %${fxc ? ` at shop ${fxc.shops.map((x) => x.ranks.join("")).join("/")}${fxc.win ? ", a fixed line CLEARS the boss in the model" : ""}` : ""}: steering must matter)`);
       }
     }
     let drift = 0, worst = 0;

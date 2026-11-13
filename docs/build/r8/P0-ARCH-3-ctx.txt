@@ -1,0 +1,23 @@
+ARCHITECTURE.md §3 "The shared context ctx" — 1.4.0 draft by P0 (the release folds this into the .md)
+====================================================================================================
+
+The literal in main.js declares the three new members up front (null until attached), keeping ctx out of dictionary mode.
+
+NEW / CHANGED ROWS
+
+| `ctx.rngShot` | `Rng` | level (per run: `ctx.rng.fork(13)` in _beginRun, right after rng / rngFx); null until the first run | 1.4.0 (D4): the weapons' gameplay randomness — every shooter's start phase (weapons.reset), every shot's spread / pellet jitter (weapons._shoot) and the boss hit point (boss.hitTestSeg: it centres a rocket's blast and picks the struck twin, so it is gameplay, not the cosmetic jitter D4 assumed) — seeded `seed + 13`. Before 1.4.0 these drew ctx.rngFx, which audio also draws at AudioContext time, so a run's outcome could differ between boots. Rule (tier parity and determinism): anything per rendered frame, per audio event or per real-time tick never draws ctx.rng or ctx.rngShot. |
+| `ctx.rngFx` | (unchanged type) | | now cosmetic only: squad spawn animation (records draw only; gameplay reads the logical slots), plates, glob / car spin, gate glow, pickup yaw, zombie tint, muzzle / rocket / rail jitter, fx, audio pitch jitter. |
+| `ctx.crowd` | `CrowdSystem` | main (SYSTEMS, after zombies) | the Horde crowd engine (P4); inactive outside holds. |
+| `ctx.hold` | `HoldSystem` | main (SYSTEMS, before level) | the Horde hold ModeSystem (P6); inactive until hold.begin. |
+| `ctx.world` | (unchanged shape) | squad | `squadHalfWidth` / `squadDepth` now come from the LOGICAL formation: the first L = min(C, SQUAD.slotCapacity) slots, on every tier (D5). They used to come from the visible count V = min(C, vmax), so Low (vmax 60) played on a 1.02 m half-width from C ≥ 60 while High played on 1.70 m. |
+| `ctx.squad` | | | `halfWidth`, `depth`, `centerZ`, `intersectsCircle`, `bounds`, `slotWorld` and `shooterPosition(k)` are logical (tier-free); new getter `logicalCount` (L); `visible` (V) stays the drawn count and only feeds visuals (count label height, camera dolly, debug overlay). |
+
+SYSTEMS ORDER (boot step 9 and §4.1)
+fx, squad, zombies, crowd (weight 10), boss, gates, pickups, weapons, troops, hold (weight 10), level.
+
+DETERMINISM AND TIER PARITY (new paragraph after the table)
+Gameplay streams: ctx.rng and ctx.rngShot; cosmetic only: ctx.rngFx (night uses time hashes). Gameplay geometry comes
+from the logical formation, never from the drawn soldiers: shooter muzzles sit on the logical shooter slots (not on a
+drawn soldier walking to its slot), contact and boss / troop / pickup geometry read the logical half-width and depth.
+Proofs (P0): the RUN digest of L1-30 × 3 seeds × {passive, strongj} is identical across two Chrome boots and at
+--quality high / med / low (harness/rundigest.cjs; evidence under build/P0/runs/).

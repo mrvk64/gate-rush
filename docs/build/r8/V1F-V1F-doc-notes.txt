@@ -1,0 +1,14 @@
+V1F doc notes for the release (fold into the .md docs; subagents cannot write .md)
+
+1. Boss bar wording (docs/GDD.md §7 / HUD row, docs/ARCHITECTURE.md #bossbar row and the STRINGS key list)
+   - The phase flash in place of the boss name is "PHASE 2" / "PHASE 3" (was "PHASE 2" / "ENRAGED").
+   - STRINGS.boss.enraged is gone; ui._onBossPhase uses STRINGS.boss.phase(n) for every phase.
+   - Phase-3 lessons: "PHASE 3: HE SLAMS EVERY 3 SECONDS", "PHASE 3: 10 CRAWLERS — SHE SPITS FASTER", "PHASE 3: AN ATTACK EVERY 3 SECONDS".
+   - ENRAGED now means one thing: the enrage clock ran out (the clock's tag, TYPES_TEXT enrage.tag, and the 'boss.enrage' lesson).
+   - Field Guide: the timer row is named ENRAGE (was TOO SLOW) and starts "The clock beside the boss bar counts down: ..."; BOSS BAR ends "... then pulses red in phase 3."
+2. Field Guide icons (ARCHITECTURE codex icons): rows of the sections 'hold' and 'night' draw their type's tile badge (k:'type', horde / night);
+   hold.supply draws the crate, hold.surges the bar.
+3. Supply crate chute (js/hold.js _build): a cross canopy of boxes (crown, four arms in two folds, eight orange / white gores, four cords),
+   colour slot SLOT_GORE (CHUTE_GORE 0xF0762A); on landing scale.y falls as k*k.
+4. Update pill text: "Update — tap to reload" (STRINGS.update.ready and the ui.js fallback); fits 320 px (text 140 px in a 172 px pill).
+5. 1.4.1 list: BAL-2 (Twins hold against a wiper: needs a code change in hold.js _bossColumn, see bal/NOTES.txt), A23, LOOKS-4, the other minors.

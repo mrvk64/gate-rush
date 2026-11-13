@@ -58,7 +58,7 @@ import {
 } from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { clamp, lerp, ease, smoothstep } from './util.js';
-import { WORLD, RENDER, PALETTE, QUALITY_TIERS, DISTRICTS, DISTRICT_PROPS, DISTRICT_RULES } from './data.js';
+import { WORLD, RENDER, PALETTE, QUALITY_TIERS, DISTRICTS, DISTRICT_PROPS, DISTRICT_RULES, NIGHT, NIGHT_DISTRICTS } from './data.js';
 
 // ---------------------------------------------------------------------------------------------
 // Structure derived from data.js (no tuning literals)
@@ -1136,9 +1136,16 @@ function resolveDistrict(d) {
   });
 }
 const RESOLVED = DISTRICTS.map(resolveDistrict);
+// r8 night (P5): the night tables, resolved once; `base` = the day record (same props: a day ⇄ night switch re-lights the ring)
+const RESOLVED_NIGHT = NIGHT_DISTRICTS.map((d, i) => Object.freeze({ ...resolveDistrict(d), base: RESOLVED[i] }));
 
-/** District entry, DISTRICTS array index (0-based, as render.setDistrict accepts) or id → its resolved record (null when unknown). */
+/** District entry, DISTRICTS array index (0-based, as render.setDistrict accepts) or id → its resolved record (null when unknown);
+ *  r8: or a night table. */
 function resolvedOf(d) {
+  if (d && typeof d === 'object' && d.nightOf) {
+    for (let i = 0; i < RESOLVED_NIGHT.length; i++) if (RESOLVED_NIGHT[i].d.nightOf === d.nightOf) return RESOLVED_NIGHT[i];
+    return null;
+  }
   if (d && typeof d === 'object') {
     for (let i = 0; i < RESOLVED.length; i++) if (RESOLVED[i].d === d || RESOLVED[i].d.id === d.id) return RESOLVED[i];
     return null;
@@ -1257,6 +1264,7 @@ export class Environment {
     this._wOp0 = RESOLVED[0].weather.opacity;     // weather opacity / skyline coverage at the fade start
     this._dip0 = 1;
     this._litMode = RESOLVED[0].lamps.lit;        // lamps lit mode in effect (switches at a fade's 0.5 point)
+    this._boOn = false; this._boT0 = 0.5; this._boT0 = 0; this._boDur = 0.5; this._boDur = 1;   // r8 night: BLACKOUT window (theatre ms)
     this._blinkRate = RESOLVED[0].blinkRate;
     this._fogFade = false;                        // the district fade writes fog near / far (until a setFog takes over)
     this._dfFromN = 0; this._dfFromF = 0; this._dfToN = 0; this._dfToF = 0;
@@ -1589,6 +1597,8 @@ export class Environment {
     this._adopt();
     const wasFading = this._fadeOn;
     const changed = R !== this._T;
+    const relight = changed && (R.base || R) === (this._T.base || this._T);   // r8 night: the same district by day / by night
+    if (this._boOn) this._endBlackout();
     this._T = R;
     this._resolveTargets();
     this._fogActive = false;                                          // setDistrict cancels a running setFog lerp
@@ -1610,7 +1620,8 @@ export class Environment {
         this._drain[s] = 0;
         if (s !== S_SMOKE && this._geoKind[s] !== this._tSlot[s].kind) { this._swapSlot(s); swapped = true; }
       }
-      if (changed || wasFading || swapped) this._layoutAll();
+      if ((changed && !relight) || wasFading || swapped) this._layoutAll();
+      else if (relight) this._relightLamps();
       return;
     }
     // ---- fade ----
@@ -1895,6 +1906,7 @@ export class Environment {
       this._stepFog(dt);
     }
     if (this._fadeOn) this._stepDistrict();
+    if (this._boOn) this._stepBlackout();
     this._titleClear();
   }
 
@@ -2141,6 +2153,36 @@ export class Environment {
       e.array[i] = (b & 1) && (mode === 'all' || (mode === 'mixed' && (b & 2))) ? 1 : 0;
     }
     e.needsUpdate = true;
+  }
+
+  /** r8 night (P5): BLACKOUT — the street lamps (and their road pools) start lit and die over `seconds` of theatre time with a
+   *  time-hash flicker, leaving the night table's unlit lamps. Any setDistrict ends it. Allocation-free. */
+  blackout(seconds) {
+    const B = this._T.base;
+    if (!this._built || !B || !(seconds > 0)) return;
+    this._boT0 = this._now(); this._boDur = seconds * 1000; this._boOn = true;
+    this._litMode = B.lamps.lit;
+    this._relightLamps();
+  }
+
+  _stepBlackout() {
+    const B = this._T.base, k = (this._now() - this._boT0) / this._boDur;
+    if (!B || k >= 1) { this._endBlackout(); return; }
+    let x = Math.imul(Math.floor(k * this._boDur * NIGHT.blackout.flickerHz / 1000) ^ 0x9E3779B9, 0x85EBCA6B);   // flicker: integer hash
+    x = ((x ^ (x >>> 13)) >>> 0) / 4294967296;
+    const f = (1 - k) * (1 - k) * (x < 0.25 + 0.6 * k ? 0.12 : 1);
+    const v = B.v;
+    this._lampU.uGrEmitGain.value = v[V.lampGain] * f;
+    this._groundU.uGrPool.value.set(v[V.pool] * f, v[V.pool + 1] * f, v[V.pool + 2] * f);
+  }
+
+  _endBlackout() {
+    this._boOn = false;
+    const v = this._vCur;
+    this._lampU.uGrEmitGain.value = v[V.lampGain];
+    this._groundU.uGrPool.value.set(v[V.pool], v[V.pool + 1], v[V.pool + 2]);
+    this._litMode = this._T.lamps.lit;
+    this._relightLamps();
   }
 
   /** Fresh ring: segments back to [RING_START + 30k], anchor 0, every segment re-placed from the seed. */
