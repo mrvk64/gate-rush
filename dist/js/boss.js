@@ -1705,7 +1705,8 @@ export class BossSystem {
       car.rx += car.spin * dt;
     } else {
       car.mesh.position.z += roadSpeed * dt;
-      if (car.mesh.position.z > WORLD.despawnZ) this._hideCar();
+      const w = this.ctx.world;
+      if (car.mesh.position.z > (w && w.despawnZ > 0 ? w.despawnZ : WORLD.despawnZ)) this._hideCar();   // 1.5.0: a mode may move it
     }
   }
 

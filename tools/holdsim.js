@@ -46,9 +46,9 @@ export const RULES = Object.freeze({
   // field (m)
   wallZ: -3.9, frontZ: -2.3, rangeZ: -44.3, wallHalf: 4.0, segW: 2.0, throatZ: -7, funnelZ: -25, streetHalf: 11.0,
   feedZ0: -70, feedZ1: -46, feedDensity: 3.0, r: 0.27,
-  // fire
+  // fire (1.5.0: twinR, each Hulk Twin's column reach)
   laneHalf: 1.25, laneShare: 0.80, focusT: 0.8, focusFrom: 0.5, aimRange: 3.4, aimSpeed: 14, pierce: 4, rateCap: 90,
-  beta: 0.5, betaWind: 0.75, betaOut: 0.2, bossR: 1.77, spitBeta: 0.5, crawlerHitZ: -14,
+  beta: 0.5, betaWind: 0.75, betaOut: 0.2, bossR: 1.77, twinR: 1.25, spitBeta: 0.5, crawlerHitZ: -14,
   // crowd: walker, runner, crawler, brute, spitter speeds (m/s); steering, density, separation
   speed: [5.0, 7.0, 3.5, 3.0, 2.4], densCap: 3.4, steerK: 0.9, steerMax: 1.8, diffuse: 0.3, accel: 6,
   sepK: 0.65, sepMax: 10, sepZMin: -76, runnerRetargetZ: -23.9, crawlLunge: 3, crawlLungeSpeed: 6,
@@ -285,6 +285,7 @@ export function simulateHold(scriptOrHold, bot, seed, opts = {}) {
   const bossHpTotal = Math.round((opts.bossHpRun ? holdBossHp(hold.eBoss, bossFactor, ratio, sh.p * sh.bd, 1, 1, bossRules)
     : holdBossHp(hold.eBoss, bossFactor, ratio, sh.p, sh.bd, hold.boss.bdExp, bossRules)) * (opts.bossHpMult ?? 1));
   const bossSplit = arch.twins ? (forced ? forced.hpSplit : hold.boss.split) : 1;
+  const bossR = arch.twins ? T.twinR : T.bossR;      // 1.5.0: the column reach, as hold.js _bossR (the Twins keep twinR after one dies)
   const enrageS = hold.boss.enrageS != null ? hold.boss.enrageS : T.enrageS;
 
   let surgeAt = 1;                                    // the next surge whose ease is still undecided
@@ -506,7 +507,7 @@ export function simulateHold(scriptOrHold, bot, seed, opts = {}) {
       const c = Math.max(0, Math.min(7, Math.floor(sx + 4)));
       let took = false;
       for (const b of bosses) {                      // the boss share over the crowd (the nearer twin takes it)
-        if (b.dead || b.z < T.rangeZ || Math.abs(sx - b.x) > T.bossR) continue;
+        if (b.dead || b.z < T.rangeZ || Math.abs(sx - b.x) > bossR) continue;
         const beta = inLane ? (b.wind >= 0 ? T.betaWind : T.beta) : T.betaOut;
         const share = dps * beta;
         bossDamage(b, share * DT * sh.bd, share * DT / (d * FIRE.accuracy));

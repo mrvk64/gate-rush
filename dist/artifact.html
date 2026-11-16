@@ -31,6 +31,11 @@
 <link rel="modulepreload" href="js/night.js">
 <link rel="modulepreload" href="js/crowd.js">
 <link rel="modulepreload" href="js/hold.js">
+<link rel="modulepreload" href="js/escort.js">
+<link rel="modulepreload" href="js/escortgen.js">
+<link rel="modulepreload" href="js/chase.js">
+<link rel="modulepreload" href="js/chasegen.js">
+<link rel="modulepreload" href="js/obstacles.js">
 <link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" crossorigin>
 <link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/postprocessing/EffectComposer.js" crossorigin>
 <link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/postprocessing/RenderPass.js" crossorigin>
@@ -76,7 +81,7 @@
       <button id="btn-update" class="pill update-pill" hidden><span class="upd-dot" aria-hidden="true"></span><span class="upd-text"></span></button>
       <div id="version" class="micro"></div>
     </div>
-    <div id="scr-levels" class="screen" role="dialog" aria-modal="true" hidden><h1>LEVELS</h1><p id="levels-legend" class="caption"><span class="legend-skull" aria-hidden="true"></span><span class="legend-text">DISTRICT FINALE · TOUGHER BOSS</span></p><p id="levels-legend2" class="caption" hidden><span class="lg-item lg-horde"><span class="tt tt-planks" aria-hidden="true"></span><span class="lg-text">HORDE</span></span><span class="lg-item lg-night"><span class="tt tt-crescent" aria-hidden="true"></span><span class="lg-text">NIGHT</span></span><span class="lg-item lg-retype"><span class="lg-ring" aria-hidden="true"></span><span class="lg-text">NEW WAY TO PLAY</span></span></p><div id="level-grid"></div><button class="btn secondary back" data-back>BACK</button></div>
+    <div id="scr-levels" class="screen" role="dialog" aria-modal="true" hidden><h1>LEVELS</h1><p id="levels-legend" class="caption"><span class="legend-skull" aria-hidden="true"></span><span class="legend-text">DISTRICT FINALE · TOUGHER BOSS</span></p><p id="levels-legend2" class="caption" hidden><span class="lg-item lg-horde"><span class="tt tt-planks" aria-hidden="true"></span><span class="lg-text">HORDE</span></span><span class="lg-item lg-night"><span class="tt tt-crescent" aria-hidden="true"></span><span class="lg-text">NIGHT</span></span><span class="lg-item lg-chase"><span class="tt tt-chevrons" aria-hidden="true"></span><span class="lg-text">CHASE</span></span><span class="lg-item lg-escort"><span class="tt tt-truck" aria-hidden="true"></span><span class="lg-text">ESCORT</span></span><span class="lg-item lg-retype"><span class="lg-ring" aria-hidden="true"></span><span class="lg-text">NEW WAY TO PLAY</span></span></p><div id="level-grid"></div><button class="btn secondary back" data-back>BACK</button></div>
     <div id="scr-shop" class="screen" role="dialog" aria-modal="true" hidden><h1>SHOP</h1><div id="shop-coins" class="pill"></div><div id="shop-note" class="caption"></div><div id="shop-list"><!-- 5 × .card[data-id] with .card-icon, .card-body (.card-name .card-what .pips .card-effect), .card-act (button.buy .card-then .card-estimate) --></div><button class="btn secondary back" data-back>BACK</button></div>
     <div id="scr-settings" class="screen overlay" role="dialog" aria-modal="true" hidden>
       <h1>SETTINGS</h1>

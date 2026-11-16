@@ -3627,6 +3627,48 @@ html.left-handed #hud.fire-on.action-on { --hint-l: calc(var(--mirror-l) + var(-
   background: #F2D29A;
   transform: rotate(-28deg);
 }
+/* 1.5.0: a chase's road ends at the safe zone (two blast doors under a hazard band), an escort's at a green flag */
+#progress-skull.safe {
+  background: radial-gradient(circle at 50% 38%, #123A52 0%, #071826 72%);
+  box-shadow: 0 0 0 2px #2FB8FF, 0 0 0 4px rgba(4, 7, 14, 0.7), 0 3px 6px rgba(0, 0, 0, 0.5);
+}
+#progress-skull.safe::before {               /* the doors */
+  left: 24%;
+  right: 24%;
+  top: 34%;
+  height: 44%;
+  border-radius: 1px;
+  background: linear-gradient(90deg, #C9D6E0 0 46%, #071826 46% 54%, #C9D6E0 54%);
+}
+#progress-skull.safe::after {                /* the hazard band over them */
+  left: 20%;
+  right: 20%;
+  top: 20%;
+  height: 12%;
+  border-radius: 1px;
+  background: repeating-linear-gradient(135deg, #FFC21A 0 2px, #1A1200 2px 4px);
+}
+#progress-skull.flag {
+  background: radial-gradient(circle at 50% 38%, #12402A 0%, #061A10 72%);
+  box-shadow: 0 0 0 2px #3FD07A, 0 0 0 4px rgba(4, 7, 14, 0.7), 0 3px 6px rgba(0, 0, 0, 0.5);
+}
+#progress-skull.flag::before {               /* the pole */
+  left: 32%;
+  right: auto;
+  width: 9%;
+  top: 18%;
+  height: 64%;
+  border-radius: 1px;
+  background: var(--text);
+}
+#progress-skull.flag::after {                /* the flag */
+  left: 41%;
+  right: 22%;
+  top: 20%;
+  height: 32%;
+  border-radius: 0 2px 2px 0;
+  background: #3FD07A;
+}
 
 /* the enrage clock (boss:fight enrageAt → seconds to the enrage) at the boss bar's top-right, red in its last seconds; at
    boss:enrage it becomes the ENRAGED tag. The name keeps clear of it (#bossbar.has-clock, below) */
@@ -3783,6 +3825,36 @@ html.left-handed #hud.fire-on.action-on { --hint-l: calc(var(--mirror-l) + var(-
 /* night-only overrides */
 /* */
 /* */
+/* ==== r9 REGION CHASE (P2) ==== */
+/* CHASE's badge (.tt-chevrons, paintBadge; P4): two white chevrons pointing up the road (the » of a sprint gate turned forward)
+   on the blue disc, CSS-drawn like HORDE's planks */
+.tt-chevrons::before, .tt-chevrons::after {
+  content: "";
+  position: absolute;
+  left: 22%;
+  right: 22%;
+  height: 30%;
+  background: #FFFFFF;
+  clip-path: polygon(50% 0, 100% 62%, 100% 100%, 50% 38%, 0 100%, 0 62%);
+  filter: drop-shadow(0 0 1px #0B3A5C);
+}
+.tt-chevrons::before { top: 18%; }
+.tt-chevrons::after { top: 48%; opacity: 0.8; }
+/* */
+/* ==== r9 REGION ESCORT (P3) ==== */
+/* ESCORT's badge (.tt-truck, paintBadge): a white pickup in profile with two dark wheels on the green disc, CSS-drawn like HORDE's
+   planks (no glyph that needs a fallback font) */
+.tt-truck::before, .tt-truck::after { content: ""; position: absolute; }
+.tt-truck::before {
+  left: 13%; right: 13%; top: 30%; height: 32%;
+  background: #F4F4F0;
+  clip-path: polygon(0 36%, 55% 36%, 59% 0, 83% 0, 100% 48%, 100% 100%, 0 100%);
+  filter: drop-shadow(0 0 1px #0E3A1E);
+}
+.tt-truck::after {
+  left: 18%; right: 18%; top: 54%; height: 24%;
+  background: radial-gradient(circle at 20% 55%, #1E2228 0 34%, rgba(30, 34, 40, 0) 37%), radial-gradient(circle at 78% 55%, #1E2228 0 34%, rgba(30, 34, 40, 0) 37%);
+}
 
 /* =============================================================================================
    15. Accessibility: reduced motion, large text, coarse/short viewports

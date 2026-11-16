@@ -45,9 +45,11 @@ import { Rng, clamp, roundDesign, shopComp } from './util.js';
 import {
   WORLD, GATE_RULES, ZOMBIES, LEAK_MODEL, WAVE_WEIGHTS, WAVE_PATTERNS, WAVE_RULES, LEAK_BANDS,
   BOSSES, PICKUP_SCHEDULE, PICKUPS, LEVELS, HINTS, UPGRADES, FIRE, bossIdOf, isFinale, expectedRanksOf, lateRise, bossUnderT, eBossOf, enrageExtra,
-  LEVEL_TYPES, levelTypeOf,
+  LEVEL_TYPES, levelTypeOf, ESCORT_GEN,
 } from './data.js';
 import { holdSpec, generateHoldScript } from './holdgen.js';
+import { escortBuild } from './escortgen.js';              // 1.5.0 (P3)
+import { chaseSpec, chaseCheck, chaseHarden, generateChaseScript } from './chasegen.js';
 
 // ---------------------------------------------------------------------------------------------
 // Generator knobs (round 5: every former DATA-MISSING literal now lives in data.js). Each read falls back to the round-4
@@ -159,6 +161,8 @@ const FORK_OPENER = 30011;                                    // QA LVL-30: the 
 const SECOND_SLOT_MAX_ERR = num(GEN_DATA.secondSlotMaxErr, 0.15);
 // GATE_RULES.generation.noSteerPenalty — round-3 QA LVL-22: attempt-score cost of a no-steer line above noSteerMax (ln units).
 const NO_STEER_PENALTY = num(GEN_DATA.noSteerPenalty, 2);
+/** 1.5.0 (PLAN C11): attempt-score cost of failing a mode's own idle rule (more than any error count a passing attempt has). */
+const MODE_FAIL_PENALTY = 1000;
 
 // ---------------------------------------------------------------------------------------------
 // Shared constants and small helpers
@@ -1906,6 +1910,19 @@ export function fixedLines(events, v, pf) {
   const r = simulate(moments, pf, 'fixR', null).final;
   return { C: a, L: l, R: r, max: Math.max(a, l, r) };
 }
+/**
+ * 1.5.0 (C11): a run script's lines for a mode's own idle rule (chasegen.chaseCheck): nosteer / fixL / fixR (fixedLines' full intake
+ * at ranks rk), greedy (the design line), max (full intake, best lane) as simulate results.
+ */
+export function modeLines(script, rk) {
+  const L = script.id, v = script.roadSpeed, c = script.run ? runCurve(L, script.run) : curve(L), len = script.length;
+  const pe = profileExpOf(L), pExp = shopOf(expectedRanksOf(L)).p, sh = shopOf(rk), m = buildMoments(script.events, v);
+  const waveModel = script.line === 'greedy', calibL = waveModel ? levelCalib(L) : 0, E0 = script.expected[0].e;
+  const pf = { v, bandMid: c.bandMid, E0: Math.max(E0, sh.s0), len, waveModel, calibL, fire: sh.fire, dpsMult: compDps(sh.p, pExp, pe) };
+  const greedy = simulate(m, { v, bandMid: c.bandMid, E0, len, waveModel, calibL }, 'greedy', null);
+  return { nosteer: simulate(m, pf, 'nosteer', null), fixL: simulate(m, pf, 'fixL', null), fixR: simulate(m, pf, 'fixR', null),
+    greedy, max: simulate(m, pf, 'max', null) };
+}
 /** r8v2: the campaign's live shop-compensation exponent at level L (LEAK_MODEL.profileExpByLevel, piecewise linear). */
 export function profileExpOf(L) {
   const t = LEAK_MODEL.profileExpByLevel;
@@ -2415,18 +2432,64 @@ export function levelGenerator(L, seed, base) {
  * r8 (D39): campaign level L as a generator, one yield per slice. P1T: dispatched on its base (default levelTypeOf(L).base) — a
  * Horde level is holdgen.holdSpec → generateRunSteps (yield*) → holdgen.generateHoldScript, any other base the attempt loop.
  * The script carries base, eTarget (what its stars count against), finale (the event that ends the run: 'boss' | 'hold') and
- * starMetric (ARCH §7).
+ * starMetric (ARCH §7). 1.5.0: the bases with their own generator are BASE_STEPS (chase / escort add one line each).
  */
 export function* levelSteps(L, seed, base) {
   const Ln = Math.max(1, Math.floor(Number.isFinite(L) ? L : 1));
   const seedU = (Number.isFinite(seed) ? seed : LEVELS.seedBase + Ln) >>> 0;
-  if ((base || levelTypeOf(Ln).base) === 'horde') {
-    const spec = holdSpec(Ln, seedU, { debut: Ln === LEVEL_TYPES.horde.debut });
-    return typed(generateHoldScript(yield* generateRunSteps(Ln, seedU, spec.run), spec), 'horde', spec.eTarget, 'hold');
-  }
+  const own = BASE_STEPS[base || levelTypeOf(Ln).base];
+  if (own) return yield* own(Ln, seedU);
   const script = yield* attemptSteps(Ln, seedU, curve(Ln));
   return typed(script, 'standard', script.eBoss, 'boss');
 }
+
+/** r8 (P1T): a Horde level — holdgen.holdSpec → generateRunSteps (yield*) → holdgen.generateHoldScript (finale 'hold'). */
+function* hordeSteps(Ln, seedU) {
+  const spec = holdSpec(Ln, seedU, { debut: Ln === LEVEL_TYPES.horde.debut });
+  return typed(generateHoldScript(yield* generateRunSteps(Ln, seedU, spec.run), spec), 'horde', spec.eTarget, 'hold');
+}
+
+/**
+ * 1.5.0 (P3): an ESCORT level — generateRunSteps (the boss caps off) with escortgen's idle rule as the attempt check (PLAN C11),
+ * then escortgen.escortBuild on the best run (the same deterministic build the check judged): finale 'escort', stars on 'delivered'.
+ */
+function* escortSteps(Ln, seedU) {
+  const c = curve(Ln), opts = { gates: c.gates, fixed: ESCORT_GEN.run.fixed }, rc = runCurve(Ln, opts);
+  const run = yield* generateRunSteps(Ln, seedU, opts, function* escortCheck(script) {
+    yield;
+    return escortBuild(script, Ln, seedU, escortAux(script, Ln, rc)).ok;
+  });
+  const script = escortBuild(run, Ln, seedU, escortAux(run, Ln, rc)).script;
+  return Object.assign(typed(script, 'escort', script.eTarget, 'escort'), { starMetric: 'delivered' });
+}
+
+/** 1.5.0 (P3): what escortgen's model takes from this one — the design line's lane per gate event and the fixed lines' squad
+ *  samples (never steers, held left, held right) at the expected shop and at rank 10, as fixedCheck runs them. */
+export function escortAux(script, L, c) {
+  const v = script.roadSpeed, moments = buildMoments(script.events, v);
+  const p = { v, bandMid: c.bandMid, E0: c.eStart, len: script.length, waveModel: true, calibL: levelCalib(L) };
+  const picks = [];
+  for (const r of simulate(moments, p, script.line || 'greedy', null).rows) if (r.kind === 'gate') picks.push({ at: r.at, lane: r.lane });
+  const ranks = [expectedRanksOf(L), [10, 10, 10, 10, 10]], pExp = shopOf(ranks[0]).p, pe = profileExpOf(L), lines = [];
+  for (const rk of ranks) {
+    const sh = shopOf(rk), pf = Object.assign({}, p, { E0: Math.max(c.eStart, sh.s0), fire: sh.fire, dpsMult: compDps(sh.p, pExp, pe) });
+    for (const mode of ['nosteer', 'fixL', 'fixR']) lines.push({ mode, samples: simulate(moments, pf, mode, null).samples });
+  }
+  return { picks, lines };
+}
+
+/** 1.5.0 (r9 P2): a CHASE level — chasegen.chaseSpec → generateRunSteps with the chase's idle rule in the loop (C11) →
+ *  chasegen.generateChaseScript (finale 'chase': the breach, the mode begins over the run). */
+function* chaseSteps(Ln, seedU) {
+  const spec = chaseSpec(Ln, seedU, { debut: Ln === LEVEL_TYPES.chase.debut });
+  const check = function* (script) { return yield* chaseCheck(script, spec.chase, modeLines); };
+  const run = yield* generateRunSteps(Ln, seedU, spec.run, check);
+  if (run.chase && run.chase.idle.some((r) => !r.ok)) yield* chaseHarden(run, run.chase, modeLines);   // no attempt passed: the last resort
+  return typed(generateChaseScript(run, spec), 'chase', spec.eTarget, 'chase');
+}
+
+/** 1.5.0: base → its sliced generator (Ln, seedU) → a typed script; any base not listed plays the campaign attempt loop. */
+const BASE_STEPS = Object.freeze({ horde: hordeSteps, chase: chaseSteps, escort: escortSteps });
 
 /** r8 (P1T): a generated campaign script's type fields (the stars count survivors at the finale against eTarget). */
 function typed(script, base, eTarget, finale) {
@@ -2436,11 +2499,15 @@ function typed(script, base, eTarget, finale) {
 /**
  * r8 (PLAN §B, D28 / D39): a Horde level's RUN PHASE, sliced like levelSteps, on runCurve(L, opts = holdgen.holdSpec().run): the
  * E-trace ends at eEnd, fixed lines stay ≤ lim·ref, a line ≥ win·ref gets the long budget and the side repair.
+ * 1.5.0 (PLAN C11): a mode with no boss (chase, escort) passes opts.fixed { lim, win } out of reach (the boss caps off) and
+ * `check`, a generator function (script) → true when the attempt passes the mode's own idle rule (it may repair the script in
+ * place; it yields between its steps like the validation). A failing attempt scores MODE_FAIL_PENALTY more and keeps the loop
+ * going to the long budget; the best attempt wins, as in 1.4.0.
  */
-export function* generateRunSteps(L, seed, opts) {
+export function* generateRunSteps(L, seed, opts, check) {
   const Ln = Math.max(1, Math.floor(Number.isFinite(L) ? L : 1));
   const seedU = (Number.isFinite(seed) ? seed : LEVELS.seedBase + Ln) >>> 0;
-  return yield* attemptSteps(Ln, seedU, runCurve(Ln, opts));
+  return yield* attemptSteps(Ln, seedU, runCurve(Ln, opts), typeof check === 'function' ? check : null);
 }
 
 /** r8 (D39): generateRunSteps in one call (tools; the runtime slices it). */
@@ -2477,7 +2544,7 @@ export function runCurve(L, opts) {
  * The attempt loop of levelSteps / generateRunSteps (the former levelGenerator body): build and validate attempts (sliced),
  * keep the best attemptScore, then the side repair (a fixed-line clear) or the D31 shrink.
  */
-function* attemptSteps(Ln, seedU, c) {
+function* attemptSteps(Ln, seedU, c, check) {
   const base = new Rng(seedU);
   const fxs = GATE_RULES.generation.fixedLines;
   const repairFrom = c.run ? c.run.fixed.repairFrom : (fxs && fxs.repairFrom) || 0;
@@ -2492,9 +2559,18 @@ function* attemptSteps(Ln, seedU, c) {
     let vr = vit.next();
     while (!vr.done) { yield; vr = vit.next(); }             // r8v2: the validation is spread over slices too
     const res = vr.value;
+    // 1.5.0 (C11): a mode level's own idle rule, after the validation (sliced)
+    let modeFail = false;
+    if (check) {
+      yield;
+      const cit = check(script);
+      let cr = cit.next();
+      while (!cr.done) { yield; cr = cit.next(); }
+      modeFail = cr.value !== true;
+    }
     // QA LVL-27: a weak-shooter line under CAUTIOUS_FLOOR costs an attempt more than a plain warning (attemptScore)
-    const score = attemptScore(res, c);
-    if (best === null || score < best.score) best = { script, score, ok: res.ok, noSteerHigh: !!res.noSteerHigh, weakLow: !!res.weakLow, fixedWin: !!res.fixedWin };
+    const score = attemptScore(res, c) + (modeFail ? MODE_FAIL_PENALTY : 0);
+    if (best === null || score < best.score) best = { script, score, ok: res.ok, noSteerHigh: !!res.noSteerHigh, weakLow: !!res.weakLow, fixedWin: !!res.fixedWin, modeFail };
     if (!res.ok && excessOnly(res) && (bestFix === null || score < bestFix.score)) bestFix = { script, score };
     let done = false;
     if (res.ok && res.warnings.length === 0) done = true;
@@ -2503,8 +2579,9 @@ function* attemptSteps(Ln, seedU, c) {
     k++;
     // round 5: a weak-line shortfall gets the longer budget (r8v2: so does a fixed line that clears; r8, D31: and errors)
     if (k >= ((best.weakLow || best.fixedWin || !best.ok) ? GEN_ATTEMPTS_WEAK : GEN_ATTEMPTS)) done = true;
+    if (check && best.modeFail) done = k >= GEN_ATTEMPTS_WEAK;   // 1.5.0 (C11): a mode level re-rolls while its best fails the idle rule
     if (!done) { yield; continue; }
-    if (best.ok && best.fixedWin && fxs && fxs.repairPasses > 0 && Ln >= repairFrom) {
+    if (!check && best.ok && best.fixedWin && fxs && fxs.repairPasses > 0 && Ln >= repairFrom) {
       // r8v2 (B2): a best attempt whose fixed line still clears the boss in the model gets the side repair, one slice at a time
       yield;
       const rit = repairSides(best.script, c, best.score, fxs.repairPasses);

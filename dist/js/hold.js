@@ -68,6 +68,8 @@ const SOURCES = ['', 'lane', 'repair', 'crate'];
 const SECTION_STATES = ['intact', 'damaged', 'critical', 'breached'];
 const ANCHOR_STATES = ['', 'repair', 'gap', 'rebuild', 'nokits', 'busy'];
 const A_NONE = 0, A_REPAIR = 1, A_GAP = 2, A_REBUILD = 3, A_NOKITS = 4, A_BUSY = 5;
+/** 1.5.0: at most one REPAIRING label per this many seconds (a tap spam in the cool-down re-pops nothing). */
+const BUSY_PILL_S = 0.4;
 
 /** Section of a world x (the 4 sections of HF.segW over ±HF.wallHalf). */
 function segOf(x) { const s = Math.floor((x + HF.wallHalf) / HF.segW); return s < 0 ? 0 : (s >= NSEC ? NSEC - 1 : s); }
@@ -337,6 +339,7 @@ export class HoldSystem {
     this._countMult = 1; this._threat = 1; this._firstMeet = false; this._runDecisions = 0; this._assistK = 0; this._eHold = 1;
     this._holdSeed = 0; this._cause = ''; this._ended = false; this._kills0 = 0;
     this._tapQ = 0; this._actionQ = 0; this._actionSeq = -1;
+    this._presses = 0; this._busyT = -1e9; this._bossR = HFI.bossR;   // 1.5.0: REPAIR presses, the REPAIRING throttle, the boss column reach
     this._hudAcc = 0; this._focusLevel = 0; this._lastLeft = -1; this._lastKitsShown = -1; this._loopAcc = 0;
     this._lessonSlow = false; this._lessonSweep = false; this._sweepM = 0; this._focusSeen = false; this._flankSeen = false;
     this._repairSeen = false; this._windupSeen = false; this._bruteSeen = false; this._bruteNear = false; this._climbSeen = false;
@@ -708,6 +711,7 @@ export class HoldSystem {
     const prof = ctx.profile, bd = prof && prof.bossDamage > 0 ? prof.bossDamage : 1;
     BOSS_SPEC.capHp = BOSS_SPEC.hp * HB.sniperShot / (TROOPS.sniper.bossCapFrac * bd);
     BOSS_SPEC.x = 0; BOSS_SPEC.z = HB.spawnZ;
+    this._bossR = spec.boss.split !== 1 ? HFI.twinR : HFI.bossR;   // 1.5.0: the Twins (holdgen split < 1) reach less each, kept after one dies
     ctx.boss.spawn(BOSS_SPEC);
     P_MUSIC.mode = 'hold'; P_MUSIC.restart = false; P_MUSIC.swell = true;
     this._emit('music:mode', P_MUSIC);
@@ -760,7 +764,7 @@ export class HoldSystem {
   _bossColumn(x, inRangeOnly) {
     const boss = this.ctx.boss;
     if (!boss || !boss.active || !boss.holdMode) return -1;
-    const R = HFI.bossR;
+    const R = this._bossR;
     let best = -1, bd = 1e9;
     for (let u = 0; u < 2; u++) {
       if (!boss.unitAlive(u)) continue;
@@ -1140,6 +1144,10 @@ export class HoldSystem {
     } else {
       if (a === A_GAP) this._pill('gap', STRINGS.hold.clearGap, x, HF.height + 0.6, HF.wallZ, 1.1);
       else if (a === A_NOKITS) this._pill('nokits', STRINGS.hold.noKits, x, HF.height + 0.6, HF.wallZ, 1.1);
+      else if (a === A_BUSY && this._t - this._busyT >= BUSY_PILL_S) {   // 1.5.0: a press in the cool-down answers (throttled against tap spam)
+        this._busyT = this._t;
+        this._pill('busy', STRINGS.hold.repairing, x, HF.height + 0.6, HF.wallZ, 0.8);
+      }
       return false;
     }
     this._lastRepairT = this._t;
@@ -1153,14 +1161,14 @@ export class HoldSystem {
 
   /** REPAIR (the button, R, gamepad X): the weakest section that a kit can help now; feedback when none can. */
   _repairWeakest() {
-    let best = -1, bv = 1e9, any = -1;
+    let best = -1, bv = 1e9, any = -1, av = 1e9;
     for (let s = 0; s < NSEC; s++) {
       const a = this._actionOf(s), v = this._hp[s] + this._repLeft[s];
-      if (a !== A_NONE && v < bv) { any = s; }
+      if (a !== A_NONE && v < av) { av = v; any = s; }
       if ((a === A_REPAIR || a === A_REBUILD) && v < bv) { bv = v; best = s; }
     }
     if (best >= 0) return this._repair(best);
-    if (any >= 0) this._repair(this._weakest());                         // the weakest's feedback (CLEAR THE GAP / NO KITS)
+    if (any >= 0) this._repair(any);                                    // 1.5.0: the weakest helpable section's feedback (CLEAR THE GAP / NO KITS / REPAIRING)
     return false;
   }
 
@@ -1168,15 +1176,15 @@ export class HoldSystem {
   _input() {
     const input = this.ctx.input;
     if (this._tapQ) {
-      for (let s = 0; s < NSEC; s++) if (this._tapQ & (1 << s)) this._repair(s);
+      for (let s = 0; s < NSEC; s++) if (this._tapQ & (1 << s)) { this._presses++; this._repair(s); }
       this._tapQ = 0;
     }
-    while (this._actionQ > 0) { this._actionQ--; this._repairWeakest(); }
+    while (this._actionQ > 0) { this._actionQ--; this._presses++; this._repairWeakest(); }
     if (!input) return;
     const a = input.action;
     if (a && a.seq !== this._actionSeq) {
       if (this._actionSeq >= 0) {
-        if (a.name === 'repair') { if (a.arg >= 0 && a.arg < NSEC) this._repair(a.arg | 0); else this._repairWeakest(); }
+        if (a.name === 'repair') { this._presses++; if (a.arg >= 0 && a.arg < NSEC) this._repair(a.arg | 0); else this._repairWeakest(); }
         else if (a.name === 'snap' && a.arg >= 0 && a.arg < NSEC) input.aimTargetX = segCx(a.arg | 0);
       }
       this._actionSeq = a.seq;
@@ -1414,6 +1422,7 @@ export class HoldSystem {
     out.kills = this._kills();
     out.total = this._n + this._minions;
     out.surgesCleared = this._surgesCleared();
+    out.presses = this._presses;                         // 1.5.0 (C14): any REPAIR press is input
     return out;
   }
 
@@ -1523,7 +1532,7 @@ export class HoldSystem {
         r.worldToScreen(V3, SCR);
         const row = ANCHOR_ROWS[s];
         row.x = SCR.x; row.y = SCR.y; row.state = ANCHOR_STATES[a];
-        row.label = a === A_GAP ? STRINGS.hold.clearGap : (a === A_NOKITS ? STRINGS.hold.noKits : STRINGS.hold.repair);
+        row.label = a === A_GAP ? STRINGS.hold.clearGap : (a === A_NOKITS ? STRINGS.hold.noKits : (a === A_BUSY ? STRINGS.hold.repairing : STRINGS.hold.repair));
         list.push(row);
       }
     }

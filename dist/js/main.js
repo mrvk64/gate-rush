@@ -24,9 +24,11 @@ import { Pickups } from './pickups.js';
 import { Weapons } from './weapons.js';
 import { Troops } from './troops.js';
 import { HoldSystem } from './hold.js';
+import { ChaseSystem } from './chase.js';
+import { EscortSystem } from './escort.js';     // 1.5.0 (P3)
 import { LevelRunner } from './level.js';
 
-const VERSION = '1.4.0';            // ARCHITECTURE §3 ctx.version (= package.json version; round-8 release 1.4.0, sw.js v9)
+const VERSION = '1.5.0';            // ARCHITECTURE §3 ctx.version (= package.json version; round-9 release 1.5.0, sw.js v10)
 const RNG_BOOT_SEED = 1;            // §4.1 step 1: boot RNG for the title idle scene
 const RNG_FX_FORK = 7;              // §3: ctx.rngFx = ctx.rng.fork(7) — cosmetics never perturb gameplay
 const MAX_LEVEL_PARAM = 999;        // ?level= sanity cap (the campaign loops beyond LEVELS.count, §6.16)
@@ -67,6 +69,7 @@ const SYSTEMS_ALONE_MS = 100;
 const SYSTEMS = Object.freeze([
   ['fx', Fx, 136], ['squad', Squad, 28], ['zombies', Zombies, 9], ['crowd', CrowdSystem, 10], ['boss', BossSystem, 266],
   ['gates', Gates, 33], ['pickups', Pickups, 16], ['weapons', Weapons, 8], ['troops', Troops, 13], ['hold', HoldSystem, 10],
+  ['chase', ChaseSystem, 4], ['escort', EscortSystem, 4],   // 1.5.0: ctx.chase (P2), ctx.escort (P3)
   ['level', LevelRunner, 76],
 ]);
 
@@ -299,10 +302,10 @@ function newWorld() {
   const w = {
     roadSpeed: 0.5, roadSpeedBase: 0.5, distance: 0.5,
     squadX: 0.5, squadHalfWidth: 0.5, squadDepth: 0.5, squadCount: 0, invulnerable: false,
-    bossActive: false, bossZ: 0.5, bossX: 0.5,
+    bossActive: false, bossZ: 0.5, bossX: 0.5, despawnZ: 0.5,   // 1.5.0: despawnZ, the recycle line (level resets it per run)
   };
   w.roadSpeed = WORLD.idleRoadSpeed; w.roadSpeedBase = WORLD.idleRoadSpeed; w.distance = 0;
-  w.squadX = 0; w.squadHalfWidth = 0; w.squadDepth = 0; w.bossZ = 0; w.bossX = 0;
+  w.squadX = 0; w.squadHalfWidth = 0; w.squadDepth = 0; w.bossZ = 0; w.bossX = 0; w.despawnZ = WORLD.despawnZ;
   return w;
 }
 
@@ -322,6 +325,7 @@ export async function boot() {
     ui: null, render: null, models: null, audio: null, engine: null,
     time: null, state: null, input: null, debug: null,
     fx: null, squad: null, zombies: null, crowd: null, boss: null, gates: null, pickups: null, weapons: null, troops: null, hold: null,
+    chase: null, escort: null,                            // 1.5.0 (P2, P3)
     level: null,
   };
   ctx.config.isArtifact = app.dataset.shell === 'artifact';   // both shells put data-shell on #app (§3)

@@ -35,14 +35,15 @@
 // toppling soldier leaves a legible hole; everything else settles at once.
 //
 // 1.4.0 hook (ARCH §3): setFormation('wall') swaps in the SQUAD.formations.wall slot table for every query; its anchor
-// (front-row z, firing step) lives in _s, 0 for 'run'.
+// (front-row z, firing step) lives in _s, 0 for 'run'. 1.5.0: setFormation('chase') = the run's, the back rows
+// turned round as the REAR GUARD (cosmetic).
 //
 // Matrices: squad composes its own TRS (yaw, pitch = topple, roll = steering lean, scale) straight
 // into `instances.mesh.instanceMatrix.array` (the standard InstancedMesh layout, 16 floats per
 // instance; commit() uploads it) because CharacterInstances.writeMatrix has no roll parameter and
 // GDD §3.1 asks for a 6° roll into lateral movement. Characters face −Z with feet at y = 0 (models.js).
 
-import { SQUAD, WORLD, FIRE, GEAR, RENDER, QUALITY_TIERS, UPGRADES } from './data.js';
+import { SQUAD, WORLD, FIRE, GEAR, RENDER, QUALITY_TIERS, UPGRADES, CHASE } from './data.js';
 import { clamp, lerpExp, ease, warnOnce } from './util.js';
 import { CharacterInstances } from './models.js';
 
@@ -66,6 +67,7 @@ const BURST_JITTER = SQUAD.slotSpacing;         // spawn-burst footprint jitter 
 const EDGE_MAX = 10;                            // A13a: row ends drawn per side when V < L
 const WALL = SQUAD.formations.wall;             // 1.4.0
 const FORM_RUN = 0, FORM_WALL = 1;
+const REAR_EASE_S = 0.4;                        // 1.5.0: the rear guard turns round over this (s)
 
 // Record states
 const REC_FREE = 0;
@@ -209,7 +211,7 @@ function stepCore(s, dt, targetX, laneLocked, roadSpeed, settlePending, L, count
  * = Matrix4.compose of an 'YXZ' Euler (verified by docs/build/qa2/fix-characters/matcheck.mjs). Characters face −Z with
  * feet at the origin: +pitch topples the head toward the body's back (+Z), +roll tips it toward −X.
  */
-function writeInstances(s, alpha, list, n, rState, rInst, rx, rz, rs, rYaw, rSpawnT, rDeathT, ma, stateArr) {
+function writeInstances(s, alpha, list, n, rState, rInst, rx, rz, rs, rYaw, rSpawnT, rDeathT, ma, stateArr, rearZ, rearYaw) {
   const tR = s[S_T] + alpha * STEP + s[S_COAST];            // render clock (coasts in complete / gameover)
   const sx = s[S_X], roll = s[S_ROLL];
   const stepH = s[S_SY], stepZ = s[S_SZ];                    // 1.4.0: z ≤ stepZ stands on the firing step
@@ -242,7 +244,7 @@ function writeInstances(s, alpha, list, n, rState, rInst, rx, rz, rs, rYaw, rSpa
       }
     }
     rs[rec] = scale;
-    const yaw = rYaw[rec];
+    const yaw = rYaw[rec] + (state === REC_ALIVE && wz >= rearZ ? rearYaw : 0);   // 1.5.0: the rear guard faces the horde
     const ca = Math.cos(pitch), sa = Math.sin(pitch), cy = Math.cos(yaw), sy = Math.sin(yaw), cr = Math.cos(r), sr = Math.sin(r);
     const cyr = cy * cr, cysr = cy * sr, sycr = sy * cr, sysr = sy * sr;
     const o = ii * 16;
@@ -314,7 +316,7 @@ function warmHotPaths(w) {
     s[S_AZ] = it % 2 === 0 ? 0 : WALL.frontZ; s[S_SY0] = 0; s[S_SY1] = it % 2 === 0 ? 0 : WALL.stepY; s[S_SZ] = WALL.stepBackZ;
     stepCore(s, WORLD.step, (it % 5 - 2) * 1.3, it % 2 === 0, 9.5 + it * 0.01, it % 3 !== 0, N - (it % 3), N - 1,
       fo, hw, dp, ww, list, N, rState, rSlot, rx, rz, rSpawnT, rDeathT, slotX, slotZ, freeOut, rFx, rFz);
-    writeInstances(s, (it % 10) * 0.1, list, N, rState, rInst, rx, rz, rs, rYaw, rSpawnT, rDeathT, ma, stateArr);
+    writeInstances(s, (it % 10) * 0.1, list, N, rState, rInst, rx, rz, rs, rYaw, rSpawnT, rDeathT, ma, stateArr, it % 2 === 0 ? 1e9 : 1.2, Math.PI * (it % 3) / 2);
   }
   if (saved) {
     w.squadX = saved[0]; w.squadHalfWidth = saved[1]; w.squadDepth = saved[2]; w.squadCount = saved[3]; w.invulnerable = saved[4];
@@ -367,7 +369,8 @@ export class Squad {
     this._zOrder = null; this._shooterSlots = null; this._slotRec = null;
     this._slotRow = null; this._prio = null; this._want = null; this._wantL = -1; this._wantV = -1; this._shooterL = -1;
     this._rx = null; this._rz = null; this._rs = null; this._rSpawnT = null; this._rDeathT = null;
-    this._rYaw = null; this._rPhase = null; this._rTint = null;
+    this._rYaw = null; this._rPhase = null; this._rTint = null; this._rRear = null;
+    this._rearOn = false; this._rearN = 0; this._rearT0 = 0.5; this._rearT0 = 0;   // 1.5.0: the rear guard (setFormation('chase'))
     this._rState = null; this._rSlot = null; this._rInst = null; this._instRec = null;
     // 1.4.0: formation, the two slot tables (the active one's arrays are the _slot* fields), positions when an ease began
     this._form = FORM_RUN;
@@ -400,6 +403,7 @@ export class Squad {
     this._rSpawnT = new Float32Array(CAP);
     this._rDeathT = new Float32Array(CAP);
     this._rYaw = new Float32Array(CAP);
+    this._rRear = new Uint8Array(CAP);   // 1.5.0: the record walks backward as the rear guard
     this._rPhase = new Float32Array(CAP);
     this._rTint = new Float32Array(CAP);
     this._rState = new Uint8Array(CAP);
@@ -475,6 +479,7 @@ export class Squad {
     this._shooterCount = 0;
     this._shooterL = -1; this._wantL = -1;
     if (this._form !== FORM_RUN) { this._form = FORM_RUN; this._useTables(this._run); }   // 1.4.0
+    this._setRear(false);                                         // 1.5.0
     this._s[S_AZ] = 0; this._s[S_SY] = 0; this._s[S_SY0] = 0; this._s[S_SY1] = 0; this._s[S_FDUR] = 0;
     if (this._s[S_INV] > 0) {
       this._s[S_INV] = 0;
@@ -609,8 +614,10 @@ export class Squad {
   get depth() { return this._depthAt[this.logicalCount]; }
   /** Formation centre z (= front-row z (1.4.0; 0 for 'run') + depth / 2); the formation centre is (x, centerZ). */
   get centerZ() { return this._s[S_AZ] + this._depthAt[this.logicalCount] * 0.5; }
-  /** 1.4.0: 'run' | 'wall'. */
-  get formation() { return this._form === FORM_WALL ? 'wall' : 'run'; }
+  /** 1.5.0: the logical formation's back row z (front-row z + depth): the chase gap is measured from it. */
+  get backZ() { return this._s[S_AZ] + this._depthAt[this.logicalCount]; }
+  /** 1.4.0: 'run' | 'wall'; 1.5.0: 'chase'. */
+  get formation() { return this._form === FORM_WALL ? 'wall' : (this._rearOn ? 'chase' : 'run'); }
   get invulnerable() { return this._s[S_INV] > 0; }
   get armor() { return this._plates; }
 
@@ -662,7 +669,17 @@ export class Squad {
     const ma = this._matArr;
     const n = this._recCount;
     // CHR-13: the per-soldier pass is a module function over typed arrays only (see writeInstances)
-    writeInstances(this._s, alpha, this._recList, n, rState, rInst, rx, rz, rs, rYaw, rSpawnT, rDeathT, ma, inst.attrs.iState.array);
+    // 1.5.0: the rear guard: the back rows, ≤ CHASE.rearRows[tier] soldiers, turned round over REAR_EASE_S
+    let rearZ = 1e9, rearYaw = 0;
+    if (this._rearOn && this._form === FORM_RUN) {
+      const L = this.logicalCount, tier = ctx.quality ? ctx.quality.tier : 'high', rows = CHASE.rearRows[tier] || CHASE.rearRows.low;
+      const perRow = Math.max(1, Math.floor(2 * this._halfWidthAt[L] / SQUAD.slotSpacing) + 1);
+      rearZ = this.backZ - Math.max(1, Math.min(Math.ceil(rows / perRow), Math.round(CHASE.rearDepth / SQUAD.rowPitch))) * SQUAD.rowPitch + 0.05;
+      const u = (this._s[S_T] - this._rearT0) / REAR_EASE_S;
+      rearYaw = Math.PI * (u >= 1 ? 1 : (u <= 0 ? 0 : u * u * (3 - 2 * u)));
+    }
+    writeInstances(this._s, alpha, this._recList, n, rState, rInst, rx, rz, rs, rYaw, rSpawnT, rDeathT, ma, inst.attrs.iState.array, rearZ, rearYaw);
+    if (this._rearOn || this._rearN > 0) this._rearGait(rearZ);
     if (blob) {
       for (let i = 0; i < n; i++) {
         const rec = this._recList[i];
@@ -819,7 +836,8 @@ export class Squad {
    */
   setFormation(name, opts) {
     const wall = name === 'wall';
-    if (!wall && name !== 'run') { warnOnce('squad.formation.' + name, 'squad.setFormation: unknown formation "' + name + '"'); return; }
+    if (!wall && name !== 'run' && name !== 'chase') { warnOnce('squad.formation.' + name, 'squad.setFormation: unknown formation "' + name + '"'); return; }
+    this._setRear(name === 'chase');                              // 1.5.0: 'chase' = the run formation + the rear guard
     if ((this._form === FORM_WALL) === wall) return;
     const o = opts || WALL;
     const s = this._s;
@@ -841,6 +859,27 @@ export class Squad {
     this._useTables(wall ? this._wall : this._run);
     this._syncShooters();
     this._requestSettle(0);
+  }
+
+  /** 1.5.0: the rear guard on / off (off: every turned soldier walks forward again). */
+  _setRear(on) {
+    if (on === this._rearOn) return;
+    this._rearOn = on;
+    this._rearT0 = this._s[S_T];
+    if (!on) this._rearGait(1e9);
+  }
+
+  /** 1.5.0: the walk cycle backward behind rearZ (a backpedal), forward elsewhere (written on change). */
+  _rearGait(rearZ) {
+    const list = this._recList, rState = this._rState, rz = this._rz, flag = this._rRear, inst = this.instances;
+    let n = 0;
+    for (let i = 0; i < this._recCount; i++) {
+      const rec = list[i];
+      const want = rState[rec] === REC_ALIVE && rz[rec] >= rearZ ? 1 : 0;
+      if (want !== flag[rec] && rState[rec] === REC_ALIVE) { flag[rec] = want; inst.setSpeed(this._rInst[rec], want ? -1 : 1); }
+      n += flag[rec];
+    }
+    this._rearN = n;
   }
 
   /**
@@ -1146,6 +1185,7 @@ export class Squad {
     this._rPhase[rec] = rng.next();                              // de-synchronised walk cycles
     this._rYaw[rec] = (rng.next() * 2 - 1) * YAW_JITTER;
     this._rTint[rec] = 1 + (rng.next() * 2 - 1) * TINT_JITTER;
+    this._rRear[rec] = 0;
     this._applyStatics(rec, this._rInst[rec]);
     return rec;
   }
@@ -1156,7 +1196,7 @@ export class Squad {
     const st = this._rState[rec];
     const marching = st === REC_ALIVE || (st === REC_DISSOLVE && this._rs[rec] >= 1);
     inst.setPhase(ii, this._rPhase[rec]);
-    inst.setSpeed(ii, marching ? 1 : 0);
+    inst.setSpeed(ii, marching ? (this._rRear[rec] ? -1 : 1) : 0);   // 1.5.0: a rear guard backpedals
     const t = this._rTint[rec];
     inst.setTint(ii, t, t, t);
     inst.setDeath(ii, 0);                                         // dying / dissolving records rewrite death01 every render

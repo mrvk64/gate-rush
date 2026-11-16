@@ -47,9 +47,11 @@
 // phase's errors are reported once); the hold time is printed against the plan's 90 s for --type horde --to 60.
 // Exit code 1 on any error.
 
-import { generateLevel, generateChunk, validateLevel, curve, runCurve, endlessParams, laneLabel, simulateEndless, endlessDesignMult, endlessPressure, endlessPoolPeaks, endlessPoolReserve } from '../js/levelgen.js';
-import { LEVELS, GATE_RULES, LEAK_BANDS, BOSSES, WORLD, ZOMBIES, PICKUP_SCHEDULE, PICKUPS, WEAPONS, GEAR, TROOPS, bossIdOf, eBossOf, LEVEL_TYPES, levelTypeOf, eTargetOf } from '../js/data.js';
+import { generateLevel, generateChunk, validateLevel, curve, runCurve, endlessParams, laneLabel, simulateEndless, endlessDesignMult, endlessPressure, endlessPoolPeaks, endlessPoolReserve, escortAux } from '../js/levelgen.js';
+import { LEVELS, GATE_RULES, LEAK_BANDS, BOSSES, WORLD, ZOMBIES, PICKUP_SCHEDULE, PICKUPS, WEAPONS, GEAR, TROOPS, bossIdOf, eBossOf, LEVEL_TYPES, levelTypeOf, eTargetOf, ESCORT_GEN } from '../js/data.js';
 import { validateHoldSection, runPartOf } from './holdsim.js';
+import { escortBuild, escortRunPart } from '../js/escortgen.js';   // 1.5.0 (P3)
+import { validateChaseSection, chasePartOf } from './chasesim.js';
 import { acquireHeavySlot } from './lib/chrome-lock.js';
 
 // ---------------------------------------------------------------------------------------------
@@ -78,12 +80,13 @@ const OPT = {
   rotation: argv.includes('--rotation'),
 };
 /** r8 (P1T): the stage flags of the 1.4.0 map, of the 1.5.0 map, and the ones this run checks (null = the build's own). */
-const STAGE_140 = { horde: true, night: true };
+const STAGE_140 = { horde: true, night: true, chase: false, escort: false };   // the 1.4.0 map (1.5.0's build flags turn chase / escort on)
 const STAGE_150 = { horde: true, night: true, chase: true, escort: true, nightHorde: true, nightChase: true, nightEscort: true, combos: true };
 const ON = OPT.typesOn === null ? null : (OPT.typesOn === 'all' ? STAGE_150 : OPT.typesOn.split(',').reduce((o, k) => { o[k.trim()] = true; return o; }, {}));
 /** r8 (P1T): a level's type code for the tables (S, H, N, C, E, NH, NC, NE). */
 const CODE = { standard: 'S', horde: 'H', night: 'N', chase: 'C', escort: 'E', nightHorde: 'NH', nightChase: 'NC', nightEscort: 'NE' };
 let holdMs = 0, holdLevels = 0;
+let chaseLevels = 0, chaseSliceMax = 0;   // 1.5.0 (r9 P2): chase sections checked, the longest generator slice (ms)
 /** The level number the generator gets: the real level (r8v2: LEVELS.curve.loopAfter retired, level.js passes L itself). */
 const genLevel = (L) => L;
 
@@ -202,9 +205,12 @@ function runLevel(L, k = OPT.seeds[0]) {
   const ms = Date.now() - t0;
   // r8 (P1T): a Horde script is its run phase (checked like a level against its runCurve) + the hold section (D37)
   const horde = !authored && type.base === 'horde';
-  const script = horde ? runPartOf(full) : full;
+  // 1.5.0 (P3): an Escort script is its run (escortgen.escortRunPart, checked like a level against its runCurve) + the escort rules
+  const escort = !authored && type.base === 'escort';
+  const chase = !authored && type.base === 'chase';   // 1.5.0 (r9 P2): a chase script = its run part + the chase section (tools/chasesim.js)
+  const script = horde ? runPartOf(full) : (escort ? escortRunPart(full) : (chase ? chasePartOf(full) : full));
   const res = validateLevel(script);
-  const c = horde ? runCurve(gL, full.run) : curve(gL);
+  const c = horde || escort || chase ? runCurve(gL, full.run) : curve(gL);
   for (let i = 0; i < res.errors.length; i++) fail(where, res.errors[i]);
   warningCount += res.warnings.length;
   if ((full.base || 'standard') !== type.base) fail(where, `script.base ${full.base} ≠ levelTypeOf(${L}).base ${type.base}`);
@@ -219,7 +225,25 @@ function runLevel(L, k = OPT.seeds[0]) {
     for (const e of hold.errors) if (e.indexOf('run phase invalid') !== 0) fail(where, `hold section: ${e}`);
     warningCount += hold.warnings.length;
   }
+  let chaseRes = null;
+  if (chase) {
+    chaseRes = validateChaseSection(full, { slices: k === OPT.seeds[0] });
+    for (const e of chaseRes.errors) fail(where, `chase section: ${e}`);
+    warningCount += chaseRes.warnings.length;
+    chaseLevels++;
+    if (chaseRes.sliceMs > chaseSliceMax) chaseSliceMax = chaseRes.sliceMs;
+  }
 
+  let esc = null;
+  if (escort) {
+    // the idle rule E1 / E4 (escort-design §10, PLAN P3 check 1) on the run part, and the shipped script = escortBuild(run part)
+    const b = escortBuild(script, gL, seed, escortAux(script, gL, c));
+    esc = b.stats;
+    if (!b.ok) fail(where, `escort idle rule fails: fixed-line losses ${b.stats.losses.join('/')} (need ${b.stats.need}), uncovered side ${b.stats.minSide}`);
+    const rebuilt = Object.assign(b.script, { base: full.base, eTarget: full.eTarget, finale: full.finale, starMetric: full.starMetric });
+    if (JSON.stringify(rebuilt) !== JSON.stringify(full)) fail(where, 'escort script differs from escortBuild(its run part)');
+    if (b.stats.cp < ESCORT_GEN.checkpoint.lo || b.stats.cp > ESCORT_GEN.checkpoint.hi) fail(where, `escort checkpoint at ${b.stats.cp} of the road`);
+  }
   if (!authored) teachingScript(where, script, gL);
   if (!authored) {
     shapeCheck(where, script, gL, c);
@@ -250,6 +274,8 @@ function runLevel(L, k = OPT.seeds[0]) {
     errors: res.errors.slice(), warnings: res.warnings.slice(), ref: k === OPT.seeds[0], toolErrors: errorCount - errorsBefore,
     typeKey: type.key, base: type.base, hold: hold ? { eHold: hold.eHold, N: hold.N, rho: hold.rho, peakAlive: hold.peakAlive, exp: hold.lines.exp.max, r10: hold.lines.r10.max,
       passive: hold.passive.won, aimerR: hold.aimerR, human: hold.human, errors: hold.errors, warnings: hold.warnings, ms: hold.ms } : null,
+    escort: esc,
+    chase: chaseRes ? { idle: chaseRes.idle, design: chaseRes.design, wrecks: chaseRes.wrecks, sprints: chaseRes.sprints, planks: chaseRes.planks, sliceMs: chaseRes.sliceMs, errors: chaseRes.errors, warnings: chaseRes.warnings } : null,
   };
   report.levels.push(entry);
   return { entry, script, res };
@@ -263,11 +289,11 @@ function runLevel(L, k = OPT.seeds[0]) {
 const TEACHING = {
   bruteFrom: 6, tripleFrom: 8, mult3From: 11, div3From: 11, twinsDebut: 16,
   pickups: { 1: 'weapon.shotgun', 2: 'gear.armor', 3: 'weapon.minigun', 5: 'troop.sniper', 6: 'troop.medic', 8: 'troop.flamer',
-    10: 'weapon.rocket', 12: 'weapon.railgun', 14: 'weapon.laser', 15: 'troop.drone', 16: 'gear.magnet', 17: 'gear.booster',
+    10: 'weapon.rocket', 11: 'weapon.railgun', 14: 'weapon.laser', 15: 'troop.drone', 16: 'gear.magnet', 17: 'gear.booster',
     20: 'gear.chip', 21: 'troop.apc' },
-  // no pickup debut on a type debut (L4 HORDE, L7 NIGHT, L18 ESCORT's 1.5.0 slot) or on any 1.4.0 Horde level (the rotation map,
-  // PLAN campaign section; L12, CHASE's 1.5.0 slot, carries the railgun since amendment A14)
-  noPickup: [4, 7, 18], hordeLevels: [4, 9, 13, 19, 23, 29, 32, 39, 43, 47, 52, 59],
+  // no pickup debut on a type debut (L4 HORDE, L7 NIGHT, L12 CHASE, L18 ESCORT) or on any 1.4.0 Horde level (the rotation map,
+  // PLAN campaign section; 1.5.0, PLAN C9: the railgun moved from L12, A14's slot, to L11)
+  noPickup: [4, 7, 12, 18], hordeLevels: [4, 9, 13, 19, 23, 29, 32, 39, 43, 47, 52, 59],
 };
 let teachingFails = 0;
 function teachFail(where, msg) { teachingFails++; fail(where, `teaching: ${msg}`); }
@@ -394,7 +420,7 @@ function printLevelDetail(e) {
  * base, no two consecutive night levels; R5 (r5: the 1.5.0 stage) from L31 every 10 consecutive levels hold every special base
  * and night; R6 the teaching debuts play standard: triples L8, ×3 / ÷3 L11 (a standard base), the Hulk Twins L16 and the
  * zombie debuts L1–3, 5, 6 as S; R7 no pickup debut on a Horde level or on the ladder's protected type debuts (TEACHING.noPickup:
- * L4, L7, L18 — amendment A14 put the railgun on L12, CHASE's 1.5.0 slot, played as RUN in 1.4.0); R8 every boss debuts on a
+ * L4, L7, L12, L18 — 1.5.0 moved A14's railgun from L12 to L11); R8 every boss debuts on a
  * level with a boss (standard or Horde base). Returns the error list.
  */
 function rotationRules(on, last, r5) {
@@ -451,7 +477,12 @@ function runRotation() {
   for (let a = 1; a <= 120; a += 30) out(`  L${a}–${a + 29}: ${fmt(ON, a, a + 29)}`);
   const stages = [['checked flags', ON], ['1.4.0 stage', STAGE_140], ['1.5.0 stage', STAGE_150]];
   for (const [name, on] of stages) {
-    const errs = rotationRules(on, 300, ['horde', 'chase', 'escort', 'night'].every((k) => (on && on[k] !== undefined ? on[k] : LEVEL_TYPES[k].enabled)));
+    // R5 is a rule of the full map (every type and the night combos on); with the combos off (1.5.0: they wait for 1.5.1) a combo
+    // slot plays its offKey or its base, so a window can miss one: counted as info, not as errors
+    const flag = (k) => (on && on[k] !== undefined ? on[k] : LEVEL_TYPES[k].enabled);
+    const all = ['horde', 'chase', 'escort', 'night'].every(flag), combos = on && on.combos !== undefined ? on.combos : LEVEL_TYPES.combos;
+    const errs = rotationRules(on, 300, all && combos);
+    if (all && !combos) out(`  R5 (info, combos off) to L300, ${name}: ${rotationRules(on, 300, true).filter((e) => e.startsWith('R5')).length} window(s) miss a type`);
     const mix = {};
     for (let L = 1; L <= 60; L++) { const k = CODE[levelTypeOf(L, null, on).key]; mix[k] = (mix[k] || 0) + 1; }
     out(`  R1–R8 to L300, ${name}: ${errs.length} error(s); L1–60 mix ${Object.entries(mix).map(([k, n]) => k + ' ' + n).join(', ')}`);
@@ -638,6 +669,7 @@ function main() {
   out(`${bad.length} error scripts of ${entries.length} (levels ${levels[0]}–${levels[levels.length - 1]} × ${OPT.seeds.length} seed${OPT.seeds.length > 1 ? 's' : ''})${bad.length ? ': ' + bad.map((e) => `L${e.level}/${e.seed}`).join(' ') : ''}`);
   out(`teaching ladder (PLAN D9 + A14): ${teachingFails === 0 ? 'every rule holds' : `${teachingFails} rule failure(s)`} — brute solo intro L${TEACHING.bruteFrom}, triples from L${TEACHING.tripleFrom}, x3 / ÷3 from L${TEACHING.mult3From}, Hulk Twins L${TEACHING.twinsDebut}, no pickup debut on L${TEACHING.noPickup.join(' / L')} or a Horde level, unlock = schedule level`);
 
+  if (chaseLevels) out(`chase sections (tools/chasesim.js validateChaseSection): ${chaseLevels} chase script(s); the longest generator slice ${chaseSliceMax.toFixed(1)} ms (budget 8)`);
   if (holdLevels) out(`hold sections (tools/holdsim.js validateHoldSection, runs 3): ${holdLevels} Horde level(s) in ${(holdMs / 1000).toFixed(1)} s${OPT.type === 'horde' ? ` (plan budget 90 s for --type horde --to 60: ${holdMs <= 90000 ? 'within' : 'OVER'})` : ''}`);
   if (OPT.rotation) runRotation();
   if (OPT.endless && OPT.level === null && OPT.from <= 1 && !multi && !OPT.type) {

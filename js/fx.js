@@ -37,14 +37,14 @@
 // Writes: nothing on ctx; emits no events.
 // 1.4.0 hooks (ARCH §3): 'fx:burst', 'fx:decal' (id back in p.id), 'crowd:kills' (coalesced); JUICE.kinds / crowdKills.
 import {
-  InstancedMesh, InstancedBufferAttribute, PlaneGeometry, BoxGeometry, ShaderMaterial, MeshBasicMaterial,
+  InstancedMesh, InstancedBufferAttribute, Mesh, PlaneGeometry, BoxGeometry, ShaderMaterial, MeshBasicMaterial,
   Color, Vector3, Quaternion, Matrix4, DynamicDrawUsage, AdditiveBlending, NormalBlending, DoubleSide, LinearSRGBColorSpace,
   CustomBlending, MinEquation, OneFactor,
   UniformsLib, UniformsUtils,
 } from 'three';
 import { clamp, vibrate } from './util.js';
 import {
-  WORLD, SQUAD, FIRE, GATE_RULES, ZOMBIES, BOSSES, WEAPONS, GEAR, TROOPS, PICKUPS, RENDER, PALETTE, JUICE,
+  WORLD, SQUAD, FIRE, GATE_RULES, ZOMBIES, BOSSES, WEAPONS, GEAR, TROOPS, PICKUPS, RENDER, PALETTE, JUICE, CHASE,
 } from './data.js';
 import {
   makeParticleMaterial, makeDecalMaterial, fxColorIndex, FX_COLOR, PARTICLE_KIND, PARTICLE_ADDITIVE, DECAL_KIND,
@@ -83,7 +83,8 @@ const C_SPARK = FX_COLOR.spark, C_MUZZLE = FX_COLOR.muzzle, C_GOLD = FX_COLOR.go
 const C_FLAME = FX_COLOR.flame, C_SMOKE = FX_COLOR.smoke, C_DUST = FX_COLOR.dust, C_WHITE = FX_COLOR.white;
 const C_ROCKET = FX_COLOR.rocket, C_SPLASH = FX_COLOR.splash, C_BLOOD = FX_COLOR.blood, C_CONFETTI0 = FX_COLOR.confetti0;
 const C_CONFETTI_N = FX_COLOR.confettiCount, C_SHIELD = FX_COLOR.shield, C_RAIL = FX_COLOR.rail;
-const C_GATE = [FX_COLOR.plus, FX_COLOR.mult, FX_COLOR.minus, FX_COLOR.div, FX_COLOR.zero, FX_COLOR.item];   // GATE_RULES.colors key order
+const C_GATE = [FX_COLOR.plus, FX_COLOR.mult, FX_COLOR.minus, FX_COLOR.div, FX_COLOR.zero, FX_COLOR.item,   // GATE_RULES.colors key order
+  fxColorIndex(GATE_RULES.colors.sprint.tint), fxColorIndex(GATE_RULES.colors.wall.tint)];                  // 1.5.0: chase's sprint / plank lanes
 
 // Per-kind emit defaults (used when emit() gets no opts): life (s), size (m), speed (m/s of the random
 // velocity), up (0..1 upward bias of the random direction), gravity (m/s² +y), carry (fraction of the road
@@ -843,9 +844,86 @@ class CountLabel {
 }
 
 // ---------------------------------------------------------------------------------------------
+// 1.5.0: Label2 — LABEL2_SLOTS short world labels for a mode's own numbers (chase's gap "6M", escort's survivors over the truck),
+// on the count label's digit atlas and dark plate, drawn by fx after the count label's frame (the same overlay pass). The owner
+// positions them: set() every frame it moves, hide() when done; a level start hides them all. Allocation-free.
+// ---------------------------------------------------------------------------------------------
+const LABEL2_SLOTS = 2;
+const LABEL2_QUADS = 5;              // digits + one suffix glyph ("16M"; a value shows at most LABEL2_QUADS − 1 digits)
+
+class Label2 {
+  constructor() {
+    this.on = new Uint8Array(LABEL2_SLOTS);
+    this.n = new Uint8Array(LABEL2_SLOTS);
+    this.glyph = new Uint8Array(LABEL2_SLOTS * LABEL2_QUADS);
+    this.pos = new Float32Array(LABEL2_SLOTS * 3);
+    this.px = new Float32Array(LABEL2_SLOTS);
+    this.pin = new Float32Array(LABEL2_SLOTS);
+    this.rgb = new Float32Array(LABEL2_SLOTS * 3);
+    this.pinnedNow = new Uint8Array(LABEL2_SLOTS);
+    this.any = false;
+  }
+
+  /**
+   * Slot `slot` shows `value` (an integer ≥ 0; < 0 = no digits) then `suffix` (one atlas char: 'M', '+', … ; '' none) in colorHex,
+   * px CSS px tall, at world (x, y, z). pinFrac (0..1; 0 = off): the screen-height fraction (from the top) it never sinks below —
+   * past it the label pins there at the anchor's depth (pinned(slot) tells the owner, e.g. to add a chevron).
+   */
+  set(slot, value, suffix, colorHex, px, x, y, z, pinFrac) {
+    if (!(slot >= 0 && slot < LABEL2_SLOTS) || !(x === x && y === y && z === z)) return;
+    const o = slot * LABEL2_QUADS;
+    let n = value >= 0 ? writeNumberGlyphs(this.glyph, o, value, -1, LABEL2_QUADS - 1) : 0;
+    const g = suffix ? glyphOfCode(suffix.charCodeAt(0)) : -1;
+    if (g >= 0) this.glyph[o + n++] = g;
+    this.n[slot] = n;
+    this.pos[slot * 3] = x; this.pos[slot * 3 + 1] = y; this.pos[slot * 3 + 2] = z;
+    this.px[slot] = px > 0 ? px : SQUAD.label.px;
+    this.pin[slot] = pinFrac > 0 && pinFrac < 1 ? pinFrac : 0;
+    hexToLinear(colorHex, LABEL_GAIN);
+    this.rgb[slot * 3] = LIN[0]; this.rgb[slot * 3 + 1] = LIN[1]; this.rgb[slot * 3 + 2] = LIN[2];
+    this.on[slot] = n > 0 ? 1 : 0;
+    this.any = true;
+  }
+
+  hide(slot) { if (slot >= 0 && slot < LABEL2_SLOTS) { this.on[slot] = 0; this.pinnedNow[slot] = 0; } }
+
+  hideAll() { this.on.fill(0); this.pinnedNow.fill(0); }
+
+  /** True while slot's label is held at its pin line (the anchor is lower on screen, or off it). */
+  pinned(slot) { return slot >= 0 && slot < LABEL2_SLOTS && this.pinnedNow[slot] === 1; }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Fx
 // ---------------------------------------------------------------------------------------------
-const GATE_KEYS = ['plus', 'mult', 'minus', 'div', 'zero', 'item'];   // GATE_RULES.colors key order
+const GATE_KEYS = ['plus', 'mult', 'minus', 'div', 'zero', 'item', 'sprint', 'wall'];   // GATE_RULES.colors key order
+
+// 1.5.0 (chase §1.4 layer 3): the GAP RIBBON — one additive strip on the road from the squad's back row to the horde's front, in the
+// gap zone's colour, chevrons crawling toward the squad (cosmetic; chase.js sets it every frame it shows)
+const RIBBON_VERT = /* glsl */`
+uniform float uLen;
+varying vec2 vP;
+#include <fog_pars_vertex>
+void main() {
+  vP = vec2(position.x, (position.z + 0.5) * uLen);   // the strip lies flat: local z runs from the back row (−0.5) to the horde
+  vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+  gl_Position = projectionMatrix * mvPosition;
+  #include <fog_vertex>
+}`;
+const RIBBON_FRAG = /* glsl */`
+uniform vec3 uColor;
+uniform float uAlpha;
+uniform float uTime;
+uniform float uChev;
+varying vec2 vP;
+#include <fog_pars_fragment>
+void main() {
+  float edge = smoothstep(0.5, 0.36, abs(vP.x));
+  float c = fract((vP.y + uTime * ${CHASE.ribbon.crawl.toFixed(2)}) / uChev - abs(vP.x) * 1.4);
+  float chev = smoothstep(0.0, 0.08, c) * smoothstep(0.36, 0.2, c);
+  gl_FragColor = vec4(uColor * uAlpha * edge * (0.45 + 0.55 * chev), 1.0);
+  #include <fog_fragment>
+}`;
 const PANEL_CENTER_Y = GATE_RULES.panel.bottom + GATE_RULES.panel.h * 0.5;
 const SH_STRIDE = 18;   // shard SoA stride: x y z vx vy vz ax ay az ang spin age life sx sy r g b
 
@@ -854,6 +932,7 @@ export class Fx {
     this.ctx = ctx;
     // the label object exists from construction on: squad caches ctx.fx.label in its init()
     this.label = new CountLabel(this);
+    this.label2 = new Label2();                          // 1.5.0: a mode's own world labels (fx draws them, _writeLabel2)
     this._inited = false;
     this._priming = false;      // true only inside _primeFeedback (boot warm-up)
     this._primed = false;       // the warm-up runs once, on the first 'title' state
@@ -907,6 +986,7 @@ export class Fx {
     this._buildParticles(render);
     this._buildGlyphs(render);
     this._buildDecals(render);
+    this._buildRibbon();
     this._buildShards();
     this._buildBeams();
     this._buildScorch();
@@ -1121,6 +1201,11 @@ export class Fx {
     this._lb = mk(LABEL_DIGITS + LABEL_BADGE, ORDER_LABEL, 'fx.label');
     this.floaters = this._fl.mesh; this.numbers = this._nb.mesh; this.labelMesh = this._lb.mesh;
     this._buildPlate();
+    // 1.5.0: label2's glyphs and plates (the count label's plate geometry and material, so they fade with it at the results)
+    this._l2 = mk(LABEL2_SLOTS * LABEL2_QUADS, ORDER_LABEL, 'fx.label2');
+    this._l2Plate = makeInstanced(this.labelPlate.geometry, this.labelPlate.material, LABEL2_SLOTS, ORDER_PLATE);
+    this._l2Plate.name = 'fx.label2Plate';
+    this._meshes.push(this._l2Plate);
     // Round-2 FX-10 residual (cross-group): the count label and its plate draw in render's post-bloom overlay pass
     // (render.overlayLayer), so the bloom haze of an HDR beam behind the label never lands on the digits. The HDR
     // clamp draws in BOTH passes: in the main pass (as before) it keeps the scene under / around the plate from seeding
@@ -1134,6 +1219,8 @@ export class Fx {
       this.labelPlate.layers.set(ol);
       this.labelMesh.layers.set(ol);
       this.floaters.layers.enable(ol);
+      this._l2.mesh.layers.set(ol);
+      this._l2Plate.layers.set(ol);
     }
 
     // floater pool (SoA)
@@ -1490,6 +1577,7 @@ export class Fx {
     this._labelPending = -1;
     this._lastCount = 0;
     this._hideLabel();
+    this.label2.hideAll(); this.label2.any = false; setDrawCount(this._l2.mesh, 0); setDrawCount(this._l2Plate, 0);   // 1.5.0
     this._ckN = 0; this._ckCoins = 0; this._ckX = 0; this._ckZ = 0; this._ckT = 0; this._ckCoinT = 0;   // 1.4.0
     // decals (every live id becomes stale)
     for (let i = 0; i < DECAL_SLOTS; i++) if (this._dActive[i]) this._freeDecal(i);
@@ -1601,6 +1689,7 @@ export class Fx {
       this._introFade = introTarget > this._introFade ? Math.min(1, this._introFade + st) : Math.max(0, this._introFade - st);
     }
     if (!this._labelVisible || !this.label.hasPos) { setDrawCount(this._lb.mesh, 0); this._plateCount(0); }
+    if (this.label2.any) this._writeLabel2();
 
     // boss-anchored numbers ride along with the boss; a mirror switch to the other twin (a jump) re-bases them in place
     const wb = ctx.world;
@@ -2205,6 +2294,64 @@ export class Fx {
     }
     L.glyphDirty = false;
     this._commitGlyphs(buf, LABEL_DIGITS + LABEL_BADGE, LABEL_DIGITS + LABEL_BADGE);
+  }
+
+  /** 1.5.0: label2's quads and plates (update(), on last frame's camera like every world label here). */
+  _writeLabel2() {
+    const L2 = this.label2, buf = this._l2;
+    const cam = this._camera();
+    const size = this._rsize;
+    const tanH = Math.tan((cam && cam.fov ? cam.fov : 55) * DEG * 0.5);
+    const viewH = size !== null && size.h > 0 ? size.h : JUICE.ui.refBox[1];
+    const tanW = tanH * (size !== null && size.w > 0 && size.h > 0 ? size.w / size.h : JUICE.ui.refBox[0] / JUICE.ui.refBox[1]);
+    const vis0 = this._labelHideT >= 0 ? 1 - this._labelHideT / LABEL_HIDE_S : 1;
+    const fade = this._labelVisible ? (vis0 < this._introFade ? vis0 : this._introFade) : 0;
+    const PM = this._l2Plate.instanceMatrix.array;
+    let drawn = 0, live = 0;
+    for (let s = 0; s < LABEL2_SLOTS; s++) {
+      const o = s * LABEL2_QUADS;
+      live += L2.on[s];
+      let x = L2.pos[s * 3], y = L2.pos[s * 3 + 1], z = L2.pos[s * 3 + 2];
+      const rx = x - CAM[9], ry = y - CAM[10], rz = z - CAM[11];
+      const depth = rx * CAM[6] + ry * CAM[7] + rz * CAM[8];
+      if (L2.on[s] === 0 || fade <= 0 || depth <= WORLD.camera.near) {
+        L2.pinnedNow[s] = 0;
+        this._writeRow(buf, o, L2.glyph, o, 0, LABEL2_QUADS);
+        writeHidden(PM, s * 16);
+        continue;
+      }
+      // pin: an anchor lower on screen than pin (fraction from the top) moves up the view to that line at its own depth
+      const vy = rx * CAM[3] + ry * CAM[4] + rz * CAM[5];
+      const pinY = (1 - 2 * L2.pin[s]) * depth * tanH;
+      const pin = L2.pin[s] > 0 && vy < pinY ? 1 : 0;
+      L2.pinnedNow[s] = pin;
+      if (pin === 1) { const dy = pinY - vy; x += CAM[3] * dy; y += CAM[4] * dy; z += CAM[5] * dy; }
+      const h = L2.px[s] * 2 * depth * tanH / viewH;
+      ROW[0] = x; ROW[1] = y; ROW[2] = z; ROW[3] = h;
+      ROW[4] = L2.rgb[s * 3] * fade; ROW[5] = L2.rgb[s * 3 + 1] * fade; ROW[6] = L2.rgb[s * 3 + 2] * fade;
+      const n = L2.n[s];
+      this._writeRow(buf, o, L2.glyph, o, n, LABEL2_QUADS);
+      let total = 0;
+      for (let k = 0; k < n; k++) total += this._gAdv[L2.glyph[o + k]] * h;
+      const pad = PLATE_PAD * h;
+      if (L2.pin[s] > 0) {   // a pinned label also stays inside the screen's sides (plate and all)
+        const vx = (x - CAM[9]) * CAM[0] + (y - CAM[10]) * CAM[1] + (z - CAM[11]) * CAM[2];
+        const lim = Math.max(0, depth * tanW - (total * 0.5 + pad) * PLATE_INFLATE);
+        const dx = vx > lim ? lim - vx : (vx < -lim ? -lim - vx : 0);
+        if (dx !== 0) {
+          x += CAM[0] * dx; y += CAM[1] * dx; z += CAM[2] * dx;
+          ROW[0] = x; ROW[1] = y; ROW[2] = z;
+          this._writeRow(buf, o, L2.glyph, o, n, LABEL2_QUADS);
+        }
+      }
+      TRS[0] = x; TRS[1] = y; TRS[2] = z; TRS[3] = (total + 2 * pad) * PLATE_INFLATE; TRS[4] = (h * PLATE_INK_EM + 2 * pad) * PLATE_INFLATE; TRS[5] = 1;
+      writeTRS(PM, s * 16);
+      drawn++;
+    }
+    L2.any = live > 0;                                   // all hidden: the next set() wakes the writer again
+    this._commitGlyphs(buf, drawn > 0 ? LABEL2_SLOTS * LABEL2_QUADS : 0, LABEL2_SLOTS * LABEL2_QUADS);
+    setDrawCount(this._l2Plate, drawn > 0 ? LABEL2_SLOTS : 0);
+    if (drawn > 0) markItems(this._l2Plate.instanceMatrix, 0, LABEL2_SLOTS - 1);
   }
 
   /** Roll-up tick (GDD §5 "one tick every 20 ms during the tween"): audio 'tick' with a climbing pitch. */
@@ -2978,6 +3125,7 @@ export class Fx {
   /** level:start → fx cancels the game-over grade (ARCH §6.12; level also resets render itself). */
   _onLevelStart() {
     this._desatT = -1;
+    if (this._ribbon) this._ribbon.visible = false;           // 1.5.0
     this.setDesaturate(0);
     const r = this.ctx.render;
     if (r && typeof r.gameOverCamera === 'function') r.gameOverCamera(false);
@@ -3081,6 +3229,8 @@ export class Fx {
   /** Gate type index (GATE_RULES.colors key order) for the colour a gate currently shows. */
   _gateType(op, value, gate) {
     if (op === 'item') return 5;
+    if (op === 'sprint') return 6;
+    if (op === 'wall') return 7;
     if (op === '+') return 0;
     if (op === 'x') return value > 1 ? 1 : 4;
     if (op === '-') return gate && gate.flipped ? 0 : 2;
@@ -3132,7 +3282,7 @@ export class Fx {
    */
   _passKind(op, value, g, before, after) {
     const flipped = !!(g && g.flipped);
-    if (op === 'item') return 1;
+    if (op === 'item' || op === 'sprint' || op === 'wall') return 1;   // 1.5.0: chase's lanes reward without a count change
     if (op === '+') return value > 0 ? 1 : 0;
     if (op === '-') return value === 0 ? 0 : (flipped ? 1 : -1);
     if (op === 'x') return value > 1 ? 1 : (value > 0 && value < 1 ? -1 : 0);
@@ -3385,6 +3535,35 @@ export class Fx {
     const col = typeof p.color === 'number' ? fxColorIndex(p.color) : (b !== undefined && b.color ? FX_COLOR[b.color] : P_COLOR[k]);
     const road = this.ctx.world ? this.ctx.world.roadSpeed : 0;
     this._emitRaw(k, p.n > 0 ? p.n | 0 : (b !== undefined ? b.n : 4), p.x, p.y, p.z, 0, 0, 0, P_SPEED[k] * (b !== undefined ? b.speed : 1), P_UP[k], P_LIFE[k], P_SIZE[k], P_GRAVITY[k], P_CARRY[k] * road, col);
+  }
+
+  /** 1.5.0: the gap ribbon's mesh (hidden until ribbon() shows it). */
+  _buildRibbon() {
+    if (!this._scene) return;
+    const geo = new PlaneGeometry(1, 1);
+    geo.rotateX(-Math.PI / 2);
+    const mat = new ShaderMaterial({
+      name: 'fx.ribbon', uniforms: UniformsUtils.merge([UniformsLib.fog, { uColor: { value: new Color(1, 1, 1) }, uAlpha: { value: 0 }, uLen: { value: 1 }, uChev: { value: CHASE.ribbon.chevronM } }]),
+      vertexShader: RIBBON_VERT, fragmentShader: RIBBON_FRAG, transparent: true, depthWrite: false, blending: AdditiveBlending, fog: true,
+    });
+    mat.uniforms.uTime = this._uTime;
+    const m = this._ribbon = new Mesh(geo, mat);
+    m.visible = false; m.frustumCulled = false; m.renderOrder = 2; m.name = 'fx.ribbon';
+    this._scene.add(m);
+    this._ownGeos.push(geo); this._ownMats.push(mat);
+  }
+
+  /** 1.5.0: the gap ribbon, back row z0 → horde front z1, half width hw at x; alpha 0 hides it. */
+  ribbon(x, z0, z1, hw, colorHex, alpha) {
+    const m = this._ribbon;
+    if (!m) return;
+    const len = z1 - z0;
+    if (!(alpha > 0) || !(len > 0.05)) { m.visible = false; return; }
+    m.visible = true;
+    m.position.set(x, CHASE.ribbon.y, (z0 + z1) * 0.5);
+    m.scale.set(hw * 2, 1, len);
+    const u = m.material.uniforms;
+    u.uColor.value.setHex(colorHex).convertSRGBToLinear(); u.uAlpha.value = alpha; u.uLen.value = len;
   }
 
   /** 'fx:decal' { kind, x, z, size, seconds, color?, top? }: a JUICE.kinds.decal kind; p.id = its id (−1 refused). */

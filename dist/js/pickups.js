@@ -585,6 +585,7 @@ export class Pickups {
     const world = ctx.world;
     const roadSpeed = world ? world.roadSpeed : 0;
     const dz = roadSpeed * dt;
+    const despawnZ = world && world.despawnZ > 0 ? world.despawnZ : WORLD.despawnZ;   // 1.5.0: a mode may move it (level resets it)
     const squad = ctx.squad || null;
     const events = ctx.events;
     // QA GAT-6: once the squad is dead (C = 0 / level lost) nothing is collected — crates and coins keep scrolling
@@ -604,7 +605,7 @@ export class Pickups {
     for (let i = this._cliveCount - 1; i >= 0; i--) {
       const c = this._cliveSlots[i];
       this._cz[c] += dz;
-      if (this._cz[c] > WORLD.despawnZ) { this._freeCrate(c); continue; }
+      if (this._cz[c] > despawnZ) { this._freeCrate(c); continue; }
       if (this._cstate[c] === ST_OPEN && now - this._copenTime[c] >= vanishEnd) { this._freeCrate(c); continue; }   // shrunk away
       // (z ≥ −r prefilter = intersectsCircle's own near bound: no call — and no boxed double arguments — while far)
       if (this._cstate[c] === ST_CLOSED && PICKUPS.crate.openOnContact && canTest && this._cz[c] >= -PICKUPS.collectRadius
@@ -632,7 +633,7 @@ export class Pickups {
         this._kx[k] += ddx * f; this._ky[k] += ddy * f; this._kz[k] += ddz * f;
       } else {
         this._kz[k] += dz;
-        if (this._kz[k] > WORLD.despawnZ) { this._freeCoin(k); continue; }
+        if (this._kz[k] > despawnZ) { this._freeCoin(k); continue; }
         if (canTest && this._kz[k] >= -magnetR && squad.intersectsCircle(this._kx[k], this._kz[k], magnetR)) this._kstate[k] = CST_PULLED;
       }
     }

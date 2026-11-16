@@ -4,13 +4,13 @@ The zombie gate-runner from the mobile ads, built as the real game. Your squad m
 
 It runs in any modern phone or desktop browser and installs to the home screen like an app. Everything is generated in code: the 3D models, textures, effects and sound. There are no image, model or audio files to download.
 
-This is version 1.4.0.
+This is version 1.5.0.
 
 ## What's in the game
 
 - **Gates that answer every bullet.** `+N` gates count up as you shoot them until they hit MAX. Red `−N` gates count toward zero, then flip blue, and a pulsing blue ring on a gate you are shooting means it will flip before you reach it. `x2` gates climb to `x5`. The `÷` ladder climbs from `÷3` to `÷2` up to a harmless `x1`. Your lane counts from the moment you steer for it, so a late dodge holds.
 - **Five zombie types.** Walkers, zig-zagging runners, lunging crawlers, brutes that keep swinging, and spitters that lob acid.
-- **A boss on every level.** Each boss gets an intro, three attack phases with telegraphed attacks and a slow-motion death. Every attack is heard as it winds up, its warning mark stays visible over your squad, and the first time you meet an attack, time slows while a one-line lesson names it. There are six archetypes: Hulk, Spitter Queen, Juggernaut, Colossus (shot through its shield), Hulk Twins and Colossus Prime. The skull levels (5, 10, 15 …) are district finales with a tougher boss.
+- **A boss on every RUN and Horde level.** Each boss gets an intro, three attack phases with telegraphed attacks and a slow-motion death. Every attack is heard as it winds up, its warning mark stays visible over your squad, and the first time you meet an attack, time slows while a one-line lesson names it. There are six archetypes: Hulk, Spitter Queen, Juggernaut, Colossus (shot through its shield), Hulk Twins and Colossus Prime. The skull levels (5, 10, 15 …) are district finales with a tougher boss.
 - **Specials along the road.** These come from purple gates and crates, and each gold diamond on the progress bar is one coming up. The first time you meet one, a NEW card says what it does:
   - Weapons: shotgun, minigun, rocket launcher, railgun and laser.
   - Gear: armor plates, magnet, fire-rate chip and damage booster.
@@ -20,8 +20,10 @@ This is version 1.4.0.
 - **A campaign that keeps climbing.** Thirty levels cross six districts, and after level 30 the road goes round them again and keeps getting harder. Level 1 is the ad, played straight. Every five levels the road moves to a new district with its own light, fog, props and weather: Sunset Boulevard (drifting dust), Overcast Highway (rain), Night City (falling ash under neon), Toxic Industrial (spores), Ash Wasteland (embers) and Frozen Outskirts (snow).
 - **Horde levels.** Marked with planks on the level grid, first on level 4. A short gate run ends at a barricade, and your squad holds it against three surges of thousands of zombies and then a boss. Drag to sweep your fire along the wall, hold still to focus it, and tap REPAIR to spend a repair kit on a broken section. Supply crates and your stored weapons help.
 - **Night levels.** Marked with a crescent, first on level 7. The squad's flashlights light the road, zombie eyes glow in the dark, and crates launch flares. In Night City the finale is a BLACKOUT.
+- **Chase levels.** Marked with chevrons, first on level 12. The horde breaks loose behind you and the gap to it shows as a number in metres. The more soldiers you have, the better your back rows hold it off. Teal » gates sprint you ahead, plank gates give barricades you drop with DROP, and wrecked cars and rubble trip you if you run into them. Reach the safe zone and the doors slam shut behind you.
+- **Escort levels.** Marked with a rescue truck, first on level 18. A truck full of survivors drives its own route in one half of the road. Zombies that reach it climb on and drag survivors off, so stay in its half to shoot them down, leave it only for a gate worth it, and tap PLATE to armour a side. Halfway, a checkpoint adds survivors. Your stars count the survivors you deliver.
 - **Boss fights on a clock.** A countdown runs beside the boss bar. If it reaches zero the boss is ENRAGED and eats more soldiers every second, so a big squad that kills fast is the way through.
-- **You have to play it.** From about level 3, a squad left to walk by itself loses. Steering to the right gates is what wins.
+- **You have to play it.** From about level 3, a squad left to walk by itself loses. Steering to the right gates is what wins. A lost run pays half of what you picked up, and a run with no input at all pays nothing.
 - **Endless mode.** It unlocks after level 10. The road is generated as you go, rotates through all six districts, and sends a mini-boss every fifth stretch of road. While a mini-boss is alive, the next gates and waves wait. The horde keeps growing, in numbers more than toughness, until it overruns your squad. How far you get is your score.
 - **A shop with permanent upgrades.** Start squad, fire rate, damage, coin multiplier and boss damage, ten ranks each. Each card says what a rank buys, the price of the rank after it, and how many runs away an upgrade is. The results screen shows what you earned and how many survivors each star needs. Your progress is saved on the device.
 - **Juice everywhere.** Muzzle flashes, tracers, bloom, screen shake, a slot-machine count ticker, gate pops, coin flights, haptics, synthesized sound effects and a live music track.
@@ -64,7 +66,7 @@ The `dist/` folder also works on any other HTTPS static host, such as Netlify or
 |---|---|
 | `index.html` | The app page: PWA shell, import map and the full UI markup |
 | `artifact.html` | The same game without the page wrapper, for embedding (generated) |
-| `js/` | 26 ES modules: engine, rendering, models, gameplay systems, UI, audio, save and level generation |
+| `js/` | 31 ES modules: engine, rendering, models, gameplay systems and level modes, UI, audio, save and level generation |
 | `css/game.css` | All UI styling |
 | `sw.js`, `manifest.webmanifest`, `icons/` | Offline support and install metadata |
 | `docs/GDD.md` | Game design document: every rule and number |

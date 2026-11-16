@@ -10,6 +10,7 @@
 //                                           --vs <file> (read only) or --size-log also print the change against the
 //                                           log's newest row (the r8-140 head; every merge appends one); --allow <KB>
 //                                           (1 KB = 1000 B) then FAILs when js/ raw grew by more (D46 allowances).
+//                                           1.5.0: FAILs too when js/ is over JS_CAP (the owner's download caps).
 // Upload the dist/ folder to any static host with HTTPS (Netlify Drop, GitHub Pages, Cloudflare Pages, Vercel …).
 //
 // Round 5 (r5-ui-sw needsOtherGroup 4) — the release rule is enforced here: sw.js v4 serves every precached file
@@ -27,6 +28,8 @@ import zlib from 'node:zlib';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DIST = path.join(ROOT, 'dist');
+/** 1.5.0 (owner default Q1, PLAN §3): the js/ download caps --lint enforces (1.4.0: 3,000,000 / 945,000, in the docs only). */
+const JS_CAP = { raw: 3220000, gzip: 1005000 };
 
 if (process.argv.includes('--lint')) process.exit(lint());
 
@@ -50,7 +53,9 @@ function lint() {
   const cat = zlib.gzipSync(Buffer.concat(bufs), { level: 9 }).length;
   const n = (v) => v.toLocaleString('en-US');
   console.log(`package --lint: ${js.length} js files; PRECACHE ${js.filter((f) => precached.has(f)).length}/${js.length}, modulepreload ${js.filter((f) => preloaded.has(f)).length}/${js.length}`);
-  console.log(`package --lint: js/ raw ${n(raw)} B, gzip ${n(gz)} B (zlib 9 per file; concatenated ${n(cat)} B)`);
+  console.log(`package --lint: js/ raw ${n(raw)} B, gzip ${n(gz)} B (zlib 9 per file; concatenated ${n(cat)} B); caps ${n(JS_CAP.raw)} / ${n(JS_CAP.gzip)}`);
+  if (raw > JS_CAP.raw) problems.push(`js/ raw ${n(raw)} B is over the ${n(JS_CAP.raw)} B cap`);
+  if (gz > JS_CAP.gzip) problems.push(`js/ gzip ${n(gz)} B is over the ${n(JS_CAP.gzip)} B cap`);
   const arg = (k) => { const i = process.argv.indexOf(k); return i > 0 && process.argv[i + 1] ? process.argv[i + 1] : null; };
   const logFile = arg('--size-log'), allow = arg('--allow'), ref = logFile || arg('--vs');
   const rows = ref && fs.existsSync(ref) ? fs.readFileSync(ref, 'utf8').split('\n').filter((l) => /\| raw \d+ \| gzip \d+/.test(l)) : [];

@@ -47,6 +47,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { Rng, hashString, clamp, lerp, warnOnce } from './util.js';
 import {
   SQUAD, FIRE, GATE_RULES, ZOMBIES, BOSSES, TROOPS, PICKUPS, RENDER, PALETTE, DISTRICT_PROPS,
+  ESCORT,                                                 // 1.5.0 (P3): the rescue truck, its survivors, plates and props
 } from './data.js';
 
 // ---------------------------------------------------------------------------------------------
@@ -68,7 +69,7 @@ const GUARANTEED_MAX_ATTRIBUTES = 16; // WebGL 2 minimum MAX_VERTEX_ATTRIBS (use
 // Classes that use the soldier limb set and the recoil variant of the shader ('gr:char-recoil').
 const SOLDIER_CLASSES = Object.freeze({ soldier: true, sniper: true, flamer: true, medic: true });
 const ZOMBIE_CLASSES = Object.freeze({ walker: true, runner: true, crawler: true, brute: true, spitter: true });
-const CHARACTER_CLASSES = ['soldier', 'sniper', 'flamer', 'medic', 'walker', 'runner', 'crawler', 'brute', 'spitter'];
+const CHARACTER_CLASSES = ['soldier', 'sniper', 'flamer', 'medic', 'walker', 'runner', 'crawler', 'brute', 'spitter', 'survivor'];   // 1.5.0: + survivor (escort)
 
 // Death timing (SQUAD.death === ZOMBIES.common.death values). Soldier classes receive death01 over the
 // whole (topple + sink) window, so their sink starts at the topple fraction; zombie classes receive the
@@ -880,6 +881,7 @@ function spitterParts() {
  */
 function characterParts(classId) {
   if (SOLDIER_CLASSES[classId]) return soldierParts(classId);
+  if (classId === 'survivor') return survivorParts();     // 1.5.0 (P3)
   if (!ZOMBIE_CLASSES[classId]) throw new Error('models: unknown character class "' + classId + '"');
   const parts = rawZombieParts(classId);
   const top = partsTop(parts);
@@ -1243,6 +1245,119 @@ function buildMedicCrosses() {
 }
 
 /** Builds every non-character geometry into `geo` (called once by ModelLibrary.init). */
+/**
+ * 1.5.0 (P3): an escort survivor (models.registerClass's 'survivor' in the design), ≈ 1.6 m, ≈ 150 tris: an upright civilian, no helmet,
+ * no rifle; the white shirt takes the instance tint (ESCORT.bed.palette), the arms hang for the class's waving swing.
+ */
+function survivorParts() {
+  const d = DIMS.walker, c = ESCORT.look.survivor;
+  const parts = [];
+  const legTop = d.legLen;
+  for (let s = -1; s <= 1; s += 2) {
+    const part = s < 0 ? PART.LEG_L : PART.LEG_R;
+    const piv = [s * d.hipHalf, legTop, 0];
+    parts.push(P(box(d.legW, d.legLen, d.legD, s * d.hipHalf, d.legLen / 2, 0), part, piv, c.legs));
+    parts.push(P(box(d.legW + 0.02, 0.08, d.legD + 0.08, s * d.hipHalf, 0.04, -0.03), part, piv, c.shoes));
+  }
+  const torsoPiv = [0, legTop, 0];
+  parts.push(P(box(d.torsoW, d.torsoH, d.torsoD, 0, legTop + d.torsoH / 2, 0), PART.TORSO, torsoPiv, c.shirt));
+  const top = legTop + d.torsoH;
+  for (let s = -1; s <= 1; s += 2) {
+    const part = s < 0 ? PART.ARM_L : PART.ARM_R;
+    const px = s * d.shoulderHalf;
+    const piv = [px, top - 0.05, 0];
+    parts.push(P(box(d.armW, d.armLen - 0.1, d.armD, px, top - 0.05 - (d.armLen - 0.1) / 2, 0), part, piv, c.shirt));
+    parts.push(P(box(0.1, 0.1, 0.1, px, top - 0.05 - d.armLen + 0.05, 0), part, piv, c.skin));
+  }
+  const headPiv = [0, top, 0];
+  const headY = top + d.headH / 2 + 0.03;
+  parts.push(P(box(d.headW, d.headH, d.headD, 0, headY, 0), PART.HEAD, headPiv, c.skin));
+  parts.push(P(box(d.headW + 0.03, 0.07, d.headD + 0.03, 0, headY + d.headH / 2, 0.01), PART.HEAD, headPiv, c.hair));
+  return parts;
+}
+
+/** 1.5.0 (P3): the rescue truck's body (ESCORT.truck footprint, centred, nose at −Z): white open-bed pickup with a green stripe and a
+ *  green cross on the cab roof, dark glass, bed rails, tailgate, tail lights; wheels, head lights and blinkers are separate meshes. */
+function buildTruckBody() {
+  const T = ESCORT.truck, k = ESCORT.look.truck;
+  const L = T.length, W = T.halfW * 2, nose = -L / 2, cabZ = nose + T.cabL / 2, bedL = L - T.cabL - 0.15, bedZ = L / 2 - bedL / 2;
+  const by = T.bedY, cabTop = 2.0;
+  const e = [
+    { geo: box(W * 0.95, 0.32, L * 0.96, 0, 0.6, 0), hex: k.chassis },
+    { geo: box(W, cabTop - 0.75, T.cabL, 0, 0.75 + (cabTop - 0.75) / 2, cabZ), hex: k.body },
+    { geo: box(W * 0.9, 0.5, 0.06, 0, cabTop - 0.42, nose - 0.01), hex: k.glass },               // windshield
+    { geo: box(W + 0.02, 0.42, T.cabL * 0.6, 0, cabTop - 0.45, cabZ + 0.1), hex: k.glass },      // side windows
+    { geo: box(W + 0.03, 0.12, T.cabL, 0, 1.05, cabZ), hex: k.stripe },
+    { geo: box(0.95, 0.04, 0.28, 0, cabTop + 0.02, cabZ), hex: k.stripe },                      // the roof cross
+    { geo: box(0.28, 0.04, 0.95, 0, cabTop + 0.02, cabZ), hex: k.stripe },
+    { geo: box(W * 0.8, 0.3, 0.06, 0, 0.82, nose - 0.04), hex: k.chassis },                     // grille
+    { geo: box(W + 0.06, 0.2, 0.18, 0, 0.5, nose - 0.08), hex: k.bumper },
+    { geo: box(W + 0.06, 0.2, 0.18, 0, 0.5, L / 2 + 0.06), hex: k.bumper },
+    { geo: box(W, 0.1, bedL, 0, by - 0.05, bedZ), hex: k.bed },                                 // bed floor
+    { geo: box(W, 0.45, 0.08, 0, by + 0.22, L / 2 - 0.04), hex: k.body },                       // tailgate
+    { geo: box(W * 0.9, 0.08, 0.1, 0, by + 0.44, L / 2 - 0.04), hex: k.stripe },
+    { geo: box(0.22, 0.12, 0.05, -W * 0.38, by + 0.1, L / 2 + 0.01), hex: k.tail },
+    { geo: box(0.22, 0.12, 0.05, W * 0.38, by + 0.1, L / 2 + 0.01), hex: k.tail },
+  ];
+  for (let s = -1; s <= 1; s += 2) {
+    e.push({ geo: box(0.08, 0.45, bedL, s * (W / 2 - 0.04), by + 0.22, bedZ), hex: k.body });      // bed rail
+    e.push({ geo: box(0.1, 0.06, bedL, s * (W / 2 - 0.04), by + 0.46, bedZ), hex: k.stripe });
+    for (let i = 0; i < 3; i++) e.push({ geo: box(0.1, 0.5, 0.08, s * (W / 2 - 0.04), by + 0.25, bedZ - bedL / 2 + 0.1 + i * (bedL - 0.2) / 2), hex: k.bumper });
+    e.push({ geo: box(0.3, 0.2, 1.1, s * (W / 2 + 0.02), 0.62, cabZ + 0.05), hex: k.chassis });    // wheel arches
+    e.push({ geo: box(0.3, 0.2, 1.1, s * (W / 2 + 0.02), 0.62, bedZ + 0.4), hex: k.chassis });
+  }
+  return mergeProps(e, 'escortTruck');
+}
+
+/** 1.5.0 (P3): the truck's four wheels in one mesh. */
+function buildTruckWheels() {
+  const T = ESCORT.truck, k = ESCORT.look.truck, r = 0.45, w = 0.32, x = T.halfW - w / 2 + 0.02;
+  const e = [];
+  for (let s = -1; s <= 1; s += 2) {
+    for (let j = -1; j <= 1; j += 2) {
+      const z = j < 0 ? -T.length / 2 + T.cabL / 2 + 0.05 : T.length / 2 - T.cabL * 0.75 + 0.4;
+      e.push({ geo: cyl(r, r, w, 12, s * x, r, z, 0, 0, Math.PI / 2), hex: PALETTE.props.tyre });
+      e.push({ geo: cyl(r * 0.5, r * 0.5, w + 0.04, 6, s * x, r, z, 0, 0, Math.PI / 2), hex: k.bumper });
+    }
+  }
+  return mergeProps(e, 'escortWheels');
+}
+
+/** 1.5.0 (P3): a plate (one per climber slot: thin in x, along the rail) with its rivets. */
+function buildEscortPlate() {
+  const k = ESCORT.look.plate, e = [{ geo: box(0.06, 0.6, 1.4, 0, 0, 0), hex: k.sheet }];
+  for (let i = -1; i <= 1; i += 2) for (let j = -1; j <= 1; j += 2) e.push({ geo: box(0.08, 0.07, 0.07, 0, i * 0.22, j * 0.6), hex: k.rivet });
+  return mergeProps(e, 'escortPlate');
+}
+
+/** 1.5.0 (P3): the checkpoint post (origin on the road edge's ground): sandbags, a flag on a pole, a floodlight. */
+function buildEscortCheckpoint() {
+  const k = ESCORT.look.props, e = [];
+  for (let i = 0; i < 3; i++) e.push({ geo: box(1.6 - i * 0.3, 0.32, 0.6, 0, 0.16 + i * 0.3, 0), hex: i & 1 ? k.bag2 : k.bag });
+  e.push({ geo: cyl(0.05, 0.05, 3.6, 6, 0.5, 1.8, 0), hex: k.pole });
+  e.push({ geo: box(0.04, 0.6, 0.9, 0.5, 3.25, -0.45), hex: k.flag });
+  e.push({ geo: cyl(0.06, 0.06, 2.6, 6, -0.6, 1.3, 0.2), hex: k.pole });
+  e.push({ geo: box(0.4, 0.3, 0.25, -0.6, 2.7, 0.1, 0.4), hex: k.lamp });
+  return mergeProps(e, 'escortCheckpoint');
+}
+
+/** 1.5.0 (P3): the safe zone across the road (origin at its centre line): two barricade walls past the road edges, posts, an open
+ *  gate's frame with a green banner bar, two floodlights. */
+function buildEscortSafe() {
+  const k = ESCORT.look.props, e = [];
+  for (let s = -1; s <= 1; s += 2) {
+    e.push({ geo: box(3.2, 1.6, 0.5, s * 6.2, 0.8, 0), hex: k.wall });
+    e.push({ geo: box(3.2, 0.16, 0.56, s * 6.2, 1.6, 0), hex: k.flag });
+    e.push({ geo: box(0.5, 4.6, 0.5, s * 4.4, 2.3, 0), hex: k.wall });
+    e.push({ geo: cyl(0.06, 0.06, 3.0, 6, s * 5.4, 1.5 + 1.6, 0), hex: k.pole });
+    e.push({ geo: box(0.5, 0.35, 0.3, s * 5.4, 4.6 + 0.2, 0, 0.5), hex: k.lamp });
+    e.push({ geo: box(1.2, 1.2, 0.4, s * 3.8, 0.6, 0.6), hex: k.bag });
+  }
+  e.push({ geo: box(9.3, 0.6, 0.3, 0, 4.35, 0), hex: k.flag });
+  e.push({ geo: box(9.3, 0.12, 0.34, 0, 4.0, 0), hex: k.wall });
+  return mergeProps(e, 'escortSafe');
+}
+
 function buildStaticGeometries(geo) {
   const panel = GATE_RULES.panel;
   geo.gateFrame = buildGateFrame();
@@ -1272,6 +1387,11 @@ function buildStaticGeometries(geo) {
   geo.droneDiscs = buildDroneDiscs();
   geo.droneLed = new BoxGeometry(0.12, 0.05, 0.12);
   geo.sniperCrate = buildSniperCrate();
+  geo.escortTruck = buildTruckBody();                    // 1.5.0 (P3): the escort's truck, plates and props (≈ 1 KB of geometry)
+  geo.escortWheels = buildTruckWheels();
+  geo.escortPlate = buildEscortPlate();
+  geo.escortCheckpoint = buildEscortCheckpoint();
+  geo.escortSafe = buildEscortSafe();
   geo.sniperLens = buildSniperLens();
   geo.medicCross = buildMedicCrosses();
   geo.troopRing = new RingGeometry(DIMS.troopExtras.ringIn, DIMS.troopExtras.ringOut, 28).rotateX(-Math.PI / 2);
@@ -1892,6 +2012,7 @@ export class ModelLibrary {
   limbParamsFor(classId) {
     if (SOLDIER_CLASSES[classId]) return SQUAD.limb;
     if (ZOMBIE_CLASSES[classId]) return ZOMBIES[classId].limb;
+    if (classId === 'survivor') return ESCORT.look.survivor.limb;   // 1.5.0 (P3)
     throw new Error('models: no limb params for "' + classId + '"');
   }
 
@@ -2160,6 +2281,34 @@ export class ModelLibrary {
         throw new Error('models: unknown troop id "' + id + '"');
     }
     g.traverse((o) => { if (o.isMesh) { o.castShadow = o.visible && !(o.material && o.material.transparent); o.receiveShadow = false; } });
+    return g;
+  }
+
+  /**
+   * 1.5.0 (P3): the escort's rescue truck — a Group (origin at the truck centre on the ground, nose at −Z) with children 'body',
+   * 'wheels', 'lights' (head lights) and 'blinkL' / 'blinkR' (amber, the owner toggles them): 5 draws. Every call builds a new one.
+   */
+  buildRescueTruck() {
+    const T = ESCORT.truck, k = ESCORT.look.truck, g = new Group();
+    g.name = 'escort.truck';
+    const body = new Mesh(this.geo.escortTruck, this._standard(0xffffff, { vertexColors: true, roughness: PALETTE.material.car.roughness, metalness: PALETTE.material.car.metalness * 0.5 }));
+    body.name = 'body';
+    const wheels = new Mesh(this.geo.escortWheels, this._standard(0xffffff, { vertexColors: true, roughness: PALETTE.material.rubber.roughness, metalness: PALETTE.material.rubber.metalness }));
+    wheels.name = 'wheels';
+    const lights = new Mesh(mergeAll([box(0.32, 0.16, 0.06, -T.halfW * 0.65, 0.88, 0), box(0.32, 0.16, 0.06, T.halfW * 0.65, 0.88, 0),
+      box(1.1, 0.1, 0.16, 0, 2.08, T.cabL * 0.35)], 'escortLights'), this._glow(k.light, 1.6));
+    lights.name = 'lights';
+    lights.position.z = -T.length / 2 - 0.03;
+    this._ownedGeometries.push(lights.geometry);
+    g.add(body, wheels, lights);
+    for (let s = -1; s <= 1; s += 2) {
+      const geo = mergeAll([box(0.12, 0.1, 0.1, s * (T.halfW - 0.04), 0.88, -T.length / 2 - 0.02), box(0.12, 0.1, 0.1, s * (T.halfW - 0.04), T.bedY + 0.1, T.length / 2 + 0.03)], 'escortBlink');
+      this._ownedGeometries.push(geo);
+      const m = new Mesh(geo, this._glow(k.blink, 2.2));
+      m.name = s < 0 ? 'blinkL' : 'blinkR';
+      m.visible = false;
+      g.add(m);
+    }
     return g;
   }
 

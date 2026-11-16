@@ -45,7 +45,7 @@
 //                                              #   boss, end); runs on the real-time clock match only when frame timing
 //                                              #   does not matter — the harness (synthetic clock) is the parity tool
 //   node tools/smoke.js --quality med           # low | med (alias medium / mid) | high
-//   node tools/smoke.js --matrix [filter] --out d  # P8: every 1.4.0 type × High / Medium / Low / software GL × phone / landscape, one Chrome
+//   node tools/smoke.js --matrix [filter] --out d  # P8: every level type (1.5.0: + chase L12, escort L18) × High / Medium / Low / software GL × phone / landscape, one Chrome
 //                                              #   per cell (the lock is free between cells); a filter keeps the cells whose name holds any
 //                                              #   of its comma-separated parts ('horde', 'night-low-landscape'); --shell, --root, --bootTimeout
 //                                              #   pass through (the sw cells bring their own --gpu). A cell passes with verdict CLEAN, programs min == max, the draw caps (ARCH §12);
@@ -217,7 +217,8 @@ await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const PORT = server.address().port;
 
 // ---------------------------------------------------------------- matrix (P8)
-const MATRIX_TYPES = Object.freeze({ standard: { level: 2, seconds: 100 }, horde: { level: 9, seconds: 170 }, night: { level: 7, seconds: 135 } });
+const MATRIX_TYPES = Object.freeze({ standard: { level: 2, seconds: 100 }, horde: { level: 9, seconds: 170 }, night: { level: 7, seconds: 135 },
+  chase: { level: 12, seconds: 110 }, escort: { level: 18, seconds: 120 } });   // 1.5.0 (P4): the chase and escort debuts
 const MATRIX_TIERS = Object.freeze({ high: ['--quality', 'high'], med: ['--quality', 'med'], low: ['--quality', 'low'], sw: ['--gpu', 'sw'] });
 const MATRIX_BOXES = Object.freeze({ phone: ['--viewport', '390x844'], landscape: ['--viewport', '844x390'] });
 const MATRIX_PRE = "for (const id of ['squad', 'fireRate', 'damage', 'coinMult', 'bossDamage']) g.save.setUpgrade(id, 6)";

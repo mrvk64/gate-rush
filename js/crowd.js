@@ -64,6 +64,8 @@ const colOf = (x) => { const c = Math.floor(x - G.x0); return c < 0 ? 0 : (c >= 
 const rowOf = (z) => { const r = Math.floor(z - G.z0); return r < 0 ? 0 : (r >= GROWS ? GROWS - 1 : r); };
 const nowMs = () => performance.now();
 const P_KILLS = { n: 0, coins: 0.5, x: 0.5, z: 0.5 };
+// 1.5.0 block mode (chase §1.3): face bias (hold / chase), gait boost, follow rate, depth buckets
+const FACE_HOLD = 0.6, FACE_BLOCK = -4, GAIT_BLOCK = 3, BLOCK_K = 6, BLOCK_BUCKETS = 96;
 const P_GOV = { cap: 0, living: 0, floor: 0, ref: 0.5 };
 const _c = new Color(), _v = new Vector3();
 
@@ -159,7 +161,7 @@ const uni = (type, names) => names.split(' ').map((n) => `uniform ${type} ${n};`
 const DECODE = /* glsl */`
 attribute float aCopy;
 uniform highp sampler2D uData;
-${uni('int', 'uBase uN uNoDisc')} ${uni('float', 'uTime uSince uDeathS uFlash uBodyMax uSac uHip')} ${uni('vec4', 'uEyeZ')} ${uni('vec2', 'uEyeK')}
+${uni('int', 'uBase uN uNoDisc')} ${uni('float', 'uTime uSince uDeathS uFlash uBodyMax uSac uHip uFace uGait')} ${uni('vec4', 'uEyeZ')} ${uni('vec2', 'uEyeK')}
 ${uni('vec3', 'uSunDir uSunCol uSky uGround uFill uEye uSk0 uSk1 uSk2 uSk3 uSh0 uSh1 uSh2 uSh3 uPa0 uPa1 uPa2 uPa3 uRunSk uRunSh uBruSk uBruCl uSpiSk uSpiSac')}
 ${uni('vec4', 'uG0 uG1 uG2 uG3 uG4 uP0 uP1 uP2 uP3 uP4 uS0 uS1 uS2 uS3 uS4')}
 vec4 iPos; vec4 iDat; vec2 grXZ; float grDeath; float grBright; float grFade; float grW; float grFlash; float grK; float grBlock;
@@ -182,7 +184,7 @@ void grDecode() {
   grG = grSel5(grType, uG0, uG1, uG2, uG3, uG4); grP = grSel5(grType, uP0, uP1, uP2, uP3, uP4); grS = grSel5(grType, uS0, uS1, uS2, uS3, uS4);
   grW = (uTime * mix(grG.x, grG.y, float((L >> 2) & 15) / 15.0) + iDat.x) * 6.2831853;
   float spd = length(vel);
-  grK = 0.55 + 0.45 * clamp(spd / 3.0, 0.0, 1.0); grBlock = 1.0 - clamp(spd / 1.5, 0.0, 1.0);
+  grK = 0.55 + 0.45 * clamp((spd + uGait) / 3.0, 0.0, 1.0); grBlock = 1.0 - clamp(spd / 1.5, 0.0, 1.0);   // 1.5.0: uGait (block mode: a sprint)
   grFlash = iDat.z >= 0.0 ? 0.0 : clamp(1.0 - (uTime - iDat.w) * 16.0, 0.0, 1.0);
 }
 vec3 grRotX(vec3 v, float a) { float c = cos(a), s = sin(a); return vec3(v.x, c * v.y - s * v.z, s * v.y + c * v.z); }
@@ -205,9 +207,10 @@ void grPose(float p, vec3 piv, inout vec3 q, inout vec3 n) {
     q.y -= max(d - 0.55, 0.0) * 0.9;
   }
 }
-// faces its velocity, biased toward the wall so a blocked unit never spins: yaw = atan(vx, vz + 0.6) + π (no trig)
+// faces its velocity, biased toward the wall so a blocked unit never spins: yaw = atan(vx, vz + uFace) + π (no trig; uFace 0.6, 1.5.0
+// block mode −4: the chase horde faces the squad ahead of it, −Z)
 void grPlace(vec3 q, vec3 n, out vec3 wp, out vec3 wn) {
-  vec2 f = normalize(vec2(iPos.z, iPos.w + 0.6));
+  vec2 f = normalize(vec2(iPos.z, iPos.w + uFace));
   float cy = -f.y, sy = -f.x;
   wp = vec3(cy * q.x + sy * q.z + grXZ.x, q.y, -sy * q.x + cy * q.z + grXZ.y); wn = vec3(cy * n.x + sy * n.z, n.y, -sy * n.x + cy * n.z);
 }
@@ -376,6 +379,9 @@ export class CrowdSystem {
     this.ctx = ctx; this.active = false; this.programsReady = false; this.MODE = MODE;
     this._built = false; this._prep = null; this._prepRun = null; this._rules = null; this._demo = 0; this._demoLane = 0.5; this._demoLane = 0;
     this.kills = 0; this.bites = 0; this.coin = 0.5; this.coin = 0; this.t = 0.5; this.t = 0;
+    // 1.5.0 block mode: front z, squeeze, drawn budget, depth / half width
+    this._block = false; this._front = 0.5; this._front = 0; this._squeeze = 0.5; this._squeeze = 1;
+    this._budget = 0; this._bDepth = 0.5; this._bDepth = 30; this._bHalf = 0.5; this._bHalf = 7;
   }
 
   /** Allocates the pool, grid, queue and the texture's CPU side once (≈ 0.6 MB; the GPU side is prepare()'s). */
@@ -389,7 +395,7 @@ export class CrowdSystem {
     this._cc = i32(NCELLS); this._cs = i32(NCELLS + 1); this._cf = i32(NCELLS); this._cl = i32(CAP); this._cv = new Float32Array(NCELLS);
     this._feed = i32(NCELLS);
     this._colFront = new Float32Array(GCOLS); this._order = i32(CAP); this._dying = i32(CAP); this._dying2 = i32(CAP); this._dRow = i32(GROWS);
-    this._order2 = i32(CAP); this._cand = i32(CAP);
+    this._order2 = i32(CAP); this._cand = i32(CAP); this._bkt = i32(BLOCK_BUCKETS + 1);
     // queue ring, kept in time order: due time (crowd s), HP, x / z / target x in cm, type, flags (1 burst: z given, may use the
     // reserve; 2 counted as waiting)
     this._qT = new Float32Array(QCAP); this._qHp = new Float32Array(QCAP); this._qX = new Int16Array(QCAP); this._qZ = new Int16Array(QCAP);
@@ -463,6 +469,92 @@ export class CrowdSystem {
 
   setRules(r) { this._rules = r || null; }
 
+  // ---------------------------------------------------------------------------------------------- 1.5.0 block mode (chase)
+  /** The chase horde (chase §1.3), cosmetic: a block behind the front line the mode sets (setFront), |x| ≤ halfX, depth m deep,
+   *  densest at the front, facing the squad at a run. No target, rules, grid or separation; one 30 Hz pass; kills only through
+   *  killNear (no coins, no counters). o { seed, front, depth, halfX, budget }. */
+  beginBlock(o) {
+    this.reset();
+    const seed = (o.seed >>> 0) || 1;
+    this._rng.reseed(seed); this._rngLook.reseed((seed ^ 0x9E3779B9) >>> 0);
+    this.coin = 0; this._rules = null; this.active = true; this._fled = false; this._block = true;
+    this._front = o.front; this._squeeze = 1; this._bDepth = o.depth > 0 ? o.depth : 30; this._bHalf = o.halfX > 0 ? o.halfX : 7;
+    this._ref = this._refMedian(); this._ivEma = 0; this._lastNow = -1; this._slowT = 0; this._fastT = 0; this._floorT = 0; this._govCap = this._T.cap;
+    if (!this._built && this.ctx.render && this.ctx.render.scene) this._build();
+    if (this._group) this._group.visible = true;
+    if (this._cu) { this._cu.uFace.value = FACE_BLOCK; this._cu.uGait.value = GAIT_BLOCK; }
+    this.setDrawBudget(o.budget);
+    const n = Math.min(CAP, Math.max(this._budget, 1));
+    for (let k = 0; k < n; k++) this._blockPlace(this._spawn(k % 3 === 2 ? 1 : 0, 0, 0, 0, 1), this._rngLook.next());
+  }
+
+  /** The front line z and the squeeze toward it (1; < 1 piles up on a barricade / the doors). */
+  setFront(z, squeeze) {
+    if (!this._block) return;
+    this._front = z; this._squeeze = squeeze > 0 ? squeeze : 1;
+  }
+
+  /** Drawn units (under the governor's cap). */
+  setDrawBudget(n) { this._budget = Math.max(0, Math.min(this._T.cap, n | 0)); }
+
+  /** n front-rank kills shown (crumple, gore, a streak from the rear guard at x0 / z0). */
+  killNear(n, x0, z0) {
+    if (!this._block || n <= 0) return 0;
+    const rl = this._rngLook, Z = this.z, st = this.state, lim = this._front + 3;
+    let done = 0;
+    for (let tries = 0; done < n && tries < n * 6; tries++) {
+      const i = this.live[(rl.next() * this.nLive) | 0];
+      if (st[i] !== S_ALIVE || Z[i] > lim) continue;
+      const el = this._el();
+      st[i] = S_DYING; this.dieT[i] = this.t; this.deathT[i] = el; this.vx[i] = 0; this.vz[i] = 0; this._alive--; this._byType[this.type[i]]--;
+      if (this._built) { this._goreAt(this.x[i], Z[i], el); if (done < 3) this._streak(x0 + (rl.next() - 0.5) * 2, z0, this.x[i], Z[i]); }
+      done++;
+    }
+    return done;
+  }
+
+  /** Slot i at depth share u (u²: dense front), x across road and sidewalks. */
+  _blockPlace(i, u) {
+    const rl = this._rngLook, d = this._bDepth * u * u, h = this._bHalf;
+    this.tm[i] = d;                                    // the unit's place behind the front
+    this.tx[i] = (rl.next() * 2 - 1) * h * (0.75 + 0.25 * rl.next());
+    this.x[i] = this.tx[i]; this.z[i] = this._front + d; this.vx[i] = 0; this.vz[i] = 0;
+    this.phase[i] = rl.next();
+  }
+
+  /** The 30 Hz pass: deaths recycle to the back, units follow the front, cull, nearest-first order, pack. */
+  _blockTick(dt) {
+    const X = this.x, Z = this.z, VX = this.vx, VZ = this.vz, st = this.state, now = this.t, rl = this._rngLook, k = Math.min(1, BLOCK_K * dt);
+    const front = this._front, sq = this._squeeze, live = this.live, nLive = this.nLive;
+    this._view();
+    const vm0 = this._vm0, vm2 = this._vm2, vm8 = this._vm8, vm10 = this._vm10, vmx = this._vmx, vmz = this._vmz, tanH = this._tanH;
+    const bk = this._bkt, order = this._order, cand = this._cand, zTop = front + this._bDepth + 2;
+    bk.fill(0);
+    let nV = 0;
+    for (let a = 0; a < nLive; a++) {
+      const i = live[a];
+      if (st[i] === S_DYING) {
+        if (now - this.dieT[i] < RD.deathS) { Z[i] += (front + this.tm[i] * sq - Z[i]) * 0.02; }
+        else { st[i] = S_ALIVE; this._alive++; this._byType[this.type[i]]++; this.deathT[i] = -1; this._blockPlace(i, 0.75 + 0.25 * rl.next()); continue; }
+      } else {
+        const tz = front + this.tm[i] * sq, nz = Z[i] + (tz - Z[i]) * k;
+        const nx = X[i] + (this.tx[i] - X[i]) * k * 0.5;
+        VZ[i] = (nz - Z[i]) / dt; VX[i] = (nx - X[i]) / dt; Z[i] = nz; X[i] = nx;
+      }
+      const x = X[i], z = Z[i], xv = vm0 * x + vm8 * z + vmx, zv = vm2 * x + vm10 * z + vmz;
+      if (!(zv < 0 && (xv < 0 ? -xv : xv) <= -zv * tanH + 1)) continue;
+      let b = ((zTop - z) * 2) | 0; b = b < 0 ? 0 : (b >= BLOCK_BUCKETS ? BLOCK_BUCKETS - 1 : b);
+      cand[nV++] = i; bk[b + 1]++;
+    }
+    for (let b = 0; b < BLOCK_BUCKETS; b++) bk[b + 1] += bk[b];
+    for (let a = 0; a < nV; a++) { const i = cand[a]; let b = ((zTop - Z[i]) * 2) | 0; b = b < 0 ? 0 : (b >= BLOCK_BUCKETS ? BLOCK_BUCKETS - 1 : b); order[bk[b]++] = i; }
+    const cap = Math.min(this._budget, this._govCap), nd = nV < cap ? nV : cap;
+    this._pack(order, nd, this._T);
+    this._culled = nLive - nV; this._undrawn = nV - nd; this._drawn40 = nd; this._drawnDying = 0;
+    this._density = 0; this._carpetK = 0;
+    this._tickEl = this._el();
+  }
+
   /** Level reset (RESET_ORDER) / quit: inactive, pool and queue cleared, meshes hidden, scalerGuard defaults, demo patch off. */
   reset() {
     const lvl = this.ctx.level;
@@ -470,6 +562,7 @@ export class CrowdSystem {
     this._demo = 0;
     if (!this.active && this.nLive === 0 && this._qN === 0) return;
     this.active = false; this._rules = null; this._qN = 0;
+    if (this._block) { this._block = false; if (this._cu) { this._cu.uFace.value = FACE_HOLD; this._cu.uGait.value = 0; } }
     this._clearPool();
     if (this._group) this._group.visible = false;
     const w = this.ctx.weapons, e = this.ctx.engine;
@@ -652,6 +745,11 @@ export class CrowdSystem {
     if (!this.active) return;
     const t0 = nowMs(), P = this.perf;
     this.t += dt;
+    if (this._block) {                                 // 1.5.0: the chase horde, one pass at 30 Hz
+      if (this._phaseAB === 0) this._phaseAB = 1; else { this._blockTick(2 * dt); this._phaseAB = 0; }
+      const bm = nowMs() - t0; this._frameMs += bm; P.steps[P.nSteps & 4095] = bm; P.nSteps++;
+      return;
+    }
     if (this._demo > 0) this._demoLane = 3 * Math.sin(this.t * 1.05);
     if (this._phaseAB === 0) { this._phaseA(); this._phaseAB = 1; P.msA += nowMs() - t0; P.nA++; }
     else { this._phaseB(2 * dt); this._phaseAB = 0; P.msB += nowMs() - t0; P.nB++; }
@@ -1148,7 +1246,7 @@ export class CrowdSystem {
     const k = this._trNext, A = this._trA.array, B = this._trB.array, TR = CROWD.tracers;
     this._trNext = k + 1 < TR.cap ? k + 1 : 0;
     A[k * 4] = x0; A[k * 4 + 1] = TR.y; A[k * 4 + 2] = z0; A[k * 4 + 3] = this._el();
-    B[k * 4] = x1; B[k * 4 + 1] = TR.y; B[k * 4 + 2] = z1; B[k * 4 + 3] = Math.max(0.02, (z0 - z1) / TR.speed);
+    B[k * 4] = x1; B[k * 4 + 1] = TR.y; B[k * 4 + 2] = z1; B[k * 4 + 3] = Math.max(0.02, Math.abs(z0 - z1) / TR.speed);   // 1.5.0: either way (chase rear tracers fly +z)
     this._trDirty = true;
   }
 
@@ -1171,7 +1269,7 @@ export class CrowdSystem {
       uSince: { value: 0 }, uDeathS: { value: RD.deathS }, uFlash: { value: RD.flash }, uBodyMax: { value: RD.bodyMax }, uSac: { value: RD.sac },
       uSunDir: { value: new Vector3(0, 1, 0) }, uSunCol: { value: new Color(1, 1, 1) }, uSky: { value: new Color() }, uGround: { value: new Color() },
       uFill: { value: new Color() }, uEye: { value: lin(E.color).multiplyScalar(E.hdr) }, uEyeZ: { value: new Vector4(E.nearZ, E.bandZ, E.farZ, 0) },
-      uEyeK: { value: new Vector2(E.band, E.far) }, uHip: { value: 0.79 },
+      uEyeK: { value: new Vector2(E.band, E.far) }, uHip: { value: 0.79 }, uFace: { value: FACE_HOLD }, uGait: { value: 0 },
     }]);
     cu.uTime = uTime; cu.uData = { value: tex };
     for (let i = 0; i < 4; i++) {

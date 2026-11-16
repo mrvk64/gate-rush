@@ -82,10 +82,15 @@ const PREFETCH_SLICE_MS = 8;
 // in animation-frame slices of START_SLICE_MS of attempts (one at least) and starts the run when it is ready — L13 / L19 / L28
 // take 29–32 attempts, 100–130 ms unthrottled (≈ 0.5 s at 4×), and ran in one click handler before (a 55–130 ms frame).
 const START_SLICE_MS = 8;
-/** r8 (P1T, ARCH §5): the ModeSystem (a ctx member) of each base that has one; it begins at the script's finale event. */
-const MODE_OF = Object.freeze({ horde: 'hold' });
-/** r8 (D8, ARCH §6): the systems whose programs (programsReady / prepare()) a base needs before its run starts. */
-const PREP_OF = Object.freeze({ horde: ['crowd', 'hold'] });
+/** r8 (P1T, ARCH §5): the ModeSystem (a ctx member) of each base that has one; it begins at the script's finale event. 1.5.0:
+ *  chase / escort (a base whose ctx member is missing plays as a RUN). */
+const MODE_OF = Object.freeze({ horde: 'hold', chase: 'chase', escort: 'escort' });
+/** r8 (D8, ARCH §6): the systems whose programs (programsReady / prepare()) a base needs before its run starts (missing ones skipped). */
+const PREP_OF = Object.freeze({ horde: ['crowd', 'hold'], chase: ['crowd', 'chase'], escort: ['escort'] });
+/** 1.5.0: every system some base prepares (a run of another base cancels their prepares, _beginRun). */
+const PREP_ALL = Object.freeze(['crowd', 'hold', 'chase', 'escort']);
+/** 1.5.0 (PLAN C10): the REINFORCEMENTS cap of a mode's own assist kind (DROP charges, PLATE stock); 'soldiers' and 'kits' keep theirs. */
+const MODE_ASSIST_STEPS = 3;
 /** r8 (P8): rounds a menu start asks again for programs a prepare did not leave ready; start() then warns and plays. */
 const REQ_PREP_TRIES = 3;
 /** r8: endless's and the title's type (L1's: plain). */
@@ -141,10 +146,12 @@ const P_DISTRICT = { id: '', name: '', index: 0, label: '', accent: 0, seconds: 
 const P_PROGRESS = { distance: -0, length: -0, fraction: -0 };
 const P_RUNUP = { secondsToBoss: -0 };
 const P_COMPLETE = { level: 0, stars: 0, survivors: 0, eBoss: 0, coins: 0, breakdown: null, typeKey: '', base: '', night: false, finale: '', eTarget: 0, metric: 0, stat: null, cause: '', firstMeet: false, retypeReward: false, assistK: 0 };
-const P_FAILED = { level: 0, fraction: -0, coinsKept: -0, typeKey: '', base: '', night: false, finale: '', eTarget: 0, stat: null, cause: '', firstMeet: false, retypeReward: false, assistK: 0, counted: false };
-/** r8: mode.begin opts and the mode.stat report (reused). */
+const P_FAILED = { level: 0, fraction: -0, coinsKept: -0, typeKey: '', base: '', night: false, finale: '', eTarget: 0, stat: null, cause: '', firstMeet: false, retypeReward: false, assistK: 0, counted: false, idle: false };
+/** r8: mode.begin opts and the mode.stat report (reused). 1.5.0: + presses (mode button / bubble presses, the loss-coin rule),
+ *  score (the mode's own score terms for this outcome) and bonus (its coins on a clear: the results' bonusMode chip). */
 const P_BEGIN = { threat: 1, assistK: 0, firstMeet: false, seed: 0, runDecisions: 0, event: null };
-const STAT = { holdActions: 0, holdSurgeWindows: 0, eased: [false, false, false], staggers: 0, lineHeld: false, kits: 0, kills: 0, total: 0, surgesCleared: 0 };
+const STAT = { holdActions: 0, holdSurgeWindows: 0, eased: [false, false, false], staggers: 0, lineHeld: false, kits: 0, kills: 0, total: 0, surgesCleared: 0,
+  presses: 0, score: 0, bonus: 0 };
 const P_CHUNK = { index: 0, difficulty: -0 };
 const P_END = { distance: -0, score: 0, best: 0, coins: 0, chunks: 0, newBest: false };
 // round 7 (r7, teaching:0 B / teaching:3): hint:show also carries how the hint is bound — hold (theatre s it cannot be cut
@@ -171,7 +178,7 @@ const IDLE_GATE_EVENT = {
 };
 
 /** Order in which LevelRunner.start()/quitToTitle() reset the systems (ARCH §6 common shape; squad last). */
-const RESET_ORDER = ['fx', 'weapons', 'zombies', 'crowd', 'hold', 'boss', 'gates', 'pickups', 'troops', 'squad'];
+const RESET_ORDER = ['fx', 'weapons', 'zombies', 'crowd', 'hold', 'chase', 'escort', 'boss', 'gates', 'pickups', 'troops', 'squad'];   // 1.5.0: + chase (P2), escort (P3)
 
 const TYPES = ZOMBIES.common.types;   // ['walker', 'runner', 'crawler', 'brute', 'spitter']
 /** Round 5d (GDD §10.1): the script events the endless mini-boss hold keeps back (the boss's own minions are boss.js's). */
@@ -443,6 +450,9 @@ export class LevelRunner {
     this._reqParts = null;
     // r8 (D30 / A1): this run's activity (read-only outside): gate events reached and decisions counted (_trackActivity, addActivity)
     this.activity = { decisions: 0, eventsReached: 0 };
+    // 1.5.0 (PLAN C14): FIRE presses this run and input.activityM at its start (_runTouched)
+    this._fires = 0;
+    this._actM0 = 0.5; this._actM0 = 0;
     this._pExp = 0.5; this._pExp = 1; this._pExpLevel = -1;   // r8 (D26): the expected shop's fire × damage at _pExpLevel
     this._actEv = -1;   // the watched activeEvent id, its target travel (m), last x, start lane, steered?, committed?
     this._actTravel = 0.5; this._actTravel = 0;
@@ -1322,6 +1332,7 @@ export class LevelRunner {
     w.bossActive = false;
     w.bossZ = 0;
     w.bossX = 0;
+    w.despawnZ = WORLD.despawnZ;                         // 1.5.0: a mode may move the recycle line (chase: behind its camera)
     const render = ctx.render;
     if (render) {
       render.cancelDolly();
@@ -1360,6 +1371,7 @@ export class LevelRunner {
     this._script = script;
     this._seed = seed;
     this.activity.decisions = 0; this.activity.eventsReached = 0;   // r8 (D30 / A1)
+    this._fires = 0; this._actM0 = ctx.input ? ctx.input.activityM : 0;   // 1.5.0 (C14)
     this._actEv = -1; this._actTravel = 0; this._actLane = -1; this._actMoved = false; this._actDone = false;
     // DISTRICTS.md §3.1 / §8.5: the run's district snaps (seconds 0) after the undo list and before env.setLevel. Round 7
     // (r7, explain:4): the banner shows at EVERY run start, retries included (a small "NAME · k/5" tag); the big "NEW
@@ -1382,8 +1394,13 @@ export class LevelRunner {
     const type = this._type;
     this._applyDistrict(0, type.night);
     // r8 (P8): a run of another base stops an abandoned Horde tile's prepare (render.setNight does this for a night one): its
-    // programs must not compile in play on a slow phone; the next prepare() finishes them
-    if (!PREP_OF[type.base]) for (let i = 0; i < PREP_OF.horde.length; i++) { const m = ctx[PREP_OF.horde[i]]; if (m && typeof m.cancelPrepare === 'function') m.cancelPrepare(); }
+    // programs must not compile in play on a slow phone; the next prepare() finishes them. 1.5.0: every system this base does not prepare
+    const own = PREP_OF[type.base];
+    for (let i = 0; i < PREP_ALL.length; i++) {
+      if (own && own.indexOf(PREP_ALL[i]) >= 0) continue;
+      const m = ctx[PREP_ALL[i]];
+      if (m && typeof m.cancelPrepare === 'function') m.cancelPrepare();
+    }
 
     ctx.rng = new Rng(seed);
     ctx.rngFx = ctx.rng.fork(RNG_FX_OFFSET);
@@ -1833,12 +1850,15 @@ export class LevelRunner {
   }
 
   /** r8 (P1T, ARCH §5): the finale event (the dig-in) — mode.begin(script, { threat 1, assistK (the mode gives them, D35), firstMeet
-   *  (it eases from its own data), seed, runDecisions, event }). */
+   *  (it eases from its own data), seed, runDecisions, event }). 1.5.0 (PLAN C1): a mode with keepsRun (chase, escort) begins
+   *  over the run: the phase stays 'run' and gates, pickups and waves keep spawning. */
   _beginMode(ev) {
     this._modeOn = true;
-    this._bossReached = true;
-    this._runupActive = false;                           // r8 (P6): the run's run-up bursts end at the dig-in (no zombies.spawn in a mode)
-    this._setPhase(MODE_OF[this._type.base]);
+    if (this._mode.keepsRun !== true) {
+      this._bossReached = true;
+      this._runupActive = false;                         // r8 (P6): the run's run-up bursts end at the dig-in (no zombies.spawn in a mode)
+      this._setPhase(MODE_OF[this._type.base]);
+    }
     P_BEGIN.assistK = this._assistK; P_BEGIN.firstMeet = this._firstMeet; P_BEGIN.seed = this._seed;
     P_BEGIN.runDecisions = this.activity.decisions; P_BEGIN.event = ev;
     this._mode.begin(this._script, P_BEGIN);
@@ -1870,12 +1890,11 @@ export class LevelRunner {
   debugSkip(kind) {
     const k = kind || 'run';
     const w = this.ctx.world;
-    if (k === 'run' && this._script && !this._endless && (this._phase === 'run' || this._phase === 'runup')) {
-      if (this._bossAt - DEBUG_SKIP_M <= w.distance) return false;
+    if (k === 'run' && this._script && !this._endless && (this._phase === 'run' || this._phase === 'runup') && this._bossAt - DEBUG_SKIP_M > w.distance) {
       w.distance = this._bossAt - DEBUG_SKIP_M;
       return true;
     }
-    return !!(this._mode && this._modeOn && this._mode.debugSkip(k));
+    return !!(this._mode && this._modeOn && this._mode.debugSkip(k));   // 1.5.0: a keepsRun mode (phase 'run') gets 'run' past its start
   }
 
   /** A script 'hint' row. Round 7 (r7, teaching:0 B): "GRAB THE CRATE" (L1) stays until a crate opens or an item is picked
@@ -2927,6 +2946,7 @@ export class LevelRunner {
   /** r7 (teaching:0 C): the weapon's name hint ("SHOTGUN! WIDE SPREAD, SHORT RANGE") when it actually fires, once ever. */
   _onWeaponStart(p) {
     if (this._phase === 'idle' || !p || typeof p.id !== 'string') return;
+    this._fires++;                                       // 1.5.0 (C14): only FIRE starts a weapon (weapons._stepStored)
     this._codexSeen('hud.pills', false);
     if (HINTS[p.id] === undefined) return;
     // r7 fix round 3: bound to the weapon (release key = its id, no hold) — weapon:end releases it (init)
@@ -3074,14 +3094,15 @@ export class LevelRunner {
   _modeStat() {
     const s = STAT;
     s.holdActions = 0; s.holdSurgeWindows = 0; s.staggers = 0; s.lineHeld = false; s.kits = 0; s.kills = 0; s.total = 0; s.surgesCleared = 0;
+    s.presses = 0; s.score = 0; s.bonus = 0;
     s.eased.fill(false);
     this._mode.stat(s);
     return s;
   }
 
-  /** r8 (D45): the mode's score terms (LINE HELD on a clear, each stagger). */
+  /** r8 (D45): the mode's score terms (LINE HELD on a clear, each stagger; 1.5.0: + the mode's own, stat.score). */
   _modeScore(s, won) {
-    return s ? (won && s.lineHeld ? SCORE.hold.lineHeld : 0) + SCORE.hold.stagger * (s.staggers | 0) : 0;
+    return s ? (won && s.lineHeld ? SCORE.hold.lineHeld : 0) + SCORE.hold.stagger * (s.staggers | 0) + Math.round(s.score > 0 ? s.score : 0) : 0;
   }
 
   /** r8 (P1T): the run's type fields into `d` (a payload or the result data; stat copied, ui may keep it). */
@@ -3134,8 +3155,8 @@ export class LevelRunner {
     const starRaw = ECONOMY.levelBonus(level) * (1 + ECONOMY.starBonus[stars]) * LEVEL_TYPES[type.key].bonusMult;
     const survRaw = surplus * (ECONOMY.survivorCoins > 0 ? ECONOMY.survivorCoins : 0);
     this._emitBonus(Math.round(starRaw + survRaw));
-    // r8 (HORDE_GEN.coins): LINE HELD (no section ever broke) and a refund per kit left
-    const modeRaw = stat && stat.lineHeld ? HORDE_GEN.coins.lineHeldPerL * level : 0;
+    // r8 (HORDE_GEN.coins): LINE HELD (no section ever broke) and a refund per kit left; 1.5.0: + the mode's clear bonus (stat.bonus)
+    const modeRaw = stat ? (stat.lineHeld ? HORDE_GEN.coins.lineHeldPerL * level : 0) + (stat.bonus > 0 ? stat.bonus : 0) : 0;
     if (modeRaw > 0) this._emitBonus(Math.round(modeRaw));
     if (stat && stat.kits > 0) this._emitBonus(Math.round(stat.kits * HORDE_GEN.coins.kitRefund), 'refund');
     this._settleCoins();
@@ -3177,9 +3198,10 @@ export class LevelRunner {
   }
 
   /**
-   * Game over (GDD §9.1): keeps ECONOMY.gameOverKeep of the run's coins, plus (QA LVL-21) a consolation of
-   * levelBonus(L)·failBonusFrac·(fraction of the level reached), paid in full through the coin path (breakdown
-   * 'bonus'). Counts the failure for the fail-streak assist.
+   * Game over (GDD §9.1): (QA LVL-21) a consolation of levelBonus(L)·failBonusFrac·(fraction of the level reached) is credited
+   * through the coin path (breakdown 'bonus'), then 1.5.0 (PLAN C14) the payout is floor(run coins · ECONOMY.gameOverKeep): half
+   * of picked-up + consolation, the card's figure = the wallet's change. A run with no input (_runTouched) gets no consolation
+   * and keeps 0. Counts the failure for the fail-streak assist.
    */
   _commitLost() {
     const ctx = this.ctx;
@@ -3191,18 +3213,19 @@ export class LevelRunner {
     this._settleCoins();
     const dist = this._deathDistance >= 0 ? this._deathDistance : ctx.world.distance;   // where the squad was lost
     const runFrac = script.length > 0 ? clamp(dist / script.length, 0, 1) : 0;
-    // r8 (P1T): a mode level's fraction is runShare × its run, once the mode began runShare + the rest × the mode's progress
+    // r8 (P1T): a mode level's fraction is runShare × its run, once the mode began runShare + the rest × the mode's progress;
+    // 1.5.0 (PLAN C2): a keepsRun mode plays over the whole road, so its fraction is the run's
     const share = LEVEL_TYPES[type.key].runShare > 0 ? LEVEL_TYPES[type.key].runShare : 1;
-    const fraction = !this._mode ? runFrac : (this._modeOn ? share + (1 - share) * clamp(this._mode.fraction(), 0, 1) : share * runFrac);
+    const fraction = !this._mode || this._mode.keepsRun === true ? runFrac
+      : (this._modeOn ? share + (1 - share) * clamp(this._mode.fraction(), 0, 1) : share * runFrac);
     const stat = this._modeOn ? this._modeStat() : null;
-    const kept = Math.round(run.coins * ECONOMY.gameOverKeep);
-    const before = run.coins;
-    const consolation = Math.round(ECONOMY.levelBonus(level) * ECONOMY.failBonusFrac * fraction * LEVEL_TYPES[type.key].bonusMult);
+    const idle = !this._runTouched();
+    const consolation = idle ? 0 : Math.round(ECONOMY.levelBonus(level) * ECONOMY.failBonusFrac * fraction * LEVEL_TYPES[type.key].bonusMult);
     if (consolation > 0) {
       this._emitBonus(consolation);
       this._settleCoins();
     }
-    const payout = kept + (run.coins - before);
+    const payout = idle ? 0 : Math.floor(run.coins * ECONOMY.gameOverKeep + 1e-9);
     run.score = SCORE.kill * run.killCoins + SCORE.peak * run.peakSquad + SCORE.flipped * run.gatesFlipped
       + (run.lostToRed === 0 ? SCORE.noRedLoss : 0) + this._modeScore(stat, false);
     if (save) {
@@ -3215,7 +3238,16 @@ export class LevelRunner {
     this._failStreak.set(level, (this._failStreak.get(level) | 0) + 1);
     const counted = this._runCounted();
     if (counted) this._assistStreak.set(level, (this._assistStreak.get(level) | 0) + 1);
-    this._resultData = this._typeData({ level, fraction, coinsKept: payout, endless: false, counted }, stat);
+    this._resultData = this._typeData({ level, fraction, coinsKept: payout, idle, endless: false, counted }, stat);
+  }
+
+  /** 1.5.0 (PLAN C14): any player input this run — a gate decision, FIRE, ≥ assist.minTravelM of steering travel or a mode press. */
+  _runTouched() {
+    const a = this.activity, input = this.ctx.input, as = LEVELS.curve.assist;
+    if (a.decisions > 0 || this._fires > 0) return true;
+    if (input && input.activityM - this._actM0 >= (as && as.minTravelM > 0 ? as.minTravelM : 1)) return true;
+    const s = this._modeOn ? this._modeStat() : null;
+    return !!s && (s.holdActions > 0 || s.presses > 0);
   }
 
   _presentLost() {
@@ -3309,13 +3341,15 @@ export class LevelRunner {
     return !!s && s.holdActions >= Math.max(1, as.holdActions | 0) && s.holdSurgeWindows >= Math.max(1, as.holdSurges | 0);
   }
 
-  /** r8 (D30 / D35): REINFORCEMENTS steps — one per counted fail from assistAfterFails, to the type's cap ('kits': HORDE_GEN's). */
+  /** r8 (D30 / D35): REINFORCEMENTS steps — one per counted fail from assistAfterFails, to the type's cap ('kits': HORDE_GEN's;
+   *  1.5.0, C10: 'charges' / 'plates' MODE_ASSIST_STEPS). Every kind but 'soldiers' reaches the mode as assistK (P_BEGIN). */
   _assistSteps() {
     if (this._endless) return 0;
     const c = LEVELS.curve;
     const fails = this._assistStreak.get(this._level) | 0;   // r8 (D30 / A1): counted fails only
     if (!(c.assistAfterFails > 0) || fails < c.assistAfterFails) return 0;
-    const cap = LEVEL_TYPES[this._type.key].assist === 'kits' ? HORDE_GEN.assist.maxSteps : c.assistMaxSteps;
+    const kind = LEVEL_TYPES[this._type.key].assist;
+    const cap = kind === 'kits' ? HORDE_GEN.assist.maxSteps : (kind === 'soldiers' ? c.assistMaxSteps : MODE_ASSIST_STEPS);
     return Math.min(cap > 0 ? cap : 1, fails - c.assistAfterFails + 1);
   }
 

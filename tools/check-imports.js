@@ -14,6 +14,8 @@
 //       → WARNINGS; plus util/data/levelgen purity warnings;
 //       1.4.0 (PLAN §10): render.js may import ./night.js and levelgen.js ./holdgen.js (night.js / holdgen.js are imported
 //       by nobody else); holdgen.js is pure and may import only ./util.js and ./data.js;
+//       1.5.0 (PLAN C12): levelgen.js may import ./chasegen.js and ./escortgen.js, chase.js ./chasegen.js (the shared gapStep);
+//       escortgen.js is imported only by levelgen.js; both generators are pure (./util.js and ./data.js only), like holdgen.js;
 //   (f) Math.random outside util.js and console.log anywhere → ERRORS;
 //   (g) 1.4.0: a js/ import that resolves outside js/ (anything but three / three/addons) → ERROR, so runtime code can
 //       never reach tools/ (tools/holdsim.js is node-only).
@@ -35,8 +37,11 @@ const ALLOWED_RELATIVE = new Set(['./util.js', './data.js', './render.js', './mo
 const EXTRA_ALLOWED = {
   'main.js': null,                          // null = anything goes
   'level.js': new Set(['./levelgen.js']),   // the runner needs the generator (§6.16)
-  'levelgen.js': new Set(['./holdgen.js']), // pure: util + data (+ the pure Horde generator, 1.4.0; checked below)
+  'levelgen.js': new Set(['./holdgen.js', './chasegen.js', './escortgen.js']),   // pure: util + data (+ the pure mode generators; checked below)
   'holdgen.js': new Set([]),                // 1.4.0 pure: util + data only (checked below)
+  'chasegen.js': new Set([]),               // 1.5.0 pure: util + data only (checked below)
+  'escortgen.js': new Set([]),              // 1.5.0 pure: util + data only (checked below)
+  'chase.js': new Set(['./chasegen.js', './obstacles.js']),   // 1.5.0 (C12): the runtime and the generator share one gap model; its road furniture
   // Render split (lead decision): render.js re-exports MaterialLibrary (./materials.js) and Environment
   // (./environment.js); the shader factories live in ./fxmaterials.js (particles/decals) and
   // ./environment.js (sky). render.js also imports the PURE detectTier/maxAutoTierFor helpers from
@@ -47,7 +52,9 @@ const EXTRA_ALLOWED = {
   'fx.js': new Set(['./fxmaterials.js']),
 };
 // Modules that must stay free of THREE / DOM (importable from node tools).
-const PURE_MODULES = new Set(['data.js', 'levelgen.js', 'holdgen.js']);
+const PURE_MODULES = new Set(['data.js', 'levelgen.js', 'holdgen.js', 'chasegen.js', 'escortgen.js']);
+// 1.4.0 / 1.5.0: the pure mode generators (util + data only)
+const GEN_MODULES = new Set(['holdgen.js', 'chasegen.js', 'escortgen.js']);
 // Modules that nobody but main.js may import (event consumers, §1).
 const CONSUMER_ONLY = new Set(['./ui.js', './audio.js', './fx.js', './engine.js', './save.js', './level.js']);
 // Round 7 (r7 INT): direct console calls a file may make without a warning (method → count). engine.js: the diagnostics
@@ -445,8 +452,8 @@ function checkFile(absPath, projectFiles) {
       }
       if (base === 'util.js' && kind !== 'three') warnAt(where, imp.line, `util.js must import only 'three' (it is the root of the dependency chain)`);
       if (base === 'data.js' && spec !== './util.js') warnAt(where, imp.line, `data.js may import only ./util.js`);
-      if (base === 'levelgen.js' && spec !== './util.js' && spec !== './data.js' && spec !== './holdgen.js') warnAt(where, imp.line, `levelgen.js may import only ./util.js, ./data.js and ./holdgen.js`);
-      if (base === 'holdgen.js' && spec !== './util.js' && spec !== './data.js') warnAt(where, imp.line, `holdgen.js may import only ./util.js and ./data.js`);
+      if (base === 'levelgen.js' && spec !== './util.js' && spec !== './data.js' && !GEN_MODULES.has(spec.slice(2))) warnAt(where, imp.line, `levelgen.js may import only ./util.js, ./data.js and the mode generators`);
+      if (GEN_MODULES.has(base) && spec !== './util.js' && spec !== './data.js') warnAt(where, imp.line, `${base} may import only ./util.js and ./data.js`);
       if (PURE_MODULES.has(base) && (kind === 'three' || kind === 'addon')) {
         err(where, imp.line, `${base} must stay free of THREE (pure, node-importable by tools/validate-levels.js)`);
       }

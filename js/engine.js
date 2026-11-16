@@ -1776,6 +1776,8 @@ export class Engine {
       const weapons = ctx.weapons; if (weapons) weapons.render(alpha);
       const troops = ctx.troops; if (troops) troops.render(alpha);
       const hold = ctx.hold; if (hold) hold.render(alpha);
+      const escort = ctx.escort; if (escort) escort.render(alpha);   // 1.5.0 (P3)
+      const chase = ctx.chase; if (chase) chase.render(alpha);   // 1.5.0
       // E — camera, environment scroll, lights, uTime
       const render = ctx.render;
       if (render) render.update(time.dt);
@@ -1850,6 +1852,8 @@ export class Engine {
     const gates = ctx.gates; if (gates) gates.step(dt);
     const pickups = ctx.pickups; if (pickups) pickups.step(dt);
     const hold = ctx.hold; if (hold) hold.step(dt);
+    const escort = ctx.escort; if (escort) escort.step(dt);   // 1.5.0 (P3)
+    const chase = ctx.chase; if (chase) chase.step(dt);   // 1.5.0
   }
 
   /**

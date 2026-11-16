@@ -1567,3 +1567,29 @@ are the package notes kept under `docs/build/r8/` (written at each merge; where 
 - **Tools.** `tools/lib/chrome-lock.js`, `tools/holdsim.js`, `tools/check-save.js`, `package.js --lint` (js/ raw and
   gzip bytes), `validate-levels --to / --type / --rotation`, `smoke --skip / --events / --expect / --matrix`.
 - **Budgets.** js/ at most 3,000,000 B raw and 945,000 B gzip; draw budget unchanged (50 main + 20 shadow + 14 post).
+
+## 18. Round 9 (release 1.5.0): what was added
+
+The package notes are under docs/build/r9/ (P1 hooks, P2 chase, P3 escort, P4 integration); js/data.js is the source of truth.
+
+- **31 ES modules.** New: `js/chase.js` (ChaseSystem, a keepsRun ModeSystem: the gap, DROP, surges, the doors finale; imports
+  `./obstacles.js` and `./chasegen.js`), `js/obstacles.js` (wrecks, the DROP barricade, the gatehouse), `js/chasegen.js` (pure:
+  chaseSpec, the shared gapStep, the idle rule), `js/escort.js` (EscortSystem, keepsRun: the truck, climbers, plates, checkpoint,
+  safe zone) and `js/escortgen.js` (pure, imported only by levelgen: the route, the climber waves, the E1 / E4 idle rules).
+- **keepsRun (level.js).** A ModeSystem with `keepsRun === true` begins at its script.finale event without ending the run: the
+  phase stays 'run' and gates, pickups and waves keep going. A lost keepsRun level's fraction is distance / length. MODE_OF /
+  PREP_OF map chase to ['crowd', 'chase'] and escort to ['escort']; a base whose ctx member is missing plays as a RUN.
+- **Shared hooks.** ctx.world.despawnZ (chase sets 22); fx.label2 (pooled labels pinned to the screen edge); crowd block mode
+  (beginBlock, setFront, killNear, setDrawBudget 700 / 450 / 250); zombies setContactProvider / attach / detach (escort climbers);
+  weapons.setTracerClip; gate ops 'sprint' / 'wall' and gates.setGlyphScale; render rigs 'chase' / 'chaseEnd'; the HUD kit's action
+  button for DROP / PLATE. A mode counts its button presses in stat(out).presses (the C14 "no input" rule reads them).
+- **Generation (levelgen.js).** BASE_STEPS chase / escort; generateRunSteps(L, seed, opts, check): opts.fixed switches the boss
+  fixed-line caps off and `check` is the mode's idle rule inside the attempt loop. eTargetOf: chase 1.12 × E_boss, escort
+  ESCORT.survivorsOf(L).
+- **Level types.** LEVEL_TYPES.chase / .escort enabled; combos stay false and a combo slot plays its `offKey` ('night' for night
+  chase / escort) or its base (night horde plays horde).
+- **Determinism.** Gameplay on ctx.rng / ctx.rngShot and the fixed step (gap, bites, wreck hits, grabs, cover); ctx.rngFx only
+  for the horde units, rear-guard flashes and climber poses. High and Low play identical rows.
+- **Tools.** tools/chasesim.js, tools/escortsim.js, validate-levels chase / escort sections (R5 counted as info while the combos
+  are off), check-save (h) the owner path, smoke --matrix chase / escort cells, check-imports rules for chasegen / escortgen (pure).
+- **Budgets.** js/ at most 3,220,000 B raw and 1,005,000 B gzip (tools/package.js --lint); draw budget unchanged.

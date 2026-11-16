@@ -242,6 +242,8 @@ const HUD_ARM_MS = UIJ.hudArmMs > 0 ? UIJ.hudArmMs : 1000;   // JUICE.ui.hudArmM
 const REAL_DT_MAX = UIJ.realDtMax > 0 ? UIJ.realDtMax : 0.25;
 // r7 (explain:7): results chip order (run.breakdown keys; 'bonus' becomes the ★ and Survivors chips when split)
 const BD_KEYS = Object.freeze(['kills', 'gates', 'piles', 'boss', 'bonus']);
+// 1.5.0: the progress bar's end icon at level:start, per script finale (the rest: the boss skull); hud:progress endIcon may change it
+const END_ICON_OF = Object.freeze({ hold: 'barricade', chase: 'safe', escort: 'flag' });
 // r7 fix (teaching:3): the boss tagline's phrase separators (STRINGS.boss.tagline: " · ", and data.js's DASH — a no-break
 // space, "—", a space), split with the separator kept: each phrase but the last ends with its own mark, glued to its last
 // word by a no-break space, so a wrap comes only after the mark (and _breakTagline then removes it)
@@ -400,6 +402,9 @@ function isBossHint(id) { return typeof id === 'string' && (id.indexOf('boss') =
 
 /** r8 (P7): a night level in NIGHT CITY is a BLACKOUT. */
 function isBlackout(L, type) { return !!type && type.night === true && NIGHT.blackout.districts.indexOf(districtForLevel(L).id) !== -1; }
+
+/** 1.5.0 (P4): the LEVELS legend line 2's type chips, in index.html's order (the ring follows them). */
+const LEGEND2_KEYS = Object.freeze(['horde', 'night', 'chase', 'escort']);
 
 /** r8 (P7): css class of type `key`'s badge (.tt-<LEVEL_TYPES badge>; a BLACKOUT crescent; a night combo's chip); '' for none. */
 function typeBadgeClass(key, blackout) {
@@ -856,7 +861,7 @@ export class UI {
     this._cmpDrive = false;
     this._cmpBase = 0;               // save.data.coins − payout (the wallet before this run)
     this._cmpWalletFrom = 0;         // the header's value when the results appeared
-    this._fail = { level: 1, fraction: 0, coinsKept: 0, cause: '', counted: true, hold: false, holdActions: 0, surgesCleared: 0, kills: 0, total: 0 };   // r8 (P7)
+    this._fail = { level: 1, fraction: 0, coinsKept: 0, idle: false, cause: '', base: '', counted: true, hold: false, holdActions: 0, surgesCleared: 0, kills: 0, total: 0 };   // r8 (P7); 1.5.0: + base
     this._end = { distance: 0, score: 0, best: 0, coins: 0, chunks: 0, newBest: false };
 
     // shop (r7, flow-coins:5: no shop coin tween any more — the one wallet model below drives the HUD, title and shop pills)
@@ -1438,7 +1443,7 @@ export class UI {
     }
     for (const node of doc.querySelectorAll('.hud-label')) this._hlb.push({ node, text: '', x: 0, y: 0, seconds: 0, until: 0, req: false });
     // legend line 2: its chips wear the colours of the badges they explain
-    for (const key of ['horde', 'night']) {
+    for (const key of LEGEND2_KEYS) {
       const chip = q(el.levelsLegend2, '.lg-' + key + ' .tt');
       if (chip) chip.style.setProperty('--tt-color', hexCss(LEVEL_TYPES[key].color));
     }
@@ -2692,9 +2697,11 @@ export class UI {
     if (Number.isFinite(p.level)) f.level = p.level;
     if (Number.isFinite(p.fraction)) f.fraction = p.fraction;
     if (Number.isFinite(p.coinsKept)) f.coinsKept = p.coinsKept;
+    f.idle = !!p.idle;                              // 1.5.0 (C14): a run with no input keeps 0 coins
     // r8 (P7): the cause, whether the fail counted (D30) and the hold's report (no stat: lost before the barricade, it reads as a run)
     const s = p.stat;
     f.cause = p.cause || '';
+    f.base = p.base || '';                          // 1.5.0 (P3): a type's own game-over title per cause (results[base].causes)
     f.counted = p.counted !== false;
     f.hold = !!s && p.base === 'horde';
     f.holdActions = s ? s.holdActions | 0 : 0;
@@ -2820,7 +2827,7 @@ export class UI {
     const key = p.typeKey || 'standard', cfg = this.ctx.config;
     this._runETarget = p.eTarget > 0 ? p.eTarget : 0;
     this._hkSegs = 0; this._hkFilled = 0; this._hkLabel = '';
-    this._hkEnd = p.finale === 'hold' ? 'barricade' : 'skull';
+    this._hkEnd = END_ICON_OF[p.finale] || 'skull';  // 1.5.0: the road's end (a hold's barricade, a chase's safe zone, an escort's flag)
     this._hkProgDirty = true;
     this._hcText = ''; this._hcDirty = true;
     this._anN = 0; this._anDirty = true;
@@ -2961,7 +2968,7 @@ export class UI {
 
   // -------------------------------------------------------------------------------------------
   // r8 (P7) — the HUD KIT, a mode's generic HUD (ARCH §8). Listeners copy the reused payloads; update() writes on change.
-  //   hud:progress { variant 'run' | 'segments', segments 1–6, filled, endIcon 'skull' | 'barricade' | 'none', label }
+  //   hud:progress { variant 'run' | 'segments', segments 1–6, filled, endIcon 'skull' | 'barricade' | 'safe' | 'flag' | 'none', label }
   //   hud:counter  { on, text }
   //   hud:anchors  { n ≤ 6, list [{ id, x, y (CSS px of #app), state, label }] } → a tap in a bubble: ui:anchorTap { id }
   //   hud:action   { on, id, icon, label, badge (−1 none), disabled } → ui:action { id }
@@ -3040,6 +3047,8 @@ export class UI {
     if (this._hkEnd !== this._hkEndShown && sk) {
       this._hkEndShown = this._hkEnd;
       sk.classList.toggle('barricade', this._hkEnd === 'barricade');
+      sk.classList.toggle('safe', this._hkEnd === 'safe');          // 1.5.0
+      sk.classList.toggle('flag', this._hkEnd === 'flag');
       if (!this._runEndless) { this._skullShown = this._hkEnd !== 'none'; sk.hidden = !this._skullShown; }
     }
   }
@@ -4697,9 +4706,11 @@ export class UI {
   _syncLegend2(ring) {
     const lg = this._el.levelsLegend2;
     if (!lg) return;
-    const h = this._typeOn('horde'), n = this._typeOn('night'), it = lg.children;
-    it[0].hidden = !h; it[1].hidden = !n; it[2].hidden = !ring;
-    lg.hidden = !(h || n);
+    const it = lg.children;                          // horde, night, chase, escort chips, then the ring
+    let any = false;
+    for (let i = 0; i < 4; i++) { const on = this._typeOn(LEGEND2_KEYS[i]); it[i].hidden = !on; any = any || on; }
+    it[4].hidden = !ring;
+    lg.hidden = !any;
   }
 
   _buildLevelGrid(grid) {
@@ -5073,7 +5084,7 @@ export class UI {
           this._chip(list, 'bd-bonus bd-stars', STRINGS.common.star.repeat(c.stars), c.bonusStars - prem);
           if (prem > 0) this._chip(list, 'bd-bonus bd-type', R.bonus, prem);
           this._chip(list, 'bd-bonus bd-survivors', B.survivors, c.bonusSurv);
-          if (c.bonusMode > 0) this._chip(list, 'bd-bonus bd-type', RS.horde.lineHeld, c.bonusMode);
+          if (c.bonusMode > 0) this._chip(list, 'bd-bonus bd-type', (R && R.bonusMode) || RS.horde.lineHeld, c.bonusMode);   // 1.5.0: a type's own chip name
           continue;
         }
         this._chip(list, 'bd-' + key, B[key], c[key] | 0);
@@ -5201,14 +5212,20 @@ export class UI {
     // r8 (P7): a Horde run lost at the barricade names its cause and how far it got ("SURGE 2/3 · 6,820 OF 10,200 ZOMBIES · Coins
     // kept +N"); a fail with no play under it gets the coaching line (D30)
     const RS = STRINGS.types.results, H = RS.horde, hold = f.hold;
-    const title = hold ? (f.cause === 'overrun' ? H.overrun : H.lost) : STRINGS.gameover.title;
+    const TR = !hold && f.base && RS[f.base] && RS[f.base].causes ? RS[f.base] : null;   // 1.5.0 (P3): TRUCK OVERRUN
+    const title = hold ? (f.cause === 'overrun' ? H.overrun : H.lost) : (TR && TR.causes[f.cause] ? TR.causes[f.cause] : STRINGS.gameover.title);
     if (el.gameoverTitle) { el.gameoverTitle.textContent = title; el.gameoverTitle.classList.toggle('long', title.length > STRINGS.gameover.title.length); }
     const n = HORDE_GEN.surges.count;
     if (el.gameoverInfo) {
-      if (hold) this._fillParts(el.gameoverInfo, H.surge(Math.min(n, f.surgesCleared + 1), n), f.total > 0 ? H.of(fmtCoins(f.kills), fmtCoins(f.total)) : H.down(fmtCoins(f.kills)), H.kept(fmtCoins(f.coinsKept)));
-      else el.gameoverInfo.textContent = STRINGS.gameover.info(Math.round(clamp(f.fraction, 0, 1) * 100), fmtCoins(f.coinsKept));
+      if (hold) this._fillParts(el.gameoverInfo, H.surge(Math.min(n, f.surgesCleared + 1), n), f.total > 0 ? H.of(fmtCoins(f.kills), fmtCoins(f.total)) : H.down(fmtCoins(f.kills)), f.idle ? H.idle : H.kept(fmtCoins(f.coinsKept)));
+      else {
+        const pct = Math.round(clamp(f.fraction, 0, 1) * 100);   // 1.5.0 (C14): 'Half kept +238', or 'No input: 0 coins'
+        el.gameoverInfo.textContent = f.idle ? STRINGS.gameover.idle(pct) : STRINGS.gameover.info(pct, fmtCoins(f.coinsKept));
+      }
     }
-    const tip = hold ? (f.holdActions < LEVELS.curve.assist.holdActions ? H.tip : '') : (f.counted ? '' : RS.steer);
+    // 1.5.0 (P3): a type's own tip (escort) on any loss with input, the steer line without
+    const tip = hold ? (f.holdActions < LEVELS.curve.assist.holdActions ? H.tip : '')
+      : TR && TR.tip ? (f.idle ? RS.steer : TR.tip) : (f.counted ? '' : RS.steer);
     if (el.gameoverTip) { el.gameoverTip.textContent = tip; el.gameoverTip.hidden = !tip; }
     // round 7 (r7, from balance:10): RETRY after a failure plays a new road (seed 1000 + L + 100·failures); the authored L1
     // always replays its own, so it gets no note

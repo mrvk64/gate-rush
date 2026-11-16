@@ -1576,6 +1576,22 @@ export class TextureFactory {
         rr(-8, 2, 16, 13.5, 1.5, PALETTE.crate.body);
         seam(-8, 8.75, 8, 8.75);
       },
+      // 1.5.0 row2: planks (two boards nailed across: chase's DROP barricade), plate (a riveted steel sheet: escort's PLATE)
+      planks() {
+        frame(0, -6, -0.14, 1, () => rr(-15, -4.5, 30, 9, 1.5, PALETTE.crate.body));
+        frame(0, 6, 0.1, 1, () => rr(-15, -4.5, 30, 9, 1.5, PALETTE.crate.body));
+        circle(-9.5, -5, 1.7, METAL_DK); circle(9.5, -7.5, 1.7, METAL_DK); circle(-9.5, 5.5, 1.7, METAL_DK); circle(9.5, 6.5, 1.7, METAL_DK);
+      },
+      plate() {
+        rr(-14, -11, 28, 22, 2.5, METAL);
+        seam(-14, -2, 14, -2);
+        circle(-10, -7, 1.8, METAL_DK); circle(10, -7, 1.8, METAL_DK); circle(-10, 7, 1.8, METAL_DK); circle(10, 7, 1.8, METAL_DK);
+      },
+      // 1.5.0 row2: sprint (two white forward chevrons: chase's » gate, read up the road)
+      sprint() {
+        poly([-14, 2, -2, -12, 10, 2, 4, 2, -2, -5, -8, 2], HI);
+        poly([-14, 13, -2, -1, 10, 13, 4, 13, -2, 6, -8, 13], HI);
+      },
       // coins: a gold coin with an inner rim and a glint
       coins() {
         circle(0, 0, 14.5, PALETTE.ui.coin);
@@ -3213,8 +3229,10 @@ export class RenderSystem {
       // portrait wallFrac: the pitch that puts the ground at wallZ at wallFrac of the height with this aspect's FOV
       const rly = RP.wallFrac > 0 ? RP.pos[1] - (RP.pos[2] - RP.look[2]) * Math.tan(Math.atan2(RP.pos[1], RP.pos[2] - RP.wallZ)
         - Math.atan((2 * RP.wallFrac - 1) * Math.tan(this._fovP * DEG * 0.5))) : RP.look[1];
-      px = lerp(px, lerp(RP.pos[0], RL.pos[0], pt), rt); py = lerp(py, lerp(RP.pos[1], RL.pos[1], pt), rt); pz = lerp(pz, lerp(RP.pos[2], RL.pos[2], pt), rt);
-      lx = lerp(lx, lerp(RP.look[0], RL.look[0], pt), rt); ly = lerp(ly, lerp(rly, RL.look[1], pt), rt); lz = lerp(lz, lerp(RP.look[2], RL.look[2], pt), rt);
+      // 1.5.0: a rig's follow [pos, look] × the followed squad x
+      const fp = RP.follow ? lerp(RP.follow[0], RL.follow ? RL.follow[0] : 0, pt) * this._camX : 0, fl = RP.follow ? lerp(RP.follow[1], RL.follow ? RL.follow[1] : 0, pt) * this._lookX : 0;
+      px = lerp(px, lerp(RP.pos[0], RL.pos[0], pt) + fp, rt); py = lerp(py, lerp(RP.pos[1], RL.pos[1], pt), rt); pz = lerp(pz, lerp(RP.pos[2], RL.pos[2], pt), rt);
+      lx = lerp(lx, lerp(RP.look[0], RL.look[0], pt) + fl, rt); ly = lerp(ly, lerp(rly, RL.look[1], pt), rt); lz = lerp(lz, lerp(RP.look[2], RL.look[2], pt), rt);
       fov = lerp(fov, lerp(this._fovP, verticalFov(RL.hFovDeg, cam.aspect, RL.fovClamp), pt), rt);
     }
 

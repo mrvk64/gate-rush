@@ -102,6 +102,7 @@ const GLOW_PULSE_HZ = GATE_RULES.glow.pulseHz;       // slow breathing of the gl
 const GLOW_PULSE_AMP = GATE_RULES.glow.pulseAmp;
 const TEXT_FIT = GATE_RULES.glyph.fit;               // value text never wider than 90 % of the panel (triples)
 const ICON_H = GATE_RULES.glyph.h4;   // item lane icon quad size (m): the 4-glyph text height
+const SPECIAL_ICON = 1.05;            // 1.5.0: a sprint / plank pictogram is this × its digits' height (square quad)
 const INERT_POP_TIME = -1e4;          // iPopTime value that never pops in-shader (pop is done in the matrix)
 const Z_GLOW = -0.05;                 // glow quad sits just behind the panel (−Z = away from the camera)
 const Z_GLYPH = 0.03;                 // glyph / icon quads sit just in front of the panel
@@ -126,6 +127,8 @@ const INTAKE_CAP = GATE_RULES.intakePerSec * INTAKE_WINDOW_S;   // weighted hits
 // projects whether it reaches that goal before WORLD.gateStopZ at the rate it is being shot (GATE_RULES.reach): iPanel.w carries
 // ring01 + REACH_FLAG when it will (materials.js decodes it; the same program, no new variant)
 const REACH_FLAG = 2;
+// 1.5.0: an × / ÷ step shows its ring closed for this share of GATE_RULES.fx.stepPunchTime (0.125 s), then the remainder
+const RING_CLOSE = 0.5;
 const REACH_TAU_S = GATE_RULES.reach.rateTauS;        // weighted-hits/s EMA time constant
 const REACH_MIN_RATE = GATE_RULES.reach.minRate;      // below this a gate is not "being shot" (no projection)
 const INTAKE_PER_SEC = GATE_RULES.intakePerSec;
@@ -148,14 +151,16 @@ const SINK_RATE = SINK && SINK.rate > 0 ? SINK.rate : 2;
 const SINK_FREE_Y = GATE_RULES.panel.bottom + GATE_RULES.panel.h + GATE_RULES.glyph.badgeLift + GATE_RULES.glyph.icon * 0.5;
 
 // Op / layout / state vocabularies (indices into the typed arrays ↔ contract strings)
-const OP_PLUS = 0, OP_MINUS = 1, OP_MULT = 2, OP_DIV = 3, OP_ITEM = 4;
-const OP_STR = ['+', '-', 'x', '/', 'item'];
+const OP_PLUS = 0, OP_MINUS = 1, OP_MULT = 2, OP_DIV = 3, OP_ITEM = 4, OP_SPRINT = 5, OP_WALL = 6;
+// 1.5.0 (chase §4): 'sprint' (» metres, filled toward 2× like a + gate) and 'wall' (a PLANK lane: barricade charges, one step
+// like a × gate) never change the count; gate:pass reports the op and value (chase.js applies them)
+const OP_STR = ['+', '-', 'x', '/', 'item', 'sprint', 'wall'];
 const LAYOUT_STR = ['single', 'pair', 'triple'];
 const ST_FAR = 0, ST_ARMED = 1, ST_LOCKED = 2, ST_PASSED = 3, ST_MISSED = 4;
 const STATE_STR = ['far', 'armed', 'locked', 'passed', 'missed'];
 // Type (colour) indices — GATE_RULES.colors key order; shared with the materials.js gateFrame / gatePanel shaders
-const T_PLUS = 0, T_MULT = 1, T_MINUS = 2, T_DIV = 3, T_ZERO = 4, T_ITEM = 5;
-const TYPE_KEYS = ['plus', 'mult', 'minus', 'div', 'zero', 'item'];
+const T_PLUS = 0, T_MULT = 1, T_MINUS = 2, T_DIV = 3, T_ZERO = 4, T_ITEM = 5, T_SPRINT = 6, T_WALL = 7;
+const TYPE_KEYS = ['plus', 'mult', 'minus', 'div', 'zero', 'item', 'sprint', 'wall'];
 const MAX_FLAG = 8;                   // iPanel.x += 8 when maxed (gold MAX pill, materials.js)
 
 // Glyph indices into the per-glyph UV cache (RENDER.atlas rows: digits 0–9, then the op/badge row)
@@ -381,6 +386,9 @@ export class Gates {
     this._digitH = new Float32Array(N);      // digit quad height (m), after the fit-to-panel shrink
     this._opH = new Float32Array(N);         // op glyph quad height (m)
     this._textW = new Float32Array(N);       // total text advance (m)
+    this._textDx = new Float32Array(N);      // 1.5.0: text block centre / icon offsets from the panel centre (m; sprint / plank: icon + digits)
+    this._iconDx = new Float32Array(N);
+    this._glyphScale = 1;                    // 1.5.0: setGlyphScale (a farther camera); reset() restores 1
     this._hasBadge = new Uint8Array(N);
     this._textDirty = new Uint8Array(N);
     this._textFade = new Float32Array(N).fill(1);   // round-3 FTUE: 1 = value text drawn, → 0 while under the count label
@@ -698,7 +706,7 @@ export class Gates {
   /** Step cost (weighted hits) of the NEXT step of a gate: x → K_M scales with the current multiplier
    *  (GDD §4.2: L1 x2→x3 52 hits, x3→x4 77 more); ÷ → K_÷ per rung, 2·K_÷ for the x1 → x2 flip. */
   _stepNeed(g) {
-    if (this._op[g] === OP_MULT) {
+    if (this._op[g] === OP_MULT || this._op[g] === OP_WALL) {
       const bm = this._baseMult[g] > 0 ? this._baseMult[g] : 1;
       return Math.max(1, Math.round(this._stepCost[g] * this._mult[g] / bm));
     }
@@ -709,7 +717,7 @@ export class Gates {
 
   /** _stepNeed(g) into NEED[0] (render: no double return value to box). */
   _stepNeedTo(g) {
-    if (this._op[g] === OP_MULT) {
+    if (this._op[g] === OP_MULT || this._op[g] === OP_WALL) {
       const bm = this._baseMult[g] > 0 ? this._baseMult[g] : 1;
       NEED[0] = Math.max(1, Math.round(this._stepCost[g] * this._mult[g] / bm));
       return;
@@ -721,8 +729,8 @@ export class Gates {
   /** The current display value of a gate: '+' / '−' → signed integer value; 'x' → multiplier; '/' → divisor (or flipTo). */
   _displayValue(g) {
     const op = this._op[g];
-    if (op === OP_PLUS || op === OP_MINUS) return intValueAt(this._valueF, g);
-    if (op === OP_MULT) return this._mult[g];
+    if (op === OP_PLUS || op === OP_MINUS || op === OP_SPRINT) return intValueAt(this._valueF, g);
+    if (op === OP_MULT || op === OP_WALL) return this._mult[g];
     if (op === OP_DIV) return this._flipped[g] ? this._mult[g] : GATE_RULES.div.ladder[this._divStage[g]];
     return 0;
   }
@@ -731,6 +739,8 @@ export class Gates {
   _typeIdx(g) {
     const op = this._op[g];
     if (op === OP_ITEM) return T_ITEM;
+    if (op === OP_SPRINT) return T_SPRINT;
+    if (op === OP_WALL) return T_WALL;
     if (op === OP_PLUS) return T_PLUS;
     if (op === OP_MULT) return T_MULT;
     if (op === OP_MINUS) {
@@ -986,7 +996,8 @@ export class Gates {
       this._evGates[e * 3 + l] = g;
 
       const opStr = lane.op;
-      const op = opStr === '+' ? OP_PLUS : opStr === '-' ? OP_MINUS : opStr === 'x' ? OP_MULT : opStr === '/' ? OP_DIV : OP_ITEM;
+      const op = opStr === '+' ? OP_PLUS : opStr === '-' ? OP_MINUS : opStr === 'x' ? OP_MULT : opStr === '/' ? OP_DIV
+        : opStr === 'sprint' ? OP_SPRINT : opStr === 'wall' ? OP_WALL : OP_ITEM;
       const raw = lane.value !== undefined && lane.value !== null ? +lane.value : 0;
       const value = Math.abs(Math.round(raw));        // magnitudes; the op carries the sign
       this._op[g] = op;
@@ -1049,6 +1060,15 @@ export class Gates {
         this._cap[g] = lane.cap > 0 ? lane.cap : GATE_RULES.div.flipTo;
         this._stepCost[g] = lane.step > 0 ? lane.step : GATE_RULES.div.stepMin;
         this._valueF[g] = ladder[stage]; this._flipCap[g] = 0;
+      } else if (op === OP_SPRINT) {
+        // 1.5.0: metres, +1 per `step` weighted hits up to cap (2 × base), then MAX
+        this._valueF[g] = value; this._cap[g] = lane.cap > value ? lane.cap : 2 * value; this._stepCost[g] = lane.step > 0 ? lane.step : 10;
+        this._flipCap[g] = 0; this._mult[g] = 1; this._baseMult[g] = 1; this._divStage[g] = 0;
+      } else if (op === OP_WALL) {
+        // 1.5.0: barricade charges, one step at `step` weighted hits (the × gate's rule from ×1), MAX at cap
+        const m = value >= 1 ? value : 1;
+        this._mult[g] = m; this._baseMult[g] = m; this._base[g] = m; this._cap[g] = lane.cap > m ? lane.cap : m + 1;
+        this._stepCost[g] = lane.step > 0 ? lane.step : 20; this._valueF[g] = m; this._flipCap[g] = 0; this._divStage[g] = 0;
       } else {
         this._valueF[g] = 0; this._cap[g] = 0; this._flipCap[g] = 0; this._stepCost[g] = 0; this._mult[g] = 1; this._baseMult[g] = 1; this._divStage[g] = 0;
       }
@@ -1117,11 +1137,11 @@ export class Gates {
     const coinPerHit = GATE_RULES.plus.coinPerHit;
     let maxedNow = false, flippedNow = false, steps = 0;
 
-    if (op === OP_PLUS) {
+    if (op === OP_PLUS || op === OP_SPRINT) {
       if (this._maxed[g]) {
         this._maxCoinAcc[g] += w * coinPerHit;                 // every weighted hit past MAX pays
       } else {
-        this._valueF[g] += w;                                  // +1 per weighted hit
+        this._valueF[g] += op === OP_PLUS ? w : w / this._stepCost[g];   // +1 per weighted hit (1.5.0: a sprint +1 m per step hits)
         const cap = this._cap[g];
         if (this._valueF[g] >= cap - EPS) {
           this._maxCoinAcc[g] += (this._valueF[g] - cap) * coinPerHit;   // the part of this hit beyond the cap
@@ -1139,7 +1159,7 @@ export class Gates {
       }
       const cap = this._flipCap[g];
       if ((this._flipped[g] || flippedNow) && this._valueF[g] > cap) this._valueF[g] = cap;
-    } else if (op === OP_MULT) {
+    } else if (op === OP_MULT || op === OP_WALL) {
       if (this._mult[g] < this._cap[g]) {
         this._hits[g] += w;
         let need = this._stepNeed(g);
@@ -1149,7 +1169,7 @@ export class Gates {
           steps++;
           need = this._stepNeed(g);
         }
-        if (this._mult[g] >= this._cap[g]) this._hits[g] = 0;
+        if (this._mult[g] >= this._cap[g]) { this._hits[g] = 0; if (op === OP_WALL && !this._maxed[g]) maxedNow = true; }   // 1.5.0: a full PLANK gate reads MAX
       }
     } else if (op === OP_DIV) {
       if (!this._flipped[g]) {
@@ -1194,7 +1214,7 @@ export class Gates {
       // one emit per hit even when a heavy hit (rocket / rail) crossed several steps; mult = the new
       // multiplier ('x') or the new rung's divisor ('/': 2, then 1 for the grey x1)
       P_STEP.gate = view;
-      P_STEP.mult = op === OP_MULT ? this._mult[g] : GATE_RULES.div.ladder[this._divStage[g]];
+      P_STEP.mult = op === OP_MULT || op === OP_WALL ? this._mult[g] : GATE_RULES.div.ladder[this._divStage[g]];
       events.emit('gate:step', P_STEP);
     }
     if (flippedNow) { P_GATE.gate = view; events.emit('gate:flip', P_GATE); }
@@ -1221,6 +1241,7 @@ export class Gates {
     const world = ctx.world;
     const roadSpeed = world ? world.roadSpeed : 0;
     const dz = roadSpeed * dt;
+    const despawnZ = world && world.despawnZ > 0 ? world.despawnZ : WORLD.despawnZ;   // 1.5.0: a mode may move it (level resets it)
     const squad = ctx.squad || null;
     // Round 7 (r7 controls:1, the tester's "-104 nearly taken on L9"): the lane the player is STEERING TO (input.targetX — intent),
     // not where the squad centre happens to be on its way there, picks the lane highlight decal (from WORLD.laneDecalZ), the commit
@@ -1256,7 +1277,7 @@ export class Gates {
       const z = this._z[g0];
       const centers = this._laneTables[this._evLayout[e]];
 
-      if (z > WORLD.despawnZ) { this._freeEvent(e); continue; }
+      if (z > despawnZ) { this._freeEvent(e); continue; }
 
       if (this._evDecorative[e]) {
         // title idle scene: never arms, never commits, never passes; far → missed at z ≥ 0; no events, no decal; freed
@@ -1380,8 +1401,8 @@ export class Gates {
   /** Magnitude passed to squad.applyGate with _effectiveOp (a flipped ÷ is 'x' flipTo, never '/' 2). */
   _effectiveValue(g) {
     const op = this._op[g];
-    if (op === OP_PLUS || op === OP_MINUS) return Math.abs(intValueAt(this._valueF, g));
-    if (op === OP_MULT) return this._mult[g];
+    if (op === OP_PLUS || op === OP_MINUS || op === OP_SPRINT) return Math.abs(intValueAt(this._valueF, g));
+    if (op === OP_MULT || op === OP_WALL) return this._mult[g];
     if (op === OP_DIV) return this._flipped[g] ? this._mult[g] : GATE_RULES.div.ladder[this._divStage[g]];
     return 0;
   }
@@ -1402,7 +1423,7 @@ export class Gates {
   /** Pass op string reported on gate:pass / other: item; flipped '−' → '+'; '/' keeps '/' (flipped ⇒ "x2", ARCH §6.12). */
   _passOpStr(g) {
     const op = this._op[g];
-    if (op === OP_ITEM) return 'item';
+    if (op === OP_ITEM || op === OP_SPRINT || op === OP_WALL) return OP_STR[op];
     if (op === OP_DIV) return '/';
     return OP_STR[this._effectiveOp(g)];
   }
@@ -1421,6 +1442,8 @@ export class Gates {
     if (op === OP_ITEM) {
       if (ctx.pickups && typeof ctx.pickups.grantItem === 'function' && this._item[g]) ctx.pickups.grantItem(this._item[g], x, 0);
       if (squad && typeof squad.setInvulnerable === 'function') squad.setInvulnerable(SQUAD.invulnOnPass);
+    } else if (op === OP_SPRINT || op === OP_WALL) {
+      if (squad && typeof squad.setInvulnerable === 'function') squad.setInvulnerable(SQUAD.invulnOnPass);   // 1.5.0: the count stays (gate:pass carries op / value)
     } else if (squad && typeof squad.applyGate === 'function') {
       const r = squad.applyGate(OP_STR[this._effectiveOp(g)], this._effectiveValue(g), x, z);
       if (r) { before = r.before; after = r.after; }                 // reused object: copied immediately
@@ -1532,9 +1555,33 @@ export class Gates {
     const idx = this._glyphIdx;
     const op = this._op[g];
     let n = 0;
-    this._hasIcon[g] = 0; this._hasBadge[g] = 0; this._hasOp[g] = 0;
+    this._hasIcon[g] = 0; this._hasBadge[g] = 0; this._hasOp[g] = 0; this._textDx[g] = 0; this._iconDx[g] = 0;
 
-    if (op === OP_ITEM) {
+    if (op === OP_SPRINT || op === OP_WALL) {
+      // 1.5.0 (chase §4): the » / planks pictogram, then the digits, centred together
+      if (this._iconUVOk) {
+        try {
+          this.ctx.render.textures.iconUV(op === OP_SPRINT ? 'sprint' : 'planks', UV_OUT);
+          if (UV_OUT.u1 > UV_OUT.u0) {
+            this._iconUV[g * 4] = UV_OUT.u0; this._iconUV[g * 4 + 1] = UV_OUT.v0; this._iconUV[g * 4 + 2] = UV_OUT.u1; this._iconUV[g * 4 + 3] = UV_OUT.v1;
+            this._hasIcon[g] = 1;
+          }
+        } catch (_) { this._hasIcon[g] = 0; }
+      }
+      let d = this._displayValue(g);
+      if (d > 99) d = 99;
+      const nd = d >= 10 ? 2 : 1;
+      for (let k = nd - 1; k >= 0; k--) { idx[base + k] = d % 10; d = (d / 10) | 0; }
+      n = nd;
+      this._textCount[g] = n;
+      let digitH = GATE_RULES.glyph.h3 * this._glyphScale, iconW = this._hasIcon[g] ? digitH * SPECIAL_ICON : 0, w = 0;
+      for (let k = 0; k < n; k++) w += this._glyphAdv[idx[base + k]] * digitH;
+      const maxW = GATE_RULES.panel.w * (this._layout[g] === 2 ? GATE_RULES.panel.wTriple / GATE_RULES.panel.w : 1) * TEXT_FIT;
+      if (w + iconW > maxW && w + iconW > 0) { const sc = maxW / (w + iconW); digitH *= sc; iconW *= sc; w *= sc; }
+      this._digitH[g] = digitH; this._opH[g] = digitH; this._textW[g] = w;
+      this._iconDx[g] = -(w + iconW) * 0.5 + iconW * 0.5; this._textDx[g] = iconW * 0.5;
+      if (this._maxed[g]) { idx[base + n++] = G_M; idx[base + n++] = G_A; idx[base + n++] = G_X; this._hasBadge[g] = 1; }
+    } else if (op === OP_ITEM) {
       // item lane: icon quad (TextureFactory.icons) instead of text
       const item = this._item[g];
       if (this._iconUVOk && item) {
@@ -1566,10 +1613,10 @@ export class Gates {
       for (let k = nd - 1; k >= 0; k--) { idx[base + n + k] = d % 10; d = (d / 10) | 0; }
       n += nd;
       this._textCount[g] = n;
-      let digitH = nd <= 3 ? GATE_RULES.glyph.h3 : GATE_RULES.glyph.h4;
+      let digitH = (nd <= 3 ? GATE_RULES.glyph.h3 : GATE_RULES.glyph.h4) * this._glyphScale;
       // × / ÷ at GATE_RULES.glyph.opMultDiv (the ÷ dots must survive at decision distance), + / − at glyph.icon;
       // every quad is centred on the panel's mid-line, so the op glyph stays vertically centred on the digits
-      let opH = opG === G_TIMES || opG === G_DIV ? GATE_RULES.glyph.opMultDiv : GATE_RULES.glyph.icon;
+      let opH = (opG === G_TIMES || opG === G_DIV ? GATE_RULES.glyph.opMultDiv : GATE_RULES.glyph.icon) * this._glyphScale;
       let w = 0;
       for (let k = 0; k < n; k++) w += this._glyphAdv[idx[base + k]] * (k === 0 && this._hasOp[g] ? opH : digitH);
       const maxW = GATE_RULES.panel.w * (this._layout[g] === 2 ? GATE_RULES.panel.wTriple / GATE_RULES.panel.w : 1) * TEXT_FIT;
@@ -1735,19 +1782,21 @@ export class Gates {
       const stripe = Math.max(curNeg, fromNeg * Math.max(0, 1 - u * 2));
       // ring gauge: x → weighted hits toward the next step (1 at the cap); ÷ → progress to the next rung (1 flipped, and 1 on the
       // ×1 rung when that rung is final — round 7, DIV_TOP_FINAL); round 7 (r7 teaching:4) + → progress from the spawn value to MAX
-      // (0 once maxed: the gold MAX badge takes over); − → progress from the spawn value to 0, the flip (1 once flipped)
-      const isMD = op === OP_MULT || op === OP_DIV ? 1 : 0;
-      const isPlus = op === OP_PLUS && !maxed ? 1 : 0;
+      // (1.5.0: 1 once maxed, the closed ring goes gold with the MAX badge); − → progress from the spawn value to 0, the flip (1 once
+      // flipped). 1.5.0: an × / ÷ step shows the ring closed for RING_CLOSE of the step punch before it drops to the remainder
+      const isMD = op === OP_MULT || op === OP_DIV || op === OP_WALL ? 1 : 0;
+      const isPlus = op === OP_PLUS || op === OP_SPRINT ? 1 : 0;
       const isMinus = op === OP_MINUS ? 1 : 0;
       const divTop = op === OP_DIV && this._divStage[g] >= DIV_LAST && (DIV_TOP_FINAL || this._cap[g] <= 1) ? 1 : 0;
-      const full = (op === OP_MULT && this._mult[g] >= this._cap[g]) || (op === OP_DIV && this._flipped[g] === 1) || divTop === 1 ? 1 : 0;
+      const full = ((op === OP_MULT || op === OP_WALL) && this._mult[g] >= this._cap[g]) || (op === OP_DIV && this._flipped[g] === 1) || divTop === 1 ? 1 : 0;
       if (isMD === 1) this._stepNeedTo(g); else NEED[0] = 1;
       const vF = this._valueF[g], hits = this._hits[g];
       const baseV = this._base[g];
       const mdRing = Math.min(1, Math.max(full, hits / NEED[0]));
-      const plusRing = Math.min(1, Math.max(0, (vF - baseV) / Math.max(1, this._cap[g] - baseV)));
+      const plusRing = maxed ? 1 : Math.min(1, Math.max(0, (vF - baseV) / Math.max(1, this._cap[g] - baseV)));
       const minusRing = Math.min(1, Math.max(0, 1 + vF / Math.max(1, baseV)));
-      const ring = isMD * mdRing + isPlus * plusRing + isMinus * minusRing;
+      const closeK = isMD === 1 && su >= 0 && su < RING_CLOSE ? 1 : 0;
+      const ring = Math.max(closeK, isMD * mdRing + isPlus * plusRing + isMinus * minusRing);
       // reach (round 7, r7 teaching:4 part 2): at the rate this gate is being shot (the accepted weighted hits/s EMA, at most the
       // intake budget) does it reach its goal before WORLD.gateStopZ? a red gate → the flip, + → MAX, × → its next step, ÷ → the
       // ×1 rung (never the ×2 flip, unreachable by design). Integer flags scale the double terms (QA GAT-9: no double phis)
@@ -1758,7 +1807,7 @@ export class Gates {
       const reachI = shot * (
         isMinus * (this._flipped[g] === 0 && vF + add >= -EPS ? 1 : 0)
         + isPlus * (vF + add >= this._cap[g] - EPS ? 1 : 0)
-        + (op === OP_MULT ? 1 : 0) * (hits + add >= NEED[0] - EPS ? 1 : 0)
+        + (op === OP_MULT || op === OP_WALL ? 1 : 0) * (hits + add >= NEED[0] - EPS ? 1 : 0)
         + (op === OP_DIV && this._flipped[g] === 0 ? 1 : 0) * (hits + add >= divGoal - EPS ? 1 : 0));
       iPanel[po] = tintIdx + (maxed ? MAX_FLAG : 0);
       iPanel[po + 1] = stripe;
@@ -1786,7 +1835,7 @@ export class Gates {
         const popU = (t - this._popTime[g]) / popTime;
         // J3: 1 + 0.28·decay over 120 ms; J6: 1.5× on a step — the larger of the two
         const pop = Math.max(1 + popAmp * (1 - popU) * (popU >= 0 && popU < 1 ? 1 : 0), 1 + stepPopM1 * stepK);
-        PEN[0] = x - this._textW[g] * 0.5;
+        PEN[0] = x + this._textDx[g] - this._textW[g] * 0.5;
         const zq = zr + Z_GLYPH;
         // round-3 FTUE label yield: the op + digit block fades while it overlaps the count label on screen (the glyph
         // shader fades a quad out once its colour peak drops under its knee) and comes back when the overlap ends.
@@ -1858,7 +1907,8 @@ export class Gates {
 
       // ---- item icon quad (pentagon-top "special" lane, GDD §4.1): slow breathing so it reads as a pickup ----
       if (this._hasIcon[g]) {
-        const s = ICON_H * (1 + GLOW_PULSE_AMP * 0.5 * Math.sin(t * pulseW * 2 + this._glowPhase[g]));
+        const spc = op === OP_SPRINT || op === OP_WALL ? 1 : 0;   // 1.5.0: a sprint / plank pictogram sits left of its digits, steady
+        const s = (1 - spc) * ICON_H * this._glyphScale * (1 + GLOW_PULSE_AMP * 0.5 * Math.sin(t * pulseW * 2 + this._glowPhase[g])) + spc * this._digitH[g] * SPECIAL_ICON;
         const zi = zr + Z_GLYPH;
         // round 7 (r7 S5 "flame gate: burn icon on the count"): the pictogram of the lane being passed yields to the count label
         // like value text does — in the last metres the flamer's flame sat right behind the count and read as a burn status on
@@ -1884,7 +1934,7 @@ export class Gates {
           tfI = tfI < 0 ? 0 : (tfI > 1 ? 1 : tfI);
           this._textFade[g] = tfI;
         }
-        MA[0] = x; MA[1] = panelY + sy; MA[2] = zi; MA[3] = s; MA[4] = s; MA[5] = 1;
+        MA[0] = x + this._iconDx[g]; MA[1] = panelY + sy; MA[2] = zi; MA[3] = s; MA[4] = s; MA[5] = 1;
         setMat(im, nI);
         const uo = g * 4, qo = nI * 4, co = nI * 3;
         iIconUV[qo] = this._iconUV[uo]; iIconUV[qo + 1] = this._iconUV[uo + 1]; iIconUV[qo + 2] = this._iconUV[uo + 2]; iIconUV[qo + 3] = this._iconUV[uo + 3];
@@ -1942,6 +1992,7 @@ export class Gates {
   reset() {
     if (!this._inited) return;
     this._fx = this.ctx.fx || null;
+    this._glyphScale = 1;
     for (let i = this._evLiveCount - 1; i >= 0; i--) this._freeEvent(this._evLiveSlots[i]);
     this._evLiveCount = 0;
     for (let g = 0; g < GATE_POOL; g++) {
@@ -1961,6 +2012,14 @@ export class Gates {
     this.glows.count = 0; this.glows.visible = false;
     this.glyphs.count = 0; this.glyphs.visible = false;
     this.icons.count = 0; this.icons.visible = false;
+  }
+
+  /** 1.5.0 (chase §1.1): every gate glyph × s (a farther camera keeps them ≈ 29 px); reset() restores 1. */
+  setGlyphScale(s) {
+    const v = s > 0 ? s : 1;
+    if (v === this._glyphScale) return;
+    this._glyphScale = v;
+    for (let i = 0; i < this._liveCount; i++) this._textDirty[this._liveSlots[i]] = 1;
   }
 
   /** Removes the meshes from the scene and disposes everything this module created (shared library materials are kept). */

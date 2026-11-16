@@ -1,0 +1,39 @@
+P1 FIX 3 (HULK TWINS REACH) - LEAD DECISION NEEDED
+====================================================
+Status: twinR 1.25 is in the code (js/data.js HORDE.fire.twinR, js/hold.js _bossR) and, since the fix pass, also in the model
+(tools/holdsim.js RULES.twinR, used for a twins archetype). It does NOT meet PLAN P1 check 4. P1 did not add a new lever,
+because the next step is a design / balance choice, not a code fix.
+
+THE NUMBERS (holdmx L29 / L39 / L59, 16 seeds x strongj + human runs, ranks max, 32 runs per cell; twins/*.jsonl)
+                 wiper (oscillator) clears   aimerR mean ttk (s)     holdHuman mean ttk (s)
+  1.4.0 (1.77)   10 / 14 / 20                26.7 / 27.6 / 30.0      26.0 / 26.3 / 28.1
+  twinR 1.25     7 / 11 / 20                 26.9 / 27.9 / 30.1      26.4 / 26.4 / 28.3
+  twinR 1.20     7 / 12 / 20                 27.8 / 28.5 / 30.4      27.0 / 27.4 / 29.0   (aimer +1.1 s on L29)
+  Target: wiper <= 4/32 on L39 and L59, aimers within 1 s of today. 1.25 keeps the aimers in range but leaves L59 at 20/32.
+
+WHY REACH CANNOT GET THERE (twins-p1.jsonl, kill time after spawn)
+  L39  wiper 28.8-44.0 s   aimerR 24.7-31.4 s
+  L59  wiper 32.3-42.9 s   aimerR 25.9-36.3 s     enrage at 40.9 s (enrageS 20 + valve extraByArchetype.hulkTwins 8)
+  The two kill-time ranges overlap. The wiper's turnarounds (about +-3 m) sit next to the Twins (+-2.2 m), so a narrower column
+  slows the aimer almost as much as the wiper (fixes.txt model: no radius reaches the single boss's 0.39 wiper/aimer ratio).
+  On L59 the wiper also wins 7 of its 20 clears after the enrage, so an earlier enrage alone would not stop it either. Moving
+  the enrage to about 33 s would hit the L59 aimer's slow tail (33-36 s) first.
+
+OPTIONS
+  A (recommended, no cost now). Ship twinR 1.25 as a partial fix: L29 / L39 wipers lose 3 more runs out of 32, and nothing
+     moves outside the Twins holds. PLAN amendment, P1 check 4: "Pass: the aimers' kill times stay within 1 s of today and the
+     wiper clears no more than today. The <= 4/32 target moves to 1.5.1." Add a 1.5.1 item: a Twins lever that separates the
+     wiper from the aimer.
+  B (1.5.1 candidates, each needs its own holdmx L29/L39/L59 run, about 15 min of Chrome per variant):
+     B1. Boss share only for the Twin the lane stands on: an in-lane shooter feeds a Twin's share only while the lane centre
+         is within about 0.8 m of that Twin (the aimer keeps all of it; a sweep gets it only while passing through). Out-of-lane
+         shooters keep betaOut. Change: about 6 lines in hold.js _shot / _bossColumn plus the same in holdsim.js.
+     B2. A per-Twin enrage: each Twin enrages on its own clock from its own arrival, or the survivor enrages when its partner
+         dies. This adds pressure on a slow split kill but does not fix the overlap on its own.
+     B3. Wiper-aware HP: no. It would fight the BINDING rule that assist acts only through a player action.
+  My recommendation is A for 1.5.0 and B1 first in 1.5.1. B1 is the only lever that targets the sweep directly.
+
+EVIDENCE
+  twins/twins-today.jsonl, twins-p1.jsonl, twins-r120.jsonl (+ .meta.json, .log); fixpass/twsum.cjs summarises them.
+  fixpass/validate-levels-holdsim177.txt vs validate-levels-holdsim-twinR.txt: holdsim with twinR changes only L29 (human 2.33 -> 2.67
+  stars) and L59 (aimerR seed 1253 overrun 69.7 -> 70.4 s); the rest is identical apart from timings; 44 warnings, 0 errors in both.

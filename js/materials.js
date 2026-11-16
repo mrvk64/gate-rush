@@ -73,7 +73,7 @@ import { makeSkyMaterial } from './environment.js';
 // Constants. Data-derived values come from data.js; the rest are shader SHAPE constants (sizes of rims,
 // insets, stripe periods — pure look, no gameplay meaning) or values data.js lacks (DATA-MISSING).
 // ---------------------------------------------------------------------------------------------------
-const GATE_TYPE_KEYS = ['plus', 'mult', 'minus', 'div', 'zero', 'item'];   // = GATE_RULES.colors key order (gates.js TYPE_KEYS)
+const GATE_TYPE_KEYS = ['plus', 'mult', 'minus', 'div', 'zero', 'item', 'sprint', 'wall'];   // = GATE_RULES.colors key order (gates.js TYPE_KEYS; 1.5.0: + chase's two)
 
 // Gate panel shape (metres, panel-local)
 const PANEL_CORNER_M = 0.14;          // rounded-corner radius of the panel body
@@ -306,7 +306,7 @@ const PANEL_VERT = /* glsl */`
 `;
 
 const PANEL_FRAG = /* glsl */`
-  uniform vec3 uTints[6];      // plus, mult, minus, div, zero, item (linear)
+  uniform vec3 uTints[8];      // plus, mult, minus, div, zero, item, sprint, wall (linear)
   uniform vec3 uGold;          // GATE_RULES.colors.max
   uniform vec3 uDark;          // PALETTE.glyph.outline
   uniform float uOpacity;      // GATE_RULES.panel.opacity | opacityHC
@@ -340,10 +340,11 @@ const PANEL_FRAG = /* glsl */`
     vec2 q = abs(p) - b + r;
     return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
   }
-  // panel outline by type (GDD 4.1 shape cue): rounded top (plus, mult, zero), square (minus, div), pentagon top (item)
+  // panel outline by type (GDD 4.1 shape cue): rounded top (plus, mult, zero), square (minus, div; 1.5.0 the PLANK lane's flat top),
+  // pentagon top (item; 1.5.0 the sprint lane's forward arrow)
   float grPanelSd(vec2 p, vec2 b, int ti) {
-    if (ti == 2 || ti == 3) return grRoundBox(p, b, uCorner.z);
-    if (ti == 5) {
+    if (ti == 2 || ti == 3 || ti == 7) return grRoundBox(p, b, uCorner.z);
+    if (ti == 5 || ti == 6) {
       vec2 n = normalize(vec2(uPeak, b.x));
       return max(grRoundBox(p, b, uCorner.z), dot(vec2(abs(p.x), p.y - b.y), n));
     }
@@ -362,7 +363,7 @@ const PANEL_FRAG = /* glsl */`
   void main() {
     float code = vPanel.x;
     float maxed = step(7.5, code);
-    int ti = int(clamp(floor(code - 8.0 * maxed + 0.5), 0.0, 5.0));
+    int ti = int(clamp(floor(code - 8.0 * maxed + 0.5), 0.0, 7.0));
     vec3 tint = uTints[ti];
     float stripeMix = clamp(vPanel.y, 0.0, 1.0);
     float flash = clamp(vPanel.z, 0.0, 1.5);
@@ -373,7 +374,7 @@ const PANEL_FRAG = /* glsl */`
     float isZero = ti == 4 ? 1.0 : 0.0;
     float isItem = ti == 5 ? 1.0 : 0.0;
     // the empty track shows from spawn on x, ÷ and (round 7) red gates — each has something to fill; + gates show it once shot
-    float gauge = (ti == 1 || ti == 2 || ti == 3 || ring > 0.0005) ? 1.0 : 0.0;
+    float gauge = (ti == 1 || ti == 2 || ti == 3 || ti == 7 || ring > 0.0005) ? 1.0 : 0.0;
     float ff = grGateFog();                                      // raw fog factor (distance cue for alpha / saturation)
 
     vec2 hb = vec2(vHalfW, uHalf.y);
@@ -462,7 +463,8 @@ const PANEL_FRAG = /* glsl */`
       // that will MAX gold, x / ÷ white — under the capped luminance (no bloom), so "it will make it" reads before it does
       vec3 reachCol = ti == 2 ? uTints[0] : (ti == 0 ? uGold : vec3(1.0));
       reachCol *= (ti == 2 ? ${glf(REACH_BLUE_LUM)} : ${glf(RING_LUM_CAP)}) / max(dot(reachCol, vec3(0.2126, 0.7152, 0.0722)), 1e-3);
-      fillCol = mix(fillCol, reachCol, reach * (1.0 - full));
+      // 1.5.0: a maxed + gate's ring stays closed (gates.js) and reads MAX in gold, like its badge
+      fillCol = mix(fillCol, reachCol, max(reach * (1.0 - full), ti == 0 ? maxed : 0.0));
       fillCol *= 1.0 - ${glf(RING_PULSE)} * full * (0.5 + 0.5 * sin(uTime * 6.0 * uMotion));
       col = mix(col, uDark, trackMask * 0.92);
       alpha = max(alpha, 0.82 * trackMask);
@@ -730,7 +732,7 @@ const FRAME_VERT_POSITION = /* glsl */`
   }
 `;
 const FRAME_FRAG_PARS = /* glsl */`
-  uniform vec3 uGrCols[6];     // frame colours per type (GATE_RULES.colors[*].frame, linear)
+  uniform vec3 uGrCols[8];     // frame colours per type (GATE_RULES.colors[*].frame, linear)
   uniform vec3 uGrGold;        // GATE_RULES.colors.max
   uniform vec3 uGrDark;        // hazard stripe dark
   uniform float uGrEmissive;   // RENDER.gateFrameEmissive (× (1 + lowTierEmissiveBoost) on Low)
@@ -744,7 +746,7 @@ const FRAME_FRAG_PARS = /* glsl */`
 `;
 // Runs right after <color_fragment>: type colour, flip recolour, hazard stripes, gold MAX.
 const FRAME_FRAG_COLOR = /* glsl */`
-  int grI = int(clamp(floor(vGrFrame.x + 0.5), 0.0, 5.0));
+  int grI = int(clamp(floor(vGrFrame.x + 0.5), 0.0, 7.0));
   vec3 grCol = uGrCols[grI];
   float grT = vGrFrame.y;
   if (grT > 0.0 && grT < 1.0) grCol = grT < 0.5 ? uGrCols[4] : mix(uGrCols[4], grCol, grT * 2.0 - 1.0);

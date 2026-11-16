@@ -272,6 +272,8 @@ export const GATE_RULES = deepFreeze({
     div:   { tint: 0xE0346E, frame: 0xA1204B },
     zero:  { tint: 0xB8B8B8, frame: 0x8A8A8A },
     item:  { tint: 0xC77DFF, frame: 0x8E3FD6 },
+    sprint: { tint: 0x1FD6C4, frame: 0x129E90 },   // 1.5.0 chase: the » SPRINT gate (teal, arrow top) and the PLANK gate (wood amber, flat top)
+    wall:  { tint: 0xD9973A, frame: 0xA0661F },
     max: 0xFFD166,
   },
   generation: {
@@ -711,7 +713,7 @@ export const WEAPONS = deepFreeze({
              // smoke.colorIdx = FX_COLOR.dust (index 8 of fxmaterials.js FX_COLORS = PALETTE.fx.dust; WPN-10: data key instead of a weapons.js mirror)
              smokeEvery: 0.03, smoke: { size: 0.8, life: 1.2, spread: 0.35, rise: 0.6, colorIdx: 8 },
              tailM: 0.33, flame: { len: 1.2, radius: 0.16, hdr: [3.0, 1.4, 0.35] }, meshScale: 1.6, spin: 9 },
-  railgun: { id: 'weapon.railgun', unlock: 12, duration: 6,  every: 1.2, halfWidth: 0.4, dpsSeconds: 3.0, rifleKeep: 0.5, gateHits: 10, flash: 0.08,
+  railgun: { id: 'weapon.railgun', unlock: 11, duration: 6,  every: 1.2, halfWidth: 0.4, dpsSeconds: 3.0, rifleKeep: 0.5, gateHits: 10, flash: 0.08,
              tracer: [2.0, 3.6, 4.0], color: 0x9FDCFF, sting: 'sting_rail',                           // bolt through the whole road, 0.8 m wide
              // extra (weapons.js visuals): bolt flare scale, bolt visual life (s), lightning polyline segments / lateral jitter (m) /
              // re-roll interval (s), core radius and arc thickness (m), arc HDR gain (× tracer), J21 80 ms screen-flash opacity,
@@ -792,7 +794,7 @@ export const TROOPS = deepFreeze({
 // GDD §8.3 pickup schedule: index = L − 1; the level's newly unlocked special is guaranteed, after which it joins the bag.
 // r8 teaching ladder (D9 + A14): null = no pickup debut; each special's `unlock` = its index + 1 (validate-levels).
 export const PICKUP_SCHEDULE = deepFreeze(['weapon.shotgun', 'gear.armor', 'weapon.minigun', null, 'troop.sniper', 'troop.medic', null,
-  'troop.flamer', null, 'weapon.rocket', null, 'weapon.railgun', null, 'weapon.laser', 'troop.drone', 'gear.magnet', 'gear.booster', null, null,
+  'troop.flamer', null, 'weapon.rocket', 'weapon.railgun', null, null, 'weapon.laser', 'troop.drone', 'gear.magnet', 'gear.booster', null, null,
   'gear.chip', 'troop.apc']);
 
 // ==== PICKUPS ================================================================================
@@ -912,6 +914,8 @@ export const SCORE = deepFreeze({
              pressure: true },   // (new) round-3 QA LVL-17 (GDD §10.1): every endless score term × the chunk's pressure factor (surviving pressure pays)
   // r8 (D45): the Horde hold's score terms (LINE HELD, each boss stagger)
   hold: { lineHeld: 500, stagger: 100 },
+  // 1.5.0 (chase §5): a clean escape (never caught), + per metre of gap when the doors shut
+  chase: { clean: 500, perGapM: 20 },
 });
 
 // ==== LEVELS =================================================================================
@@ -1275,6 +1279,14 @@ export const RENDER = deepFreeze({
     hold: { portrait: { pos: [0, 10.8, 10.3], look: [0, 0, -11], wallZ: -3.5, wallFrac: 0.715 },
             landscape: { pos: [0, 9.7, 15.9], look: [0, 0, -12], hFovDeg: 50, fovClamp: [30, 50] },
             fog: { near: 58, far: 100 }, tween: 1.5 },
+    // 1.5.0 (chase §1.1): pulled back so the squad's front row (z 0) sits at 50 % of the height and the horde runs in the lower band;
+    // follow: x × the followed squad x (pos, look)
+    chase: { portrait: { pos: [0, 16, 28], look: [0, 0, -14], wallZ: 0, wallFrac: 0.5, follow: [0.3, 0.5] },
+             landscape: { pos: [0, 14, 26], look: [0, 0, -4], hFovDeg: 50, fovClamp: [30, 50], follow: [0.3, 0.5] },
+             fog: { near: 48, far: 118 }, tween: 1.2 },
+    // the doors: raised, looking back at the gatehouse and the pile-up (the road carries the doors ≈ 10 m on while it stops)
+    chaseEnd: { portrait: { pos: [0, 20, 38], look: [0, 0, -6], wallZ: 12, wallFrac: 0.6, follow: [0.3, 0.5] },
+                landscape: { pos: [0, 18, 36], look: [0, 0, 4], hFovDeg: 50, fovClamp: [30, 50], follow: [0.3, 0.5] }, fog: { near: 48, far: 118 }, tween: 1.0 },
   },
   gateFrameEmissive: 1.6, lowTierEmissiveBoost: 0.3,
   letterboxPct: 8,                        // boss intro bars
@@ -1344,7 +1356,7 @@ export const RENDER = deepFreeze({
   },
   icons: {
     order: ['shotgun', 'minigun', 'rocket', 'rail', 'laser', 'armor', 'chip', 'booster', 'magnet', 'sniper', 'medic', 'flame', 'drone', 'apc', 'coins', 'star'],   // 16 cells of 32 px
-    row2: ['kit', 'kit2', 'airstrike', 'flare', 'supply'],
+    row2: ['kit', 'kit2', 'airstrike', 'flare', 'supply', 'planks', 'plate', 'sprint'],   // 1.5.0: + the DROP (chase) and PLATE (escort) buttons
     ofItem: { 'item.kit': 'kit', 'item.kit2': 'kit2', 'weapon.shotgun': 'shotgun',   // 1.4.0: row2 (kits, the airstrike, flare, supply)
               'weapon.minigun': 'minigun', 'weapon.rocket': 'rocket', 'weapon.railgun': 'rail', 'weapon.laser': 'laser',
               'gear.armor': 'armor', 'gear.chip': 'chip', 'gear.booster': 'booster', 'gear.magnet': 'magnet',
@@ -2119,17 +2131,20 @@ export const JUICE = deepFreeze({
 // debut = its first level (softeners, first meeting); assist: 'soldiers' at the start or 'kits' for the mode; runShare = the
 // run's part of a failed run's fraction; enabled = the stage flag (P8): a disabled base plays standard keeping its night, a combo
 // its base by day unless combos. First played at a frontier ≥ debut + meetAfter = a first meeting until the first clear.
+// 1.5.0 (P4 balance): ★★★ at 0.85 of a chase's target (no skilled bot reached 0.9 from L37) and 0.9 of an escort's survivors
+// (one lost of 14-18; the design bot took 3★ on 24 of 35 at 0.85).
+// offKey: what a combo's slot plays while the combo is off (1.5.0: L53 / L58 stay NIGHT; a night horde keeps its horde base).
 // retypeRewardSkip: re-typed levels whose first new-type clear pays the replay rate ([] unless the owner asks).
 export const LEVEL_TYPES = deepFreeze({
   standard: { base: 'standard', night: false, debut: 1, color: PALETTE.ui.primary, badge: '', bonusMult: 1, enabled: true, assist: 'soldiers' },
   horde: { base: 'horde', night: false, debut: 4, color: 0xFF7A2F, badge: 'planks', bonusMult: 1.25, enabled: true, assist: 'kits', starThree: 0.9, runShare: 0.4 },
   night: { base: 'standard', night: true, debut: 7, color: 0x6E5CF0, badge: 'crescent', bonusMult: 1.1, enabled: true, assist: 'soldiers' },
-  // 1.5.0 (their slots play standard / night / horde in 1.4.0)
-  chase: { base: 'chase', night: false, debut: 12, color: 0x2FB8FF, badge: 'chevrons', bonusMult: 1.15, enabled: false, assist: 'soldiers' },
-  escort: { base: 'escort', night: false, debut: 18, color: 0x3FD07A, badge: 'truck', bonusMult: 1.15, enabled: false, assist: 'plates' },
+  // 1.5.0 (their slots played standard / night / horde in 1.4.0; the night combos wait for 1.5.1)
+  chase: { base: 'chase', night: false, debut: 12, color: 0x2FB8FF, badge: 'chevrons', bonusMult: 1.15, enabled: true, assist: 'charges', starThree: 0.85 },
+  escort: { base: 'escort', night: false, debut: 18, color: 0x3FD07A, badge: 'truck', bonusMult: 1.15, enabled: true, assist: 'plates', starThree: 0.9 },
   nightHorde: { base: 'horde', night: true, debut: 47, color: 0xFF7A2F, badge: 'planks', bonusMult: 1.3, enabled: false, assist: 'kits', starThree: 0.9, runShare: 0.4 },
-  nightChase: { base: 'chase', night: true, debut: 53, color: 0x2FB8FF, badge: 'chevrons', bonusMult: 1.2, enabled: false, assist: 'soldiers' },
-  nightEscort: { base: 'escort', night: true, debut: 58, color: 0x3FD07A, badge: 'truck', bonusMult: 1.2, enabled: false, assist: 'plates' },
+  nightChase: { base: 'chase', night: true, debut: 53, color: 0x2FB8FF, badge: 'chevrons', bonusMult: 1.2, enabled: false, assist: 'charges', starThree: 0.85, offKey: 'night' },
+  nightEscort: { base: 'escort', night: true, debut: 58, color: 0x3FD07A, badge: 'truck', bonusMult: 1.2, enabled: false, assist: 'plates', starThree: 0.9, offKey: 'night' },
   combos: false, meetAfter: 5, retypeRewardSkip: [],
 });
 // The map: a code per district slot, cycle 1 (L1–30) and 2 (L31–60); from cycle k ≥ 3 district d takes slots 2–4 of cycle 2's
@@ -2164,7 +2179,8 @@ function keyOfCode(code, on) {
   if (base !== 'standard' && !typeOn(base, on)) base = 'standard';
   if (!night || !typeOn('night', on)) return base;
   if (base === 'standard') return 'night';
-  return (on && on.combos !== undefined ? on.combos : LEVEL_TYPES.combos) && typeOn(COMBO_OF[base], on) ? COMBO_OF[base] : base;
+  const combo = LEVEL_TYPES[COMBO_OF[base]];
+  return (on && on.combos !== undefined ? on.combos : LEVEL_TYPES.combos) && typeOn(COMBO_OF[base], on) ? COMBO_OF[base] : combo.offKey || base;
 }
 /**
  * Campaign level L's type: frozen { key, base, night, slot (1–5), cycle, finale (slot 5), code }. override: a key played instead
@@ -2183,7 +2199,12 @@ export function levelTypeOf(L, override, on) {
 /** What level L's stars count against (D16): E_boss, on a Horde base E_hold = round5(eHoldShare·E_boss). */
 export function eTargetOf(L, override, on) {
   const e = eBossOf(L);
-  return levelTypeOf(L, override, on).base === 'horde' ? Math.round(HORDE_GEN.eHoldShare * e / 5) * 5 : e;
+  const base = levelTypeOf(L, override, on).base;
+  if (base === 'horde') return Math.round(HORDE_GEN.eHoldShare * e / 5) * 5;
+  // 1.5.0: a chase counts CHASE.eTargetFrac of E_boss, an escort its survivor total (ESCORT.survivorsOf); E_boss until set
+  if (base === 'chase' && CHASE.eTargetFrac > 0) return Math.round(CHASE.eTargetFrac * e / 5) * 5;
+  if (base === 'escort' && typeof ESCORT.survivorsOf === 'function') return ESCORT.survivorsOf(L);
+  return e;
 }
 /** The 3★ fraction of eTarget for type `key` on level L (D16). */
 export function starThreeOf(L, key) {
@@ -2205,6 +2226,8 @@ export function nextLevelOfType(key, fromL, on) {
 const TT_NB = String.fromCharCode(0xA0);                               // no-break space
 const TT_DASH = TT_NB + '—';                                           // a line breaks after the dash, never before it
 const ttPct = (f) => Math.round(f * 100);                              // 0.25 → 25
+// 1.5.0 (PLAN C14): the game-over card names the share a loss keeps (ECONOMY.gameOverKeep: 'Half kept +238')
+const KEEP_WORD = ECONOMY.gameOverKeep === 0.5 ? 'Half' : `${ttPct(ECONOMY.gameOverKeep)} %`;
 export const TYPES_TEXT = deepFreeze({
   hints: {
     // the first enrage (ui passes weapons.storedCount): what it costs and the lever
@@ -2225,14 +2248,25 @@ export const TYPES_TEXT = deepFreeze({
                  rows: [`RUN THE GATES${TT_DASH} GROW YOUR SQUAD`, `DRAG TO SWEEP YOUR FIRE${TT_DASH} HOLD STILL TO FOCUS`, 'TAP REPAIR TO PATCH THE WALL'] },
         night: { tagline: 'THEY COME OUT OF THE DARK',
                  rows: [`WATCH FOR GLOWING EYES${TT_DASH} RED = RUNNER`, 'MORE SOLDIERS = LONGER FLASHLIGHTS', 'CRATES LAUNCH FLARES AT NIGHT'] },
+        // 1.5.0 (r9 P2)
+        chase: { tagline: 'OUTRUN THE HORDE TO THE SAFE ZONE',
+                 rows: [`MORE SOLDIERS${TT_DASH} THE REAR GUARD HOLDS THEM BACK`, `» GATES SPRINT AHEAD${TT_DASH} DODGE THE WRECKS`, `PLANK GATES GIVE BARRICADES${TT_DASH} TAP DROP`] },
+        escort: { tagline: 'GET THE SURVIVORS HOME',   // 1.5.0 (P3)
+                  rows: [`STAY BEHIND THE TRUCK${TT_DASH} SHOOT CLIMBERS OFF`, `LEAVE IT FOR A GATE${TT_DASH} THEY CLIMB ON`, 'TAP PLATE TO ARMOR A SIDE'] },
       },
       // results: a type's title and lines (D45), the coaching line after a fail without play (D30)
       results: {
         horde: { title: 'LINE HELD', kills: (n) => `${n} ZOMBIES DOWN`, score: (s) => `SCORE ${s}`, lineHeld: 'Line held',
                  overrun: 'LINE OVERRUN', lost: 'SQUAD LOST', surge: (k, n) => `SURGE ${k}/${n}`,
-                 of: (x, y) => `${x} OF ${y} ZOMBIES`, down: (x) => `${x} ZOMBIES DOWN`, kept: (n) => `Coins kept +${n}`,
+                 of: (x, y) => `${x} OF ${y} ZOMBIES`, down: (x) => `${x} ZOMBIES DOWN`, kept: (n) => `${KEEP_WORD} kept +${n}`, idle: 'No input: 0 coins',
                  tip: 'MOVE YOUR FIRE AND REPAIR THE WALL' },
         night: { title: 'NIGHT CLEARED', bonus: 'Night bonus' },
+        // 1.5.0 (r9 P2; P4: a lost chase reads CAUGHT and names the lever)
+        chase: { title: 'ESCAPED', kills: (n) => `${n} ZOMBIES DOWN`, score: (s) => `SCORE ${s}`, bonusMode: 'Escaped', bonus: 'Chase bonus',
+                 causes: { squad: 'CAUGHT' }, tip: `GROW YOUR SQUAD${TT_DASH} THE BACK ROWS HOLD THEM OFF` },
+        // 1.5.0 (P3): an escort clear / loss (causes: the game-over title of level:failed's cause)
+        escort: { title: 'SURVIVORS DELIVERED', bonus: 'Escort bonus', bonusMode: 'Delivered', score: (s) => `SCORE ${s}`,
+                  causes: { truck: 'TRUCK OVERRUN' }, tip: 'STAY BEHIND THE TRUCK TO SHOOT THE CLIMBERS' },
         steer: 'STEER TO PICK YOUR GATES',
       },
       enrage: { tag: 'ENRAGED', aria: (s) => `Enrage in ${s} s`, ariaTag: 'Boss enraged' },
@@ -2242,11 +2276,13 @@ export const TYPES_TEXT = deepFreeze({
     },
   },
   codex: {
-    sections: [{ id: 'types', ids: ['type.horde', 'type.night'] }],
+    sections: [{ id: 'types', ids: ['type.horde', 'type.night', 'type.chase', 'type.escort'] }],
     titles: { types: 'LEVEL TYPES' },
     // ui keeps these rows "???" / "MEET IT ON LEVEL n" until the type is first played
     entries: {
       'type.horde': { name: 'HORDE', line: `Run the gates, then hold a barricade against thousands: drag to sweep your fire, hold still to focus it, tap REPAIR to patch the wall. ★★★ at ${ttPct(LEVEL_TYPES.horde.starThree)}${TT_NB}% of the level's target squad; +${ttPct(LEVEL_TYPES.horde.bonusMult - 1)}${TT_NB}% level bonus.` },
+      'type.chase': { name: 'CHASE', line: `Outrun the horde to the safe zone: soldiers at the back hold it off, » gates sprint ahead, plank gates give barricades for DROP, wrecks trip you. ★★★ at ${ttPct(LEVEL_TYPES.chase.starThree)}${TT_NB}% of the level's target squad; +${ttPct(LEVEL_TYPES.chase.bonusMult - 1)}${TT_NB}% level bonus.` },
+      'type.escort': { name: 'ESCORT', line: `Guard a rescue truck to the safe zone: stay in its half of the road to shoot climbers off, follow the green line, tap PLATE to armor a side. ★★★ at ${ttPct(LEVEL_TYPES.escort.starThree)}${TT_NB}% of the survivors; +${ttPct(LEVEL_TYPES.escort.bonusMult - 1)}${TT_NB}% level bonus.` },
       'type.night': { name: 'NIGHT', line: `They come out of the dark: watch the glowing eyes (red = runner). More soldiers light the road farther, crates launch flares; NIGHT CITY is a BLACKOUT. +${ttPct(LEVEL_TYPES.night.bonusMult - 1)}${TT_NB}% level bonus.` },
     },
   },
@@ -2418,6 +2454,7 @@ export const HORDE = deepFreeze({
   // model P3 tuned), the boss share's aim height, the spitter share, tracer heights (pileY over a pile, clearing the planks)
   fire: { laneHalf: 1.25, laneShare: 0.8, focusT: 0.8, focusFrom: 0.5, focusSteps: [0.34, 0.67, 1],
     pierce: 4, rateCap: 90, beta: 0.5, betaWind: 0.75, betaOut: 0.2, bossR: 1.77, bossY: 2.4, spitBeta: 0.5,
+    twinR: 1.25,                // 1.5.0: each Hulk Twin's column reach (one lane half-width: a sweep past the Twins feeds them less)
     tracerY: 1.0, pileY: 1.3 },
   // the wall: section HP, claw slots, claw delay (brute), claw WP/s per type (ZOMBIES.common.types order), the pile above which
   // one non-brute climbs every climbK·max(climbMin, climbEvery·pile / (pile − slots)) s (from pileZone m behind the face: the
@@ -2527,6 +2564,7 @@ export const HORDE_TEXT = deepFreeze({
       repair: 'REPAIR',
       clearGap: 'CLEAR THE GAP',
       noKits: 'NO KITS',
+      repairing: 'REPAIRING',     // 1.5.0: a press on a section still in its repair cool-down
       kit: (n) => `+${n} KIT${n === 1 ? '' : 'S'}`,
       airstrike: 'AIRSTRIKE',
       // the hold boss's name card tagline (PLAN horde UI; the card shows the boss's name above it)
@@ -2721,9 +2759,258 @@ export const NIGHT_AUDIO = deepFreeze({
 //
 //
 //
+// ---- CHASE + CHASE_GEN + OBSTACLES + CHASE_TEXT + CHASE_AUDIO (r9 P2) ----
+// CHASE (chase-design §1-§5): a horde chases the squad from the breach to a SAFE ZONE. CHASE_GEN feeds js/chasegen.js (the gap
+// model, the spec, conversions, wrecks, the idle rule C11), CHASE the runtime (chase.js, obstacles.js, crowd block mode, the rear
+// guard), OBSTACLES the wreck kinds. [[L, v], …] tables: 'lerp' interpolates (end rows held), 'step' takes the last row ≤ L.
+export const CHASE_GEN = deepFreeze({
+  // course 0.85 × the RUN length; the run part is fitted to eRun round5(0.8·E_boss) (its E-trace ends at 1.1 × it); the stars count
+  // against eTarget round5(1.12·E_boss) (★★★ at LEVEL_TYPES.chase.starThree of it, about 0.95 E_boss: a chase has no boss to pay, so the squad must come home)
+  lenFrac: 0.85, runFrac: 0.8, eEndK: 1.1, eFrac: 1.12,
+  fixed: { lim: 0.6, win: 0.8 },                     // the run's fixed lines ≤ lim × eRun (levelgen's attempt score)
+  breachM: 110, quietM: 50, doorsClearM: 60,         // the breach after gate 1; no wreck in the 50 m after it or the last 60 m
+  // the gap (gapStep): dg/dt = push − close + sprint − stumble, g in [0, gMax]
+  g0: 14, gMax: 16, gRest: 4, kRb: 0.35, danger: 2.5,     // the design count rides the band at ~6 m, a surge drags it to ~3
+  c0: [[12, 1.12], [30, 1.25], [60, 1.5], [120, 1.8]],          // lerp: base closing speed (m/s)
+  amp: [[12, 1.5], [30, 1.65], [60, 1.9], [120, 2.2]],         // lerp: a surge's extra closing speed for ampS s, warned warnS s ahead
+  ampS: 2.5, warnS: 1.2, surgeFirstS: 10,                       // the first surge 10 s after the gap starts, then every gap ± jitter s (step)
+  surgeGap: [[12, 16], [22, 15], [33, 14], [44, 13], [57, 12]], surgeJitter: [[12, 3], [57, 2]],
+  double: { from: 27, chance: 0.4, lateFrom: 44, lateChance: 0.6, lagS: 3.5, amp: 0.6 },   // a second surge lagS s later at amp ×
+  lastSurgeM: 180,                                             // the LAST SURGE, always, this far before the doors
+  // push = pd·c0·r^pushExp·shop·weapon, r = C / the design count (pushExp [below, above] 1): on the design count a squad pushes pd ×
+  // c0 and rides the band in the amber (3-8 m); under it, it loses ground but bleeds rather than falls off a cliff; over it,
+  // diminishing returns. pd rises with L as the double surges come in (lerp, held after L57)
+  pd: [[12, 1.5], [27, 1.55], [44, 1.65], [57, 1.7]], pushExp: [0.6, 0.25], countComp: 0.5,
+  // DANGER (g < danger) claws claw[0] + claw[1]·C soldiers / s; CAUGHT (0) bites bite[0] + bite[1]·C × min(biteCap, 1 + (L − 12) / biteL)
+  claw: [1, 0.015], bite: [4, 0.1], biteL: 72, biteCap: 3,
+  dropM: [[12, 8], [30, 7], [60, 6]],                         // lerp: a DROP holds the horde while the road carries dropM m
+  dropCooldownS: 1.0, maxCharges: 3, assistCharges: 1,         // REINFORCEMENTS: +1 DROP charge per step (C10)
+  sprint: { base: 3, baseLate: 4, lateFrom: 60, maxMult: 2, deliverS: 1.5 },   // a SPRINT gate's metres, shot up to maxMult ×
+  wall: { value: 1, max: 2 },                                  // a PLANK gate: +1 charge, shot to +2
+  lanes: [[12, [2, 1]], [22, [3, 2]], [44, [3, 3]]],          // step: [sprint, plank] lanes
+  wrecks: [[12, 1], [22, 1], [33, 1], [44, 1.5]], rubbleFrom: 33,   // step: wrecks per gap after the breach (cars, narrows; rubble from L33)
+  stumble: { k: 1.0, s: 1.0, crush: 0.1 },                   // a hit: −k·v m/s for s s and crush × the squad, × the overlap share
+  // the idle rule (C11; the PLAN's 0.9, aimed at 0.8 for margin): fixed lines at the expected shop and rank 10, all charges dropped
+  // under dropAt, weapons fired at once, reach count 0 before idle.before × the course; repairs = side repairs per attempt
+  idle: { before: 0.8, dropAt: 3, weaponS: 8, repairs: 6 },
+  coins: { escapePerL: 16 },                                   // ESCAPED: 16 × L on a clear; horde kills pay nothing
+});
+export const CHASE = deepFreeze({
+  eTargetFrac: CHASE_GEN.eFrac,                      // data.eTargetOf reads it
+  rig: 'chase', rigS: 1.2, rigEnd: 'chaseEnd', glyphScale: 1.25, despawnZ: 22,
+  // the horde (crowd block mode): drawn units by tier while it chases (C8), the tier cap for the pile-up at the doors; depth (m)
+  crowd: { high: 700, med: 450, low: 250, sw: 200, depth: 30, halfX: 7, killDens: 3 },
+  rearRows: { high: 24, med: 16, low: 10 },          // rear guard soldiers turned round (cosmetic)
+  rearDepth: 0.62,                                   // the rows within this of the back row
+  rear: { 'weapon.shotgun': 1.5, 'weapon.minigun': 2.0, 'weapon.rocket': 2.2, 'weapon.laser': 2.4, 'weapon.railgun': 2.6 },   // stored weapon x rear push
+  zones: { safe: 0x3BE57A, chased: 0xFFB020, danger: 0xFF3B4E },   // gap > 8 / 3-8 / < 3 (the label, the ribbon)
+  label: { px: 34, y: 0.4, pinFrac: 0.86 },
+  ribbon: { alpha: 0.25, alphaDanger: 0.45, y: 0.03, chevronM: 1.6, crawl: 1.2 },
+  barricadeZ: 1.2,                                   // a DROP barricade lands this far behind the back row
+  doors: { stopS: 2.0, theatreS: 2.2 },              // at the doors the road stops over stopS
+  hud: { hz: 10, counterFromM: 200, banner: 0xFF7A2F, safe: 0x3BE57A },
+  heartbeatBelow: 3,
+});
+// Wreck kinds: x spans the logical formation must clear (tested once, at the front row): a car across one half (0.4 m past the
+// centre line, so a squad that never steers trips), NARROWS (barriers on both sides), RUBBLE (the centre, from rubbleFrom).
+export const OBSTACLES = deepFreeze({
+  kinds: {
+    carL: { spans: [[-4.2, 0.4]] }, carR: { spans: [[-0.4, 4.2]] }, rubble: { spans: [[-1.0, 1.0]] },
+    narrows: { spans: [[-4.4, -1.5], [1.5, 4.4]] },
+  },
+  pool: 8, barricades: 2,
+});
+const CH_DASH = String.fromCharCode(0xA0) + '—';
+const CH_DEBUT = LEVEL_TYPES.chase.debut;
+export const CHASE_TEXT = deepFreeze({
+  hints: {
+    'chase.gap': `THEY'RE CLOSE! TAKE A » GATE OR TAP DROP`,
+    'chase.sprint': `» GATE: SPRINT AHEAD${CH_DASH} SHOOT IT FOR MORE METRES`,
+    'chase.wall': 'PLANK GATE: A BARRICADE FOR DROP',
+    'chase.drop': 'TAP DROP!',
+    'chase.wreck': `STEER AROUND WRECKS${CH_DASH} THEY TRIP YOU`,
+  },
+  strings: {
+    chase: {
+      run: 'RUN!', loose: 'THE HORDE IS LOOSE', surge: 'SURGE!', caught: 'CAUGHT!', safeAhead: 'SAFE ZONE AHEAD', escaped: 'ESCAPED!',
+      toSafety: (m) => `${m} M TO SAFETY`, drop: 'DROP', tripped: 'TRIPPED!', metres: (m) => `+${m} M`,
+      barricade: (n) => `+${n} BARRICADE${n === 1 ? '' : 'S'}`,
+      reinforcements: (k) => `REINFORCEMENTS: +${k} BARRICADE${k === 1 ? '' : 'S'}${CH_DASH} TAP DROP`,
+    },
+  },
+  codex: {
+    sections: [{ id: 'chase', ids: ['chase.gap', 'chase.sprint', 'chase.wall', 'chase.drop', 'chase.wreck'] }],
+    titles: { chase: 'THE CHASE' },
+    unlock: { 'chase.gap': CH_DEBUT, 'chase.sprint': CH_DEBUT, 'chase.wall': CH_DEBUT, 'chase.drop': CH_DEBUT, 'chase.wreck': CH_DEBUT },
+    entries: {
+      'chase.gap': { name: 'THE GAP', line: `Metres from your back row to the horde. Your back rows fire back: more soldiers hold it off. Under ${CHASE_GEN.danger} m it claws, at 0 it bites.` },
+      'chase.sprint': { name: '» SPRINT GATE', line: `Sprint ${CHASE_GEN.sprint.base} m ahead (${CHASE_GEN.sprint.baseLate} from level ${CHASE_GEN.sprint.lateFrom}); shoot it for up to ${CHASE_GEN.sprint.maxMult}×. No soldiers.` },
+      'chase.wall': { name: 'PLANK GATE', line: `+${CHASE_GEN.wall.value} barricade for DROP (shot: +${CHASE_GEN.wall.max}); carry ${CHASE_GEN.maxCharges}.` },
+      'chase.drop': { name: 'DROP', line: 'Slams a barricade behind you: the horde piles on it as the road carries it off. It frees a caught squad.' },
+      'chase.wreck': { name: 'WRECKS', line: 'Steer around cars, rubble and barriers: a hit trips the squad (the horde closes in) and crushes some soldiers.' },
+    },
+  },
+});
+// the chase's cues (AUDIO_CUES 'on': the breach crash, a surge horn, the sprint whoosh, the DROP slam, a wreck crunch, the doors) and the heartbeat loop
+export const CHASE_AUDIO = deepFreeze({
+  chase_breach: { on: 'chase:breach', noAtten: true,
+    layers: [{ src: 'brown', ms: 900, attack: 4, decay: 700, filter: { type: 'lowpass', f: 700 }, shaper: 0.5, gain: 0.9 },
+             { src: 'sawtooth', f: 70, fEnd: 52, ms: 1100, attack: 60, decay: 800, filter: { type: 'lowpass', f: 420 }, shaper: 0.5, gain: 0.3 }] },
+  chase_surge: { on: 'chase:surge', noAtten: true,
+    layers: [{ src: 'sawtooth', f: hz(N.C3), ms: 380, attack: 30, decay: 260, filter: { type: 'lowpass', f: 900 }, gain: 0.3 },
+             { src: 'noise', ms: 700, attack: 60, decay: 450, filter: { type: 'bandpass', f: 600, q: 0.7 }, shaper: 0.5, gain: 0.35 }] },
+  chase_sprint: { on: 'chase:sprint', bus: 'reward', noTimeScale: true,
+    layers: [{ src: 'noise', ms: 520, attack: 60, decay: 380, filter: { type: 'bandpass', f: 700, fEnd: 2600, q: 1.2 }, gain: 0.5 },
+             { src: 'triangle', f: hz(N.E5), fEnd: hz(N.B5), ms: 240, attack: 6, gain: 0.25 }] },
+  chase_drop: { on: 'chase:drop', noAtten: true,
+    layers: [{ src: 'brown', ms: 260, attack: 2, decay: 200, filter: { type: 'lowpass', f: 900 }, shaper: 0.4, gain: 0.8 },
+             { src: 'band', ms: 70, attack: 1, gain: 0.6 }] },
+  chase_trip: { on: 'chase:trip', coalesceMs: 120,
+    layers: [{ src: 'noise', ms: 220, attack: 1, decay: 160, filter: { type: 'bandpass', f: 1400, q: 0.9 }, shaper: 0.5, gain: 0.6 },
+             { src: 'sine', f: 140, fEnd: 60, ms: 200, shaper: 0.4, gain: 0.45 }] },
+  chase_doors: { on: 'chase:doors', noAtten: true,
+    layers: [{ src: 'square', f: 110, fEnd: 70, ms: 420, attack: 2, decay: 380, filter: { type: 'lowpass', f: 700 }, shaper: 0.4, gain: 0.45 },
+             { src: 'brown', ms: 700, attack: 2, decay: 600, filter: { type: 'lowpass', f: 500 }, shaper: 0.5, gain: 0.9 }] },
+  chase_heart: { repeatMs: 720,
+    layers: [{ src: 'sine', f: 62, fEnd: 48, ms: 120, attack: 4, decay: 100, gain: 0.55 },
+             { src: 'sine', f: 58, fEnd: 44, ms: 110, delayMs: 200, attack: 4, decay: 90, gain: 0.4 }] },
+});
+//
+//
+//
+// ---- ESCORT + ESCORT_GEN + ESCORT_TEXT + ESCORT_AUDIO (r9 P3) ----
+// 1.5.0 ESCORT (escort-design.txt, PLAN-1.5.0 C1-C6, C10, C11, C13; js/escort.js runs it, js/escortgen.js builds its script).
+// Tables are [[L, v], …]: grab / climberShare / splitShare / laneChanges lerp, the others step (the last row at or below L).
+const escortStep = (t, L) => { let r = t[0]; for (let i = 1; i < t.length && t[i][0] <= L; i++) r = t[i]; return r; };
+export const ESCORT = deepFreeze({
+  // the truck: lane centre ±x (not the ±2 lane: the far rail's climbers stay on a 360-wide screen), rear / length / half-width (m,
+  // squad frame), a lane change's smoothstep (s; a feint's), the blinkers before it (s), the bed floor and the cab's length
+  truck: { x: 1.6, rearZ: -7, length: 5, halfW: 1.0, changeS: 2.2, zigS: 1.4, blinkS: 1.5, bedY: 1.0, cabL: 1.6 },
+  // climber slots (x, z from the truck centre): rear L / R, mid L / R, front L / R; a climber slides slideS to its slot, hangs climbY
+  // up, pitched climbPitch (rad) over the rail
+  slots: [[-1.2, 2.0], [1.2, 2.0], [-1.25, 0], [1.25, 0], [-1.25, -2.0], [1.25, -2.0]],
+  slideS: 0.4, climbY: 0.55, climbPitch: 0.55,
+  // following (escort._stepFollow): the start (firstS) and each lane change (blinkers to its end + graceS) are one gate decision
+  // once the steering target travels the assist's minTravelM and ends within tolM of the truck's lane
+  follow: { tolM: 1.0, graceS: 1.0, firstS: 5 },
+  // the grab gauge (s on a slot before a survivor is dragged off), lerped on L, flat after the last row
+  grab: [[18, 2.6], [24, 2.4], [34, 2.1], [48, 1.8], [60, 1.6], [120, 1.3], [150, 1.2]],
+  // plates: the stock at the start (debut / after), + the checkpoint's, + perStep per REINFORCEMENTS step (PLAN C10), HP per level
+  // band (step), a brute swing's cost
+  plates: { start: 1, debutStart: 2, checkpoint: 1, perStep: 1, hp: [[18, 4], [30, 3], [50, 2]], bruteCost: 2 },
+  // brutes hold the front and swing on zombies' brute timers: before `from` a swing only breaks a plate, from it a swing takes a
+  // survivor while no plate covers a front slot (1.5.0 cut L34's truck hunters, PLAN cut order 1)
+  brute: { from: 28 },
+  // survivors on the truck (start, boarding at the checkpoint) per level band (step): the stars count the delivered against the sum
+  survivors: [[18, 8, 6], [30, 10, 6], [45, 10, 8], [60, 12, 8], [120, 14, 10]],
+  survivorsOf: (L) => { const r = escortStep(ESCORT_SURV, L); return r[1] + r[2]; },
+  // coins on a clear: perSurvivorL × L per survivor delivered; the score terms
+  coins: { perSurvivorL: 0.5 },                         // P4 pay check: at 1.0 a design clear paid ~1.2x the same level as a RUN
+  score: { delivered: 150, noLoss: 500 },
+  apcAhead: 2.4,                                         // the APC's gap ahead of the squad (troops.setPlacement): clear of the tailgate
+  // the bed: figures drawn (2 rows of up to 6), the rows' z from the truck centre, the x step; a delivered figure's hop and the tick (s)
+  bed: { rows: [0.75, 1.65], dx: 0.3, max: 12, hopS: 0.9, tickS: 0.12, palette: [0xFFD23A, 0xFF8A2A, 0x3AD8FF, 0xFF6FB0, 0xF4F4F0, 0xA6F23A] },
+  props: { appearZ: -75, cpX: 3.4 },                      // the checkpoint post (its x) and the safe-zone gate ride in from appearZ
+  // HUD: the count over the cab (label2 slot, px, height, colours: plenty / the last few), the ribbon (m ahead, width, rows),
+  // banner colour and seconds, events at hz
+  hud: { slot: 0, px: 46, y: 3.1, color: 0x6CFF9A, low: 0xFF5A4A, lowAt: 3, ribbonM: 50, ribbonW: 1.6, ribbonRows: 26,
+    banner: 0x3FD07A, bannerS: 2.2, hz: 10 },
+  lessons: { plateAt: 0.5 },                             // a grab ring past this fill with plates in stock teaches PLATE
+  // the look (sRGB; models.js builds the truck, plates and props, the survivor class): white rescue livery with a green stripe
+  look: {
+    truck: { body: 0xEDEDE8, stripe: 0x3FD07A, chassis: 0x2E3238, glass: 0x1C2430, bed: 0x4A4E54, bumper: 0x6E737A, tail: 0x9A1E1E,
+      light: 0xFFF2C8, blink: 0xFFB020 },
+    plate: { sheet: 0x8E969E, rivet: 0x50565E },
+    props: { bag: 0xB59A6A, bag2: 0x9E8558, pole: 0x9A9EA4, flag: 0x3FD07A, lamp: 0xFFF0C0, wall: 0x6E6A60 },
+    survivor: { legs: 0x3A4E78, shoes: 0x2A2A2A, shirt: 0xF4F4F0, skin: 0xE0B48C, hair: 0x3A2A1E,
+      limb: { uFreq: 2.6, uLegAmp: 0.12, uArmAmp: 0.7, uArmRest: 0.5, uBobAmp: 0.05, uRecoil: 0 } },
+    ribbon: 0x5CFF8A, ring: 0xFF3B3B,
+  },
+});
+const ESCORT_SURV = ESCORT.survivors;
+export const ESCORT_GEN = deepFreeze({
+  // extra walkers per wave that head for the truck (a share of the wave's population; the wave itself is unchanged), a climber's
+  // walker HP per soldier of the design count where it reaches the truck (the shop's live HP scale applies as to any wave), the
+  // gauntlet's share, the fewest per wave
+  climberShare: [[18, 0.35], [24, 0.38], [34, 0.42], [48, 0.47], [60, 0.5], [120, 0.55]],
+  climberHpE: 0.3, gauntletShare: 0.6, climberMin: 2,
+  splitShare: [[18, 0.3], [24, 0.38], [34, 0.45], [48, 0.52], [60, 0.55], [120, 0.6]],
+  laneChanges: [[18, 2], [24, 3], [34, 4], [48, 5], [60, 6], [120, 8]],
+  zigFrom: 48,                                           // a double lane change (a feint) in a wave-free gap
+  bruteEvery: 3,                                         // from ESCORT.brute.from every 3rd wave with brutes sends one at the truck
+  // the gauntlet: [L, metres, bursts] (step); its horde = round((15 + L) × mult) capped; the last burst reaches the truck ≥ tailS
+  // before the safe zone
+  gauntlet: [[18, 120, 6], [24, 130, 6], [34, 150, 7], [48, 170, 8], [60, 180, 9], [120, 200, 10]],
+  gauntletMult: 1.5, gauntletCap: 60, tailS: 4,
+  run: { fixed: { lim: 99, win: 99 } },                 // generateRunSteps options: the boss caps off (PLAN C11)
+  // the idle rule (E1 / E4): every fixed line (x 0, ±2.1) loses ≥ margin × T with every plate (start + checkpoint + 3 steps) used
+  // perfectly; a rail is covered when a formation column (half-width at the line's count, + slack) reaches it; each side is
+  // uncovered for ≥ uncoveredMin of the truck mass. Repair: + shareStep on the waves a failing line leaves uncovered, ≤ shareMax.
+  check: { margin: 1.3, uncoveredMin: 0.45, slack: 0.5, lines: [0, -2.1, 2.1], shareStep: 0.08, shareMax: 0.75, passes: 8 },
+  // the route search: candidates; a change starts gapM after the truck passes a gate (waveM after a wave reaches it) and ends
+  // armedM before the next gate is armed; the opener's first `aligned` events are on the pick's side
+  route: { candidates: 160, gapM: 10, waveM: 6, armedM: 6, aligned: 2 },
+  checkpoint: { lo: 0.4, hi: 0.6 },
+});
+//
+//
+//
+// ---- ESCORT_TEXT (P3): lessons (HINTS), banners and labels (STRINGS.escort), its FIELD GUIDE section ----
+const ESC_NB = String.fromCharCode(0xA0), ESC_DASH = ESC_NB + '—';
+export const ESCORT_TEXT = deepFreeze({
+  hints: {
+    'escort.climber': 'SHOOT THE CLIMBERS BEFORE THEY GRAB SOMEONE',
+    'escort.lane': 'THE GREEN LINE SHOWS WHERE THE TRUCK GOES',
+    'escort.plate': 'TAP PLATE TO KNOCK IT OFF AND ARMOR THAT SIDE',
+    'escort.checkpoint': `CHECKPOINT${ESC_DASH} MORE SURVIVORS AND A PLATE`,
+    'escort.brute': `BRUTES RIP SURVIVORS OFF${ESC_DASH} PLATE THE FRONT`,
+  },
+  strings: {
+    escort: {
+      checkpoint: 'CHECKPOINT', safeZone: 'SAFE ZONE', gauntlet: 'GAUNTLET!', safeAhead: 'SAFE ZONE AHEAD', start: 'GET THEM HOME',
+      board: (n) => `+${n} SURVIVORS`, grabbed: 'GRABBED!', plate: 'PLATE', plus: (n) => `+${n} PLATE${n === 1 ? '' : 'S'}`,
+    },
+  },
+  codex: {
+    sections: [{ id: 'escort', ids: ['escort.truck', 'escort.climb', 'escort.plate', 'escort.checkpoint'] }],
+    titles: { escort: 'THE ESCORT' },
+    unlock: { 'escort.truck': LEVEL_TYPES.escort.debut, 'escort.climb': LEVEL_TYPES.escort.debut, 'escort.plate': LEVEL_TYPES.escort.debut,
+      'escort.checkpoint': LEVEL_TYPES.escort.debut },
+    entries: {
+      'escort.truck': { name: 'RESCUE TRUCK', line: 'It drives its own route in one half of the road; the green line shows where it goes next. Stay in its half to guard it.' },
+      'escort.climb': { name: 'CLIMBERS', line: 'A zombie that reaches the truck climbs on. When its red ring fills it drags a survivor off: shoot it first.' },
+      'escort.plate': { name: 'PLATES', line: `Tap PLATE to knock off the climber nearest a grab and bolt a steel sheet on its slot (${ESCORT.plates.hp[0][1]} hits, fewer on later levels).` },
+      'escort.checkpoint': { name: 'CHECKPOINT', line: 'Halfway, more survivors climb aboard and you get a plate. Then comes the gauntlet, and the safe zone.' },
+    },
+  },
+});
+// the truck's cues (escort.js emits escort:* with x / z): the horn before a lane change, a grab (a pitched-up screech), a plate
+// bolted on (a clank), a plate broken, the checkpoint (reward bus) and one rising tick per survivor delivered
+export const ESCORT_AUDIO = deepFreeze({
+  escortHorn: { on: 'escort:horn', noAtten: true,
+    layers: [{ src: 'square', f: hz(N.A4), ms: 220, attack: 8, decay: 90, filter: { type: 'lowpass', f: 1800 }, gain: 0.24 },
+             { src: 'square', f: hz(N.F4), ms: 260, delayMs: 240, attack: 8, decay: 120, filter: { type: 'lowpass', f: 1800 }, gain: 0.24 }] },
+  escortGrab: { on: 'escort:grab', coalesceMs: 60,
+    layers: [{ src: 'sawtooth', f: 1900, fEnd: 1250, ms: 340, attack: 6, decay: 200, filter: { type: 'bandpass', f: 1700, q: 1.6 }, gain: 0.4 },
+             { src: 'triangle', f: 880, fEnd: 520, ms: 300, delayMs: 30, gain: 0.18 }] },
+  escortPlate: { on: 'escort:plate', coalesceMs: 50,
+    layers: [{ src: 'square', f: 330, fEnd: 270, ms: 140, attack: 1, decay: 100, filter: { type: 'bandpass', f: 1500, q: 2 }, gain: 0.36 },
+             { src: 'sine', f: 90, fEnd: 70, ms: 200, gain: 0.3 }, { src: 'band', ms: 50, attack: 1, gain: 0.5 }] },
+  escortBreak: { on: 'escort:break', coalesceMs: 60,
+    layers: [{ src: 'noise', ms: 180, attack: 1, decay: 120, filter: { type: 'bandpass', f: 3200, fEnd: 1200, q: 1.2 }, gain: 0.45 },
+             { src: 'square', f: 220, fEnd: 120, ms: 160, filter: { type: 'lowpass', f: 1200 }, gain: 0.2 }] },
+  escortCheckpoint: { on: 'escort:checkpoint', bus: 'reward', noTimeScale: true,
+    layers: [{ src: 'triangle', f: hz(N.C5), ms: 120, attack: 4, gain: 0.45 }, { src: 'triangle', f: hz(N.E5), ms: 120, delayMs: 110, attack: 4, gain: 0.45 },
+             { src: 'triangle', f: hz(N.G5), ms: 220, delayMs: 220, attack: 4, decay: 160, gain: 0.45 }] },
+  escortTick: { on: 'escort:delivered', bus: 'reward', noTimeScale: true, ladder: { semitones: 1, windowMs: 400 },
+    layers: [{ src: 'triangle', f: hz(N.E5), ms: 80, attack: 3, gain: 0.35 }] },
+});
+//
+//
+//
 // ---- merge lists (P0) ----
-export const TEXT_REGIONS = Object.freeze({ TYPES_TEXT, HORDE_TEXT, NIGHT_TEXT });
-export const AUDIO_REGIONS = Object.freeze({ HORDE_AUDIO, NIGHT_AUDIO });
+export const TEXT_REGIONS = Object.freeze({ TYPES_TEXT, HORDE_TEXT, NIGHT_TEXT, CHASE_TEXT, ESCORT_TEXT });
+export const AUDIO_REGIONS = Object.freeze({ HORDE_AUDIO, NIGHT_AUDIO, CHASE_AUDIO, ESCORT_AUDIO });
 const textParts = (k, c) => Object.values(TEXT_REGIONS).map((t) => (c ? t[k] && t[k][c] : t[k]) || []);
 const textOf = (k, c) => Object.assign({}, ...textParts(k, c));
 const textList = (k, c) => [].concat(...textParts(k, c));
@@ -3322,7 +3609,9 @@ export const STRINGS = deepFreeze({
               next: 'NEXT', replay: 'REPLAY', shop: 'SHOP' },
   // r7 (from balance:10): retryNote under RETRY — a generated level's RETRY after a failure plays a fresh layout (seed
   // 1000 + L + 100·failures, GDD §10); the authored L1 keeps its road, so it shows no note
-  gameover: { title: 'SQUAD LOST', level: LEVEL_NAME, info: (pct, kept) => `Reached ${pct} % · Coins kept +${kept}`, retry: 'RETRY', shop: 'SHOP', home: 'HOME',   // level: the kicker above the title (round 3)
+  gameover: { title: 'SQUAD LOST', level: LEVEL_NAME, info: (pct, kept) => `Reached ${pct} % · ${KEEP_WORD} kept +${kept}`,
+              idle: (pct) => `Reached ${pct} % · No input: 0 coins`,   // 1.5.0 (C14): a run with no input keeps nothing
+              retry: 'RETRY', shop: 'SHOP', home: 'HOME',   // level: the kicker above the title (round 3)
               retryNote: 'New road each retry' },
   endless: { title: 'RUN OVER', distance: m => `Distance ${m} m`, score: s => `Score ${s}`, best: b => `Best ${b}`, coins: c => `Earned +${c}`,
              newBest: 'NEW BEST!', retry: 'RETRY', home: 'HOME' },

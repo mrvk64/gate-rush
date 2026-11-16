@@ -18,6 +18,8 @@
 //       idempotent on it;
 //   (g) sanitation: a junk record type, prev, metric (a negative one → 0), modes counter and setting are repaired, and the
 //       fields of a newer build (an unknown type string, a modes key, a record field) kept.
+//   (h) 1.5.0: a 1.4.0 owner save at L45 — the chase / escort levels behind it wear the ring, pay full once and keep their stars;
+//       every other level of L1–60 keeps its 1.4.0 type.
 // Exit code 1 on any failure.
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -31,7 +33,7 @@ import { LEVEL_TYPES, ECONOMY, levelTypeOf } from '../js/data.js';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BASE_130 = '441104b';                        // Gate Rush 1.3.0 (the build an owner's phone may still run beside 1.4.0)
 const SAVE_KEY = 'gaterush.v1';
-const STAGE_140 = { horde: true, night: true };    // the 1.4.0 map (the stage flags P8 turns on)
+const STAGE_140 = { horde: true, night: true, chase: false, escort: false };   // the 1.4.0 map (1.5.0's build turns chase / escort on)
 const verbose = process.argv.includes('--verbose');
 const failures = [];
 const check = (name, ok, detail) => {
@@ -145,6 +147,31 @@ try {
   const fixed = migrate(junk, now);
   check('(g) junk repaired (t, prev, metric, counter, setting); a newer build\'s fields kept', fixed.levels[4].t === 'standard' && fixed.levels[5].prev === undefined && fixed.levels[6].metric === 0
     && fixed.modes.horde.runs === 0 && fixed.settings.leftHanded === true && fixed.levels[7].t === 'later' && fixed.modes.futureKey.runs === 2 && fixed.levels[8].extra === 1);
+  // (h) 1.5.0 (P4): the owner path. A 1.4.0 save at L45 (L1–44 cleared, rec.t the 1.4.0 map's key): the build's map re-types
+  // exactly the chase / escort levels behind him, each wears the ring (ui _setTile: cleared, rec.t ≠ the key, not skipped) and
+  // its first new-type clear pays full and keeps the stars; every other level L1–60 plays its 1.4.0 type (L47 horde, L53 / L58 night)
+  const v140 = clone(defaultSave(now));
+  v140.highestUnlocked = 45;
+  for (let L = 1; L <= 44; L++) v140.levels[L] = { stars: L % 7 === 0 ? 2 : 3, bestSurvivors: 300 + L, bestScore: 9000 + 100 * L, bestCoins: 500 + 10 * L, clears: 1 + (L % 3), t: levelTypeOf(L, null, STAGE_140).key, metric: 300 + L };
+  storage.set(SAVE_KEY, JSON.stringify(v140));
+  const own = new SaveStore({ events: null });
+  own.load();
+  const ringed = [], kept = [];
+  for (let L = 1; L <= 60; L++) {
+    const k = levelTypeOf(L).key, rec = own.data.levels[L];
+    if (k !== levelTypeOf(L, null, STAGE_140).key) { if (L <= 44) ringed.push(L + (k === 'chase' ? 'C' : k === 'escort' ? 'E' : '?')); } else kept.push(L);
+    const ring = !!rec && rec.clears > 0 && rec.t !== k && LEVEL_TYPES.retypeRewardSkip.indexOf(L) === -1;
+    if (ring !== (L <= 44 && k !== levelTypeOf(L, null, STAGE_140).key)) failures.push('(h) ring L' + L);
+  }
+  check('(h) the 1.5.0 map re-types the 11 chase / escort levels behind an owner at L45, each with the ring', ringed.join(' ') === '12C 18E 22C 24E 27C 28E 33C 34E 37C 42E 44C' && failures.indexOf('(h) ring') === -1, ringed.join(' '));
+  check('(h) the other 45 of L1–60 keep their 1.4.0 type (L47 horde, L53 / L58 night)', kept.length === 45 && levelTypeOf(47).key === 'horde' && levelTypeOf(53).key === 'night' && levelTypeOf(58).key === 'night', kept.length + '');
+  const payFull = ringed.filter((c) => own.isReplay(parseInt(c, 10), levelTypeOf(parseInt(c, 10)).key) === false).length;
+  own.recordLevel(12, { stars: 1, survivors: 200, score: 3000, coins: 900, typeKey: 'chase', metric: 200 });
+  own.recordLevel(18, { stars: 2, survivors: 9, score: 2000, coins: 800, typeKey: 'escort', metric: 9 });
+  const r12 = own.data.levels[12], r18 = own.data.levels[18];
+  check('(h) the first chase / escort clear pays full, keeps the 3 stars and moves the old bests to rec.prev; the next run is a replay', payFull === ringed.length
+    && r12.t === 'chase' && r12.stars === 3 && r12.prev.t === 'standard' && r18.t === 'escort' && r18.stars === 3 && r18.prev.t === 'standard'
+    && own.isReplay(12, 'chase') === true && own.isReplay(18, 'escort') === true, `${payFull}/${ringed.length} ${JSON.stringify(r12)}`);
   console.log(`sizes: 1.3.0 owner save ${v1json.length} B, after migration + this test's runs ${v2json.length} B`);
 } finally {
   try { fs.rmSync(old.dir, { recursive: true, force: true }); } catch (_) { /* best effort */ }

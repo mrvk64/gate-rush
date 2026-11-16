@@ -1,0 +1,62 @@
+GATE RUSH 1.5.0 - P2 CHASE: WHAT WAS BUILT, THE CONTRACTS P4 / P3 / THE DOCS NEED
+=================================================================================
+Branch r9/P2 (on r9-150). CHASE plays only through ?type=chase&debug=1 until P4 sets LEVEL_TYPES.chase.enabled.
+
+THE LEVEL
+- Script: a RUN (levelgen generateRunSteps, gates = round((0.85·runLen - 140) / 100) + 1, E-trace to 1.1 x eRun, fixed lines as a
+  score term) + 'chase' (the BREACH at 110 m, the finale: keepsRun) + 'safezone' (the doors at the course end) + 'wreck' events;
+  run-up and boss dropped. eRun = round5(0.8 x E_boss) (the run's fit), eTarget = round5(1.12 x E_boss) = data.eTargetOf
+  (CHASE.eTargetFrac; the stars: 3★ at 0.9 x eTarget, about 1.0 x E_boss; fix pass, see below). script.chase / the chase event's
+  spec: L, seed, c0, amp, pd, holdM / holdS, biteK, surges [{ d, amp }] (by distance), ref (the push reference: the design line on
+  the converted lanes), doorsM, startM, v, idle (the idle verdict rows), design. script.expected = the run's design line as
+  generated (minus the run-up); converted lanes keep the original as lane.was, so validate-levels checks the run as generated.
+- Gap model (chasegen.gapStep, 60 Hz in chase.js, 20 Hz in the generator): dg/dt = pd·c0·r^pushExp·shop·weapon - c0 - surge
+  - kRb·(g - gRest)+ + sprint - stumble, r = C / ref(d) (pushExp [0.6 below, 0.25 above]; gRest 4, kRb 0.35,
+  pd 1.5 / 1.55 / 1.65 / 1.7 at L12 / 27 / 44 / 57); DROP: the gap grows at road speed for
+  holdM / v s; claws under 2.5 m (1 + 0.015·C /s), bites at 0 ((4 + 0.1·C)·biteK /s, biteK = 1 + (L - 12) / 72, cap 3).
+  Shop: shopFactor compensates fire x damage above the expected shop and the bigger squad it buys ((pExp / p)^0.5).
+- Gates: two new lane ops (gates.js, materials.js 8 types): 'sprint' {value m, cap 2 x value, step hits per m} (teal, arrow top,
+  » icon + digits) and 'wall' {value 1, cap 2, step hits} (wood amber, flat top, planks icon + digit). Count-neutral; gate:pass
+  carries op / value; levelgen.laneOutcome reads them as E (chasesim.chasePartOf restores lane.was for validation). Converted from lanes neither the design
+  line nor the full-intake line takes, up to the last surge, the first a sprint (lanes [[12,[2,1]],[22,[3,2]],[44,[3,3]]]).
+- Wrecks: carL / carR (a car across one half, 0.4 m past the centre), narrows (|x| > 1.5), rubble (|x| < 1, from L33); ≥ 30 m from
+  every gate, none in the 50 m after the breach or the last 60 m; hit test once at the front row on the logical formation's x
+  extent (stumble 1.0·v·o for 1 s, crush 10 % x o). 1 per gate gap (1.5 from L44).
+- Idle rule (C11, chaseCheck in levelgen's attempt loop): nosteer / fixL / fixR at the expected shop and rank 10, 3 assist charges +
+  their own planks DROPPED under 3 m, weapons FIRED at once, count 0 before 0.8 of the course (the PLAN's 0.9 with margin;
+  tools/chasesim.js checks 0.9). Side repair = wrecks turned onto / added for the surviving line (6 passes; no lane ever moves).
+  When no attempt passes, chaseHarden adds wrecks until the idle rule holds.
+- Runtime (chase.js): the breach banner RUN!, rig 'chase' (derived pitch: the front row at 50 %, follow 0.3 / 0.5 x squad x),
+  world.despawnZ 22, gates.setGlyphScale(1.25), squad.setFormation('chase') (rear guard, cosmetic), crowd.beginBlock (700 / 450 /
+  250 / 200 drawn), DROP on hud:action (icon planks, id 'chase.drop'), surges warned 1.2 s ahead (SURGE!), SAFE ZONE AHEAD at
+  200 m with the TO SAFETY counter, the gatehouse at doors - 70 m, the doors at the back row: stopRoad 2 s, doors slam, crowd
+  piles on them at the tier cap, ESCAPED!, level.finish(true, 'escaped'). stat: kills (shown, display only), presses (DROP),
+  score (SCORE.chase clean 500 + 20 / m of gap at the doors), bonus (6 x L on a clear: the 'Escaped' chip).
+- Cues (CHASE_AUDIO): chase:breach, chase:surge, chase:sprint, chase:drop, chase:trip, chase:doors; loop chase_heart under 3 m;
+  music:mode 'hold' (swell on surges). Lessons (HINTS, once ever): chase.gap, chase.sprint, chase.wall, chase.drop, chase.wreck.
+- Text: TYPES_TEXT brief.chase, results.chase (ESCAPED, kills, score, bonusMode 'Escaped'), codex 'type.chase' + the THE CHASE
+  section (chase.gap / sprint / wall / drop / wreck), STRINGS.chase.*.
+
+SHARED-FILE HOOKS P3 / P4 SHOULD KNOW
+- levelgen.modeLines(script, rk) → { nosteer, fixL, fixR, greedy, max } simulate results (escort has its own escortAux).
+- main.js SYSTEMS ['chase', ChaseSystem, 4]; engine.js steps / renders ctx.chase after hold; level.js RESET_ORDER + 'chase'
+  (escort adds its own line next to each).
+- check-imports: chase.js may import ./obstacles.js. sw.js PRECACHE and index.html modulepreload carry chase / chasegen /
+  obstacles (artifact.html is rebuilt at release by tools/build-artifact.js).
+- crowd.js block mode: beginBlock / setFront / killNear / setDrawBudget; uFace / uGait uniforms (hold values unchanged).
+- fx.ribbon(x, z0, z1, hw, hex, alpha); fx gate-pass kinds for 'sprint' / 'wall'; GATE_KEYS / C_GATE have 8 entries.
+- render RENDER.rigs.*.portrait / landscape .follow [pos, look] (x x the followed squad x).
+
+CUT FOR THE BUDGET (+95,000 / +29,500): chase.botView (the harness reads _st / _spec / _obs),
+the plank / splinter cues, the HUD edge glow (no hud:edge in ui; the ribbon and the label carry the danger), sprint streaks,
+the flamer's rear push; the design's horde-HP-per-metre table (the reference line replaces it).
+
+
+FIX PASS (independent check: the chase rode at 11 m and the design bot 3-starred L12)
+- Data: gRest 8 -> 4, kRb 0.25 -> 0.35, pd [[12,1.6],[60,1.6],[120,1.5]] -> [[12,1.5],[27,1.55],[44,1.65],[57,1.7]] (lerp, held),
+  pushExp below 1.25 -> 0.6 (a squad under the design count bleeds instead of falling off a cliff once caught), eFrac 0.8 -> 1.12
+  with a new runFrac 0.8: chaseSpec fits the run to eRun (unchanged scripts) and the stars count against eTarget.
+- chasesim (fix/chasesim-fit-final.txt, L12-57 x 5 seeds): the design line spends 91-96 % of the chase at 3-8 m, minimum 2.1-3.7 m,
+  never caught, 0.9-1.44 x eRun at the doors; every idle line dies before 0.9 of the course.
+- Engine (fix/final): design / skilled x 10 seeds on L12 / 22 / 27 / 44 / 57; the traces put both bots at 3-8 m for 64-93 % of the
+  chase with the doors gap at 5.5-7 m (was ~11). 3★: L12 design 2/10, skilled 5/10; L44 skilled 3/10, design 1/6 clears.

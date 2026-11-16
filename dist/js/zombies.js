@@ -18,12 +18,13 @@
 // Events emitted (module-level reused payload objects — listeners must copy, never retain):
 //   zombie:spawn { id, type, x, z, hp }
 //   zombie:hit { id, type, x, y, z, damage, hp, maxHp, killed }
-//   zombie:die { id, type, x, z, cause }             cause ∈ bullet | bite | crush | burn | explosion | cleanup
+//   zombie:die { id, type, x, z, cause }             cause ∈ bullet | bite | crush | burn | explosion | cleanup (1.5.0: | grab | bumper)
 //   zombie:bite { id, type, x, z, kills }
 //   zombie:telegraph { id, kind, x, z, radius, duration }   kind ∈ ring | spit | screech | charge | lunge
 //   zombie:stagger { id, x, z }
 //   spit:impact { x, z, radius, kills }
-//   coin:pickup { amount, x, y, z, source:'kill' }  (kills with cause ≠ bite | cleanup; THE only coin path of this module)
+//   coin:pickup { amount, x, y, z, source:'kill' }  (kills with cause ≠ bite | cleanup | grab | bumper; THE only coin path of this module)
+// 1.5.0 (P3): setContactProvider (the escort's truck, tested before the APC and the formation), attach / detach.
 //
 // Hot paths (step / render / every query) allocate nothing: typed arrays sized once in init() at the
 // High-tier capacity (§14 rule 3), module-level scratch objects, no closures, no array literals.
@@ -88,6 +89,9 @@ const F_CHARGE_TOLD = 1024;
 const F_FRONT_WALK = 2048; // brute: touched the formation behind its front edge, walking to the front (QA ENE-12)
 const F_BACKOFF = 4096;    // brute: swing backstop — staggering back BRUTE_BACKOFF_M before re-telegraphing (QA ENE-12)
 const F_FROZEN = 8192;     // brute: in the stagger freeze this step (set by _aiBrute, read by _contact)
+const F_ATTACHED = 16384;  // 1.5.0: on a contact provider's slot (escort climber): position from the provider, no AI / contact / integrate
+/** 1.5.0: setContactProvider's answers (p.onContact). */
+export const C_NONE = 0, C_ATTACH = 1, C_CRUSH = 2, C_HOLD = 3, C_BRUTE = 4, C_BUMPER = 5;
 
 // Stable ids: id = (generation << ID_SLOT_BITS) | slot (ARCH D6). Generation wraps at 19 bits so ids stay
 // positive 31-bit integers; 2^19 reuses of one slot never happen inside a run.
@@ -271,7 +275,10 @@ function commitAttr(attr, count, range) {
 }
 
 /** Reused spawn-options object for spawnWave (spawn copies the fields it needs). */
-const SPAWN_OPTS = { guardEventId: -1, guardLane: -1, lunge: false };
+const SPAWN_OPTS = { guardEventId: -1, guardLane: -1, lunge: false, climb: false };
+/** 1.5.0: a contact provider's slotPos out (reused). */
+const SLOT_POS = { x: -0, z: -0 };
+
 
 // ---------------------------------------------------------------------------------------------
 // Zombies
@@ -298,6 +305,8 @@ export class Zombies {
     this._gActive = null; this._gX0 = null; this._gY0 = null; this._gZ0 = null; this._gTx = null; this._gTz = null;
     this._gT = null; this._gDur = null; this._gKills = null; this._gDecal = null; this._gPreview = null; this._gOwner = null; this._gCount = 0;
     this._t = 0; this._prevSquadX = 0; this._squadVx = 0; this._dt = WORLD.step; this._road = 0; this._sx = 0; this._scz = 0;
+    this._despawnZ = 0.5; this._despawnZ = WORLD.despawnZ;   // 1.5.0: ctx.world.despawnZ, read per step (Double field)
+    this._contactP = null; this._y = null; this._slotOf = null; this._climb = null; this._attX = null; this._attZ = null; this._attT = null;   // 1.5.0
     this._offQuality = null;
     this._onMoveFns = null;
     this._hasBlob = false;   // render.blobShadowSlot available (Low-tier blob discs)
@@ -353,6 +362,10 @@ export class Zombies {
     this._tintR = new Float32Array(CAP); this._tintG = new Float32Array(CAP); this._tintB = new Float32Array(CAP);
     this._swings = new Uint8Array(CAP);       // brute: swings landed (QA ENE-12 backstop)
     this._backZ = new Float32Array(CAP);      // brute: z the backstop stagger walks back to
+    this._y = new Float32Array(CAP);          // 1.5.0: drawn height (0 but on a contact provider's slot)
+    this._slotOf = new Int8Array(CAP).fill(-1);   // 1.5.0: the provider slot an F_ATTACHED zombie holds
+    this._climb = new Uint8Array(CAP);        // 1.5.0: spawned by a climber wave (wave.truck): it may climb a provider
+    this._attX = new Float32Array(CAP); this._attZ = new Float32Array(CAP); this._attT = new Float32Array(CAP);   // 1.5.0: where it attached, since
     this._state = new Uint8Array(CAP);
     this._type = new Uint8Array(CAP);
     this._flags = new Uint16Array(CAP);
@@ -474,8 +487,10 @@ export class Zombies {
       this._guardLane[s] = -1;
       this._burnUntil[s] = 0;
       this._binNext[s] = -1;
+      this._y[s] = 0; this._slotOf[s] = -1; this._climb[s] = 0;   // 1.5.0
       if (this._hasBlob) render.blobShadowSlot(BLOB_BASE + s, 0, 0, 0);
     }
+    this._contactP = null;                             // 1.5.0: a level start clears the provider
     for (let b = 0; b < NBINS; b++) this._binHead[b] = -1;
     this._alive = 0;
     // globs
@@ -600,6 +615,7 @@ export class Zombies {
     if (t === T_RUNNER) this._timer[slot] = rng.range(0, ZOMBIES.runner.zigzag.retarget);
     else if (t === T_SPITTER) this._timer[slot] = rng.range(SPIT_FIRST_DELAY[0], SPIT_FIRST_DELAY[1]);
     if (t === T_CRAWLER && opts && opts.lunge) this._flags[slot] |= F_LUNGE | F_LUNGE_TOLD;
+    this._y[slot] = 0; this._slotOf[slot] = -1; this._climb[slot] = opts && opts.climb === true ? 1 : 0;
 
     // cosmetic tint jitter (ZOMBIES.common.tintJitter) from the fx rng — never perturbs gameplay
     const j = ZOMBIES.common.tintJitter;
@@ -654,6 +670,7 @@ export class Zombies {
     opts.guardEventId = wave.guardEventId !== undefined ? wave.guardEventId : -1;
     opts.guardLane = wave.guardLane !== undefined ? wave.guardLane : -1;
     opts.lunge = false;
+    opts.climb = wave.truck === true;                        // 1.5.0: an escort climber wave
     let spawned = 0;
 
     if (pattern === 'column') {
@@ -1100,13 +1117,14 @@ export class Zombies {
 
     P_DIE.id = makeId(slot, this._gen[slot]); P_DIE.type = type; P_DIE.x = x; P_DIE.z = z; P_DIE.cause = cause;
     ctx.events.emit('zombie:die', P_DIE);
-    if (cause !== 'bite' && cause !== 'cleanup') {
+    this._y[slot] = 0;                                     // 1.5.0: a climber falls from its slot
+    if (cause !== 'bite' && cause !== 'cleanup' && cause !== 'grab' && cause !== 'bumper') {
       P_COIN.amount = ECONOMY.kill[type]; P_COIN.x = x; P_COIN.y = DEF[t].height * COIN_Y_FRAC; P_COIN.z = z; P_COIN.source = 'kill';
       ctx.events.emit('coin:pickup', P_COIN);
     }
   }
 
-  /** Behind-the-camera recycle (z > WORLD.despawnZ): zombie:die {cause:'cleanup'} and the slot is freed at once. */
+  /** Behind-the-camera recycle (z > ctx.world.despawnZ): zombie:die {cause:'cleanup'} and the slot is freed at once. */
   _recycle(slot) {
     this._die(slot, 'cleanup');
     this._free(slot);
@@ -1146,6 +1164,7 @@ export class Zombies {
     this._t += dt;
     this._dt = dt;
     this._road = ctx.world.roadSpeed;
+    this._despawnZ = ctx.world.despawnZ > 0 ? ctx.world.despawnZ : WORLD.despawnZ;
     const sx = squad.x;
     // squad lateral velocity estimate (smoothed) for the spit lead (lerpExp written inline: no boxed helper call)
     this._squadVx += ((sx - this._prevSquadX) / dt - this._squadVx) * (1 - Math.exp(-SQUAD_VX_SMOOTH * dt));
@@ -1163,7 +1182,7 @@ export class Zombies {
         if (st === S_DYING) {
           // the body is carried by the road; freed after death.free or once behind the camera
           Z[s] += road * dt;
-          if (now - this._deathTime[s] >= freeAfter || Z[s] > WORLD.despawnZ) this._free(s);
+          if (now - this._deathTime[s] >= freeAfter || Z[s] > this._despawnZ) this._free(s);
           continue;
         }
         if (st !== S_ALIVE) continue;
@@ -1183,6 +1202,7 @@ export class Zombies {
    * pass x/z to their emitters.
    */
   _stepAlive(s, t) {
+    if ((this._flags[s] & F_ATTACHED) !== 0) { this._stepAttached(s); return; }   // 1.5.0: on a provider's slot
     if (t === T_WALKER) this._aiWalker(s);
     else if (t === T_RUNNER) this._aiRunner(s);
     else if (t === T_CRAWLER) this._aiCrawler(s);
@@ -1354,6 +1374,11 @@ export class Zombies {
    */
   _contact(s, t) {
     const z = this._z[s];
+    const cp = this._contactP;                              // 1.5.0: a contact provider (the escort truck) first
+    if (cp !== null && z > cp.zMin && z < cp.zMax && cp.touches(this._x[s], z, RADIUS[t])) {
+      const r = this._providerContact(s, t, cp);
+      if (r >= 0) return r === 1;
+    }
     if (z > APC_CHECK_Z && this._touchesApc(s)) {
       const troops = this.ctx.troops;
       if (t === T_BRUTE) {
@@ -1425,6 +1450,81 @@ export class Zombies {
     return true;
   }
 
+  /** 1.5.0: slot s touches the contact provider (onContact's C_*): −1 it passes (the APC and the formation next), 0 held or
+   *  attached, 1 died. Rare. */
+  _providerContact(s, t, cp) {
+    const a = cp.onContact(makeId(s, this._gen[s]), TYPES[t], this._climb[s] === 1);
+    if (a === C_ATTACH) return (this._flags[s] & F_ATTACHED) !== 0 ? 0 : -1;   // the provider called attach()
+    if (a === C_CRUSH || a === C_BUMPER) { this._die(s, a === C_CRUSH ? 'crush' : 'bumper'); return 1; }   // a bumper kill pays no coins
+    if (a === C_HOLD) { this._vx[s] = 0; this._vz[s] = 0; return 0; }
+    if (a !== C_BRUTE || t !== T_BRUTE) return -1;
+    // the APC rule against the provider: holds and swings (ring, cooldown, swing count, backstop); each swing is p.onSwing(id)
+    let flags = this._flags[s];
+    if ((flags & F_BACKOFF) !== 0) return 0;
+    this._vx[s] = 0; this._vz[s] = 0;
+    if ((flags & F_RING) === 0) { flags |= F_RING; this._aux[s] = 0; this._startRing(s); }
+    if ((flags & F_FROZEN) === 0 && this._timer[s] <= 0 && (flags & F_RING_DONE) !== 0) {
+      if (this._swings[s] >= BRUTE_MAX_SWINGS) flags = this._beginBackoff(s, flags);
+      else {
+        cp.onSwing(makeId(s, this._gen[s]));
+        this._swings[s]++;
+        this._timer[s] = ZOMBIES.brute.swing.cooldown;
+        this._emitBite(s, 0);
+      }
+    }
+    this._flags[s] = flags;
+    return 0;
+  }
+
+  /** 1.5.0: an F_ATTACHED zombie slides (provider slideS, smoothstep) from where it attached to its slot and hangs there, facing the
+   *  provider's centre line, raised and pitched over the rail; it never despawns while attached. */
+  _stepAttached(s) {
+    const cp = this._contactP, dt = this._dt;
+    if (cp === null) { this.detach(makeId(s, this._gen[s]), ''); return; }
+    cp.slotPos(this._slotOf[s], SLOT_POS);
+    const at = this._attT[s] + dt;
+    this._attT[s] = at;
+    let u = at / cp.slideS;
+    if (u > 1) u = 1;
+    const e = u * u * (3 - 2 * u);
+    const x0 = this._x[s], z0 = this._z[s];
+    const nx = this._attX[s] + (SLOT_POS.x - this._attX[s]) * e, nz = this._attZ[s] + (SLOT_POS.z - this._attZ[s]) * e;
+    this._vx[s] = (nx - x0) / dt; this._vz[s] = (nz - z0) / dt;
+    this._x[s] = nx; this._z[s] = nz;
+    this._y[s] = cp.climbY * e;
+    this._pitch[s] = cp.climbPitch * e;
+    this._yaw[s] = Math.atan2(nx - cp.cx, nz - cp.cz);  // faces the body's centre (yaw π faces +z)
+    const burning = this._burnUntil[s] > this._t;
+    if (burning !== ((this._flags[s] & F_BURN_VIS) !== 0)) this._applyBurnTint(s, burning);
+  }
+
+  /** 1.5.0: the contact provider (escort's truck) or null. p: { zMin, zMax, cx, cz, slideS, climbY, climbPitch, touches(x, z, r),
+   *  onContact(id, type, climber) → C_*, slotPos(slot, out), onSwing(id) }; climber: spawned by a truck: true wave. */
+  setContactProvider(p) { this._contactP = p && typeof p.onContact === 'function' ? p : null; }
+
+  /** 1.5.0: zombie `id` climbs into provider slot `slot` (from onContact, which then answers C_ATTACH). False when not alive. */
+  attach(id, slot) {
+    const s = this._aliveSlot(id);
+    if (s < 0) return false;
+    this._flags[s] |= F_ATTACHED;
+    this._slotOf[s] = slot;
+    this._attX[s] = this._x[s]; this._attZ[s] = this._z[s]; this._attT[s] = 0;
+    this._inst[this._type[s]].setSpeed(this._slotToInst[s], 0.4);   // a slow climb
+    return true;
+  }
+
+  /** 1.5.0: zombie `id` leaves its slot: with a cause it dies ('grab' leaps off with a survivor, no coins; 'crush' pays), else it
+   *  drops back on the road and walks on. False when it was not attached. */
+  detach(id, cause) {
+    const s = this._aliveSlot(id);
+    if (s < 0 || (this._flags[s] & F_ATTACHED) === 0) return false;
+    this._flags[s] &= ~F_ATTACHED;
+    this._slotOf[s] = -1; this._y[s] = 0; this._pitch[s] = 0;
+    if (cause) this._die(s, cause);
+    else this._inst[this._type[s]].setSpeed(this._slotToInst[s], 1);
+    return true;
+  }
+
   /**
    * r7 (balance:5, GDD §6.1): soldiers one brute swing at the formation kills — clamp(round(ZOMBIES.brute.swing.killsFrac · C),
    * 1, BITE[T_BRUTE]): 3 from C ≈ 42 up, 2 at 25–41, 1 below 25 (a flat 3 per second took 6–10 % of a 30–50 squad and caused
@@ -1451,7 +1551,7 @@ export class Zombies {
     const vxs = (nx - x) / dt;
     this._vx[s] = vxs;
     this._x[s] = nx; this._z[s] = nz;
-    if (nz > WORLD.despawnZ) { this._recycle(s); return; }
+    if (nz > this._despawnZ) { this._recycle(s); return; }
 
     // facing: toward the squad, swung by the lateral velocity (own forward speed, never the road scroll);
     // yawToward + wrapAngle + lerp written inline
@@ -1694,7 +1794,7 @@ export class Zombies {
     const hpM = this._hpMesh.instanceMatrix.array;
     const hpA = this._hpAttr.array;
     const X = this._x, Z = this._z, VX = this._vx, VZ = this._vz, state = this._state, flags = this._flags;
-    const H = this._hp, MH = this._maxHp, yaw = this._yaw, pitch = this._pitch, deathTime = this._deathTime;
+    const H = this._hp, MH = this._maxHp, yaw = this._yaw, pitch = this._pitch, deathTime = this._deathTime, Y = this._y;
     const now = this._t, road = this._road;
     let nBars = 0;
 
@@ -1738,7 +1838,7 @@ export class Zombies {
         m[o] = cy;           m[o + 1] = 0;   m[o + 2] = -sy;       m[o + 3] = 0;
         m[o + 4] = sy * sp;  m[o + 5] = cp;  m[o + 6] = cy * sp;   m[o + 7] = 0;
         m[o + 8] = sy * cp;  m[o + 9] = -sp; m[o + 10] = cy * cp;  m[o + 11] = 0;
-        m[o + 12] = x;       m[o + 13] = 0;  m[o + 14] = z;        m[o + 15] = 1;
+        m[o + 12] = x;       m[o + 13] = Y[s];  m[o + 14] = z;     m[o + 15] = 1;   // 1.5.0: Y 0 but on a provider's slot
         if (st !== S_ALIVE) continue;
         if (blob) render.blobShadowSlot(BLOB_BASE + s, x, z, blobScale);
         if (!barNever && nBars < barCap) {
@@ -1749,7 +1849,7 @@ export class Zombies {
             hpM[ob] = barScale; hpM[ob + 1] = 0; hpM[ob + 2] = 0;  hpM[ob + 3] = 0;
             hpM[ob + 4] = 0;    hpM[ob + 5] = 1; hpM[ob + 6] = 0;  hpM[ob + 7] = 0;
             hpM[ob + 8] = 0;    hpM[ob + 9] = 0; hpM[ob + 10] = 1; hpM[ob + 11] = 0;
-            hpM[ob + 12] = x;   hpM[ob + 13] = barY; hpM[ob + 14] = z; hpM[ob + 15] = 1;
+            hpM[ob + 12] = x;   hpM[ob + 13] = barY + Y[s]; hpM[ob + 14] = z; hpM[ob + 15] = 1;
             hpA[nBars] = H[s] / MH[s];
             nBars++;
           }

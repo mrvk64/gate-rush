@@ -1,0 +1,70 @@
+GATE RUSH 1.5.0 - P1 SCAFFOLD: THE HOOKS P2 (CHASE) AND P3 (ESCORT) BUILD ON
+=============================================================================
+Branch r9/P1. Every hook is a no-op until a mode uses it (RUN, night and Horde play as in 1.4.0 apart from the four fixes).
+
+level.js
+- MODE_OF { horde: 'hold', chase: 'chase', escort: 'escort' }; PREP_OF chase ['crowd', 'chase'], escort ['escort'].
+  A base whose ctx member is missing plays as a RUN (this._mode null). main.js must create ctx.chase / ctx.escort and put them
+  in SYSTEMS / RESET_ORDER (P2 / P3). A run of another base cancels the prepares of every system it does not use (PREP_ALL).
+- keepsRun (C1): a ModeSystem with `keepsRun === true` begins at its script.finale event WITHOUT ending the run: phase stays 'run',
+  _bossReached stays false, gates / pickups / waves / run-up keep going. Chase: finale 'chase' (the breach event). Escort: its
+  mode event first in the script (at 1 m) as script.finale 'escort'. Other script events still reach mode.fireEvent(ev).
+  Note: level's _bossAt is the finale's `at`; debugSkip('run') jumps there only while it lies > 20 m ahead, and after the mode
+  began debugSkip('run') goes to mode.debugSkip('run').
+- Fraction (C2): a lost keepsRun level reads fraction = distance / length (runShare is ignored; drop runShare from the new
+  LEVEL_TYPES entries).
+- Coins on a loss (C14): consolation (levelBonus x failBonusFrac x fraction x bonusMult) is credited, then payout =
+  floor(run.coins x ECONOMY.gameOverKeep). A run with no input pays 0 and gets no consolation. _runTouched(): a gate decision,
+  FIRE (weapon:start), input.activityM travel >= LEVELS.curve.assist.minTravelM since the run start, or the mode's
+  stat.holdActions > 0 / stat.presses > 0. => A MODE MUST COUNT ITS BUTTON PRESSES IN stat(out).presses (DROP, PLATE).
+  Result / level:failed payload: idle (bool). Card: "Reached 62 % · Half kept +238" / "Reached 40 % · No input: 0 coins".
+- mode.stat(out) fields level resets first: holdActions, holdSurgeWindows, eased[3], staggers, lineHeld, kits, kills, total,
+  surgesCleared, + presses (int), score (the mode's own score terms for this outcome, added to run.score on a clear and a loss),
+  bonus (coins paid on a CLEAR, credited as 'bonus' and shown as the results' bonusMode chip; the chip's name is
+  STRINGS.types.results[typeKey or base].bonusMode, e.g. 'Escaped' / 'Delivered'; Horde keeps 'Line held').
+- Assist (C10): LEVEL_TYPES[key].assist 'charges' / 'plates' cap at 3 steps (MODE_ASSIST_STEPS); k reaches mode.begin as
+  P_BEGIN.assistK (nothing is given at the start). Set LEVEL_TYPES.chase / nightChase assist: 'charges' in P2 (still 'soldiers').
+- ctx.world.despawnZ: reset to WORLD.despawnZ (14) at every run start; gates, zombies, pickups and the boss's thrown car recycle
+  past it. Chase sets 22 at the breach.
+
+data.js
+- eTargetOf(L): chase = round5(CHASE.eTargetFrac x E_boss) once CHASE.eTargetFrac > 0; escort = ESCORT.survivorsOf(L) once that
+  function exists; else E_boss. The generators must put the same value in script.eTarget (validate-levels checks it).
+- Empty regions (exported, merged): CHASE, CHASE_TEXT, CHASE_AUDIO; ESCORT, ESCORT_TEXT, ESCORT_AUDIO. *_TEXT / *_AUDIO follow the
+  r8 region shape { hints, strings, codex } / cues and are already in TEXT_REGIONS / AUDIO_REGIONS.
+- RENDER.icons.row2 + 'planks' (two boards) and 'plate' (riveted sheet): usable as hud:action / hud:pill icons.
+- Railgun NEW card moved to L11 (WEAPONS.railgun.unlock 11, PICKUP_SCHEDULE[10]); validate-levels' ladder has L12 in noPickup.
+
+levelgen.js
+- BASE_STEPS { horde: hordeSteps }: add `chase: chaseSteps` / `escort: escortSteps` (function* (Ln, seedU) -> typed script).
+- generateRunSteps(L, seed, opts, check) (C11): pass opts.fixed { lim: 99, win: 99 } to switch the boss fixed-line caps off, and
+  check = function* (script) -> true when the attempt passes the mode's idle rule (yield between steps; it may repair in place).
+  A failing attempt scores +1000 and the loop re-rolls to the long budget (GEN_ATTEMPTS_WEAK); the side repair is skipped.
+
+fx.js
+- fx.label2 (exists from construction): set(slot 0..1, value (int, < 0 none), suffix (one atlas char: 'M', '+', '−', 'x', '/',
+  'A', 'X', '.', '★', '⚡'; '' none), colorHex, px, x, y, z, pinFrac), hide(slot), pinned(slot). Drawn on the count label's
+  digit atlas and dark plate in the overlay pass; pinFrac (from the top, e.g. 0.92) holds an anchor that is lower on screen
+  at that line at its own depth. The atlas has no '!' and no chevron: chase's CAUGHT "!" and the off-screen chevron need another
+  glyph (P2: e.g. the '⚡' cell, or extend RENDER.atlas.rows). Written on last frame's camera (as the count label).
+
+ui.js / css
+- level:start sets the bar's end icon from script.finale: hold -> 'barricade', chase -> 'safe', escort -> 'flag'; hud:progress
+  endIcon accepts 'safe' / 'flag' (css #progress-skull.safe / .flag in the TYPES-UI region).
+- css/game.css has empty "r9 REGION CHASE (P2)" / "r9 REGION ESCORT (P3)" blocks (the PLAN said index.html; the CSS lives here).
+
+tools
+- check-imports (C12): levelgen may import ./chasegen.js and ./escortgen.js, chase.js may import ./chasegen.js; chasegen /
+  escortgen are PURE (util + data only).
+- package --lint enforces JS_CAP 3,220,000 B raw / 1,005,000 B gzip.
+
+hold.js (fixes)
+- HORDE.fire.twinR 1.25 for the Hulk Twins' boss column (this._bossR set at the boss spawn); holdsim.js still models 1.77.
+- A REPAIR press in a section's cool-down pops 'REPAIRING' (throttled 0.4 s); the bubble chip says it too; stat.presses.
+
+NOTES FOR P2 FROM THE P1 CHECKS
+- label2's pin line is a fraction of the whole screen: 0.92 lands in the FIRE / DROP button row at 390x844. Pin the gap label at
+  about 0.86 or above, and anchor it on the squad's x (an anchor far from the camera's x drifts to a side when it is close to the
+  camera; a pinned label is clamped inside the screen's sides but can still sit under a button).
+- The Hulk Twins fix did not reach its target (oscillator <= 4/32); twinR 1.25 ships. A wiper's Twins kills moved from ~35 s to
+  ~36-38 s, still before the enrage. A different lever (e.g. the boss share only for the Twin the lane stands on) is a 1.5.1 item.

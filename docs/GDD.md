@@ -647,4 +647,36 @@ are under `docs/build/r8/` (GDD-10-curve, GDD-7-boss, GDD-9.3-stars, GDD-horde-t
   the squad's flashlights, zombie eye sprites and crate flares carry the look.
 - **Types.** A level's type shows as a badge on its tile. A cleared level that now plays a new type keeps its stars, shows
   a ring, and pays full coins on its first clear as the new type. Each type has a one-time briefing.
-- **Waits for 1.5.0.** CHASE, ESCORT and the night combinations.
+- **Waits for 1.5.0.** CHASE, ESCORT and the night combinations. (1.5.0 shipped CHASE and ESCORT; see §19.)
+
+## 19. Round 9 (release 1.5.0): CHASE and ESCORT
+
+The values are in `js/data.js` (CHASE_GEN, CHASE, OBSTACLES, ESCORT_GEN, ESCORT, LEVEL_TYPES); the design notes are the r9 package
+notes (P1 hooks, P2 chase, P3 escort, P4 integration).
+
+- **The rule still holds.** From about L3 a squad that is never steered loses, RETRY included, on every type. Each new type's
+  generator checks it in its attempt loop (the never-steering line and both held lines, at the expected shop and at rank 10, with
+  every assist used perfectly), and the engine bots confirm it: 0 clears for the hands-off bots on all 15 chase and escort levels
+  to L60, at the expected shop and at rank 10, with 6-retry streaks.
+- **Map.** CHASE on L12 (debut), 22, 27, 33, 37, 44, 49, 57; ESCORT on L18 (debut), 24, 28, 34, 42, 48, 54. L47 stays HORDE and
+  L53 / L58 stay NIGHT while the night combinations wait (`LEVEL_TYPES.combos` false; a combo slot plays its `offKey`).
+- **CHASE.** A gate run that turns into a pursuit: the horde breaks loose at 110 m and the GAP (metres from the back row to the
+  horde) runs to the doors at the end. The back rows push the horde back in proportion to the squad (pushExp 0.6 below the
+  reference line, 0.25 above it), surges close it, and a design-size squad rests near 4 m; under 2.5 m it claws, at 0 it bites.
+  Lane ops: » SPRINT (3 m, shot up to 2×) and PLANK (+1 barricade, shot +2, carry 3). DROP slams a barricade behind the squad.
+  Wrecks (cars across one half, narrows, rubble from L33) trip a squad that runs into them. Stars count against 1.12 × E_boss
+  (3★ at 0.85 of it, about 0.95 × E_boss); a clear pays an Escaped bonus (16 × L). REINFORCEMENTS: up to 3 barricade charges. A loss reads CAUGHT.
+- **ESCORT.** The truck drives its own lane through the run, changing sides between gates (a feint from L48). Climbers (extra
+  walkers in each wave, brutes from L28) climb its rails and grab a survivor when their ring fills; the squad can shoot a climber
+  only when a formation column is within 0.5 m of its rail, so the player has to stay in the truck's half. PLATE knocks the
+  fullest climber off and armours its slot (4 / 3 / 2 hits from L18 / 30 / 50). CHECKPOINT halfway (survivors and a plate), then
+  the gauntlet and the safe zone. Stars count delivered survivors (3★ at 0.9 of the total: 13 of 14 at L18, 17 of 18 at L48); a clear pays 0.5 × L per survivor. REINFORCEMENTS:
+  up to 3 plates. A loss reads TRUCK OVERRUN.
+- **Coins on a loss (all types).** Half of (picked-up coins + consolation); a run with no input (no gate decision, no FIRE, under
+  the minimum steering travel, no mode button) pays 0. The card says "Reached 62 % · Half kept +238" or "No input: 0 coins".
+- **Fixes.** The gate glow ring closes in gold at MAX; the Hulk Twins' boss column on a Horde is 1.25 m; a REPAIR tap during a
+  section's cool-down says REPAIRING; the railgun's NEW card moved to L11.
+- **Re-typed levels.** A cleared level that now plays CHASE or ESCORT keeps its stars, wears the ring and pays full coins on its
+  first clear as the new type (a player at L45 already has several of them behind).
+- **Waits for 1.5.1.** The night combinations (night chase, night escort, night horde), escort rescue gates and spitters, and a
+  stronger Hulk Twins fix against a player who only sweeps (lever B1 in docs/build/r9/P1-TWINS-DECISION.txt).

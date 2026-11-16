@@ -470,6 +470,7 @@ export class Weapons {
     this.beams = null; this.beamGlow = null; this.railCore = null; this.railArcs = null;
     this._muzzleFrame = null;
     this._tracerLen = FIRE.tracerLength;
+    this._clipX0 = 0.5; this._clipX0 = NaN; this._clipX1 = NaN; this._clipZ = NaN;   // 1.5.0 (P3): setTracerClip (NaN = off)
     this._ownedGeometries = [];
     this._ownedMaterials = [];
     this._meshes = [];
@@ -646,6 +647,7 @@ export class Weapons {
   /** Level-start state: no bullets, no power-up, no gear, every mesh hidden. Idempotent, allocation-free. */
   reset() {
     if (!this._inited) return;
+    this._clipX0 = NaN; this._clipX1 = NaN; this._clipZ = NaN;   // 1.5.0: a level start clears the tracer clip
     // end whatever is active so HUD pills / audio loops are released (emits nothing on a second call)
     if (this._w !== W_NONE) {
       P_WEND.id = WEAPON_IDS[this._w];
@@ -2034,6 +2036,7 @@ export class Weapons {
     const glowK = TRACER_GLOW_GAIN * LOW_GLOW_NORM;
     const bx = this._bx, by = this._by, bz = this._bz, bdx = this._bdx, bdz = this._bdz, bvy = this._bvy;
     const bspd = this._bspd, bage = this._bage, bkind = this._bkind;
+    const clx0 = this._clipX0, clx1 = this._clipX1, clz = this._clipZ;   // 1.5.0: NaN = no clip (every compare false)
     for (let i = 0; i < n; i++) {
       const spd = bspd[i];
       const dx = bdx[i], dz = bdz[i], vy = bvy[i];
@@ -2052,7 +2055,8 @@ export class Weapons {
       const h = L * 0.5;
       const cx = hx - ux * h, cy = hy - uy * h, cz = hz - uz * h;    // tracer centre
       const k = bkind[i];
-      const s = TR_SCALE[k];
+      const clip = hz > clz && hx > clx0 && hx < clx1;   // 1.5.0 (P3): cosmetic — a tracer inside the box is not drawn
+      const s = clip ? 0 : TR_SCALE[k];
       // TRS with local −Z along u, no roll (same basis as writeDirMatrix): z = −u, x = normalize(up × z), y = z × x
       const zx = -ux, zy = -uy, zz = -uz;
       let xx = zz, xz = -zx;
@@ -2060,7 +2064,7 @@ export class Weapons {
       if (xl < EPS) { xx = 1; xz = 0; xl = 1; }
       xx /= xl; xz /= xl;
       const yx = zy * xz, yy = zz * xx - zx * xz, yz = -zy * xx;
-      const sz = L * invBase;
+      const sz = clip ? 0 : L * invBase;
       const o = i * 16;
       m[o] = xx * s; m[o + 1] = 0; m[o + 2] = xz * s; m[o + 3] = 0;
       m[o + 4] = yx * s; m[o + 5] = yy * s; m[o + 6] = yz * s; m[o + 7] = 0;
@@ -2095,6 +2099,10 @@ export class Weapons {
     if (low) commitMesh(glow, n, true);
     else if (glow !== null && glow.visible) commitMesh(glow, 0, true);
   }
+
+  /** 1.5.0 (P3, escort): tracers whose head is inside x0 < x < x1, z > z are not drawn (the truck's footprint behind its nose:
+   *  rounds seem to leave from its nose instead of passing through the survivors). Cosmetic; NaN clears; a level start clears it. */
+  setTracerClip(x0, x1, z) { this._clipX0 = x0; this._clipX1 = x1; this._clipZ = z; }
 
   /** Muzzle flashes: camera-facing additive quads, frame 0 → 1 over FIRE.muzzleFlash.ms, fading out. */
   _renderMuzzles() {

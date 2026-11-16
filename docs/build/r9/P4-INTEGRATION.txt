@@ -1,0 +1,53 @@
+GATE RUSH 1.5.0 - P4 INTEGRATION, BALANCE AND THE OWNER PREVIEW
+================================================================
+Branch r9/P4 (worktree E:/Temp/claude/r9wt/P4) on r9-150 46d8b1e (P1 + P3 + P2). Version and sw.js NOT bumped (the main session
+releases); artifact.html not rebuilt (tools/build-artifact.js at release).
+
+WHAT CHANGED
+- js/data.js: LEVEL_TYPES.chase / .escort enabled. New key offKey on nightChase / nightEscort ('night'): with combos off, keyOfCode
+  returns combo.offKey || base. Without it L53 would have played a day CHASE (the PLAN assumed L53 / L58 stay NIGHT, owner default).
+  L47 (night horde) keeps its horde base as in 1.4.0. Balance: chase starThree 0.9 -> 0.85, escort 0.85 -> 0.9 (and their night
+  combos), ESCORT.coins.perSurvivorL 1.0 -> 0.5. TYPES_TEXT results.chase gains causes { squad: 'CAUGHT' } and a tip (ui shows a
+  type's tip on a loss with input, the steer line on a no-input loss: the P3 rule).
+- index.html legend line 2: CHASE and ESCORT chips; js/ui.js LEGEND2_KEYS (chip colours, _syncLegend2 for 4 chips + the ring).
+- css/game.css CHASE region: .tt-chevrons (two white chevrons on the blue disc; it was a plain disc).
+- tools/validate-levels.js: STAGE_140 pins chase / escort off (it fell back to the build flags); R5 is a rule of the full map
+  (types and combos on): with combos off it prints "R5 (info, combos off): N window(s) miss a type" instead of errors.
+- tools/check-save.js: STAGE_140 likewise; new (h) owner path.
+- tools/smoke.js: --matrix cells chase (L12, 110 s) and escort (L18, 120 s).
+
+MAP (build flags): C 12 22 27 33 37 44 49 57; E 18 24 28 34 42 48 54; L47 H, L53 N, L58 N. L1-60: S 25, H 12, N 8, C 8, E 7.
+
+BALANCE (evidence balance/, harness r9/P4/bsum.cjs, paypair.cjs)
+- Hands-off, every chase / escort level to L60, 3 seed families x 6-retry streaks (RETRY's fail / assist streaks), expected shop
+  and rank 10: chase bots idle, passiveFire, heldL, heldR, swipeOnce, swipePerSurge, steerThenIdle, dropMasher: 0 clears in
+  1,152 + 1,152 runs; escort bots idle, heldL, heldR, swipeOnce, steerThenIdle, plateMasher: 0 / 756 + 0 / 756; plateMasher with
+  REINFORCEMENTS k = 3 forced: 0 / 126. Idle runs pay 0 (C14).
+- Skilled clear (tuned values): chase design 35 / 40 clears, skilled 39 / 40 (every level cleared); 3 stars skilled 20 / 39, design
+  8 / 35 (L57: nobody 3-stars yet; the skilled bot's best is 0.995 of the need). Escort design 35 / 35 clears (3 stars 19), guard
+  19 / 35, greedy 0 / 35 (leaving the truck loses).
+- Pay (design bot vs the same level played as a RUN, same shop and seeds; chase-asrun / escort-asrun): chase 0.85-1.12 of the RUN;
+  escort was 1.02-1.39 (L18, L42 over +30 %), after perSurvivorL 0.5: 0.95-1.30 (mean of clears).
+- RUN digest: L1-30 x 3 seeds x passive / strongj (tester) with the six re-typed levels taken out: 65aab83f... IDENTICAL to P1's
+  file (144 rows). The re-typed rows play chase / escort (generic bots lose them, 0 errors).
+
+OWNER PATH
+- check-save (h): a 1.4.0 save at L45 (L1-44 cleared in their 1.4.0 types): the build rings exactly 12C 18E 22C 24E 27C 28E 33C 34E
+  37C 42E 44C; the other 45 of L1-60 keep their 1.4.0 type; the first chase / escort clear pays full, keeps the 3 stars, moves the
+  old bests to rec.prev, and the next run is a replay.
+- shots/ui-390/03-levels.png, ui-360/03-levels.png: the owner's grid (rings on the 11, chevron / truck badges, legend line 2 with
+  HORDE NIGHT CHASE ESCORT and NEW WAY TO PLAY, fits at 360 px).
+- Field Guide: the LEVEL TYPES rows CHASE / ESCORT stay "???" until played and name the next level of the type from the frontier
+  (1.4.0 rule: 49 / 48 for an owner at L45, though the ringed 44 / 42 are behind the player); the THE CHASE / THE ESCORT sections are open
+  (unlock = debut, the 1.4.0 Horde precedent).
+
+OWNER PREVIEW (not published)
+- harness r9/P4/mkowner140.mjs builds owner-140.json with 1.4.0's own save.js / data.js; r9/P4/mkpreview.sh exports the commit to
+  E:/Temp/claude/r9build/preview (plain) and E:/Temp/claude/r9build/preview-owner (seeded on first run, title "Gate Rush 1.5 preview").
+- The save carries the briefing hints a real 1.4.0 save has (mode.horde, mode.night: GOT IT writes mode.<key>), so only the
+  CHASE / ESCORT briefings show (fix pass, harness 6659371; checked in the browser pane: preview-check/brief-fix/).
+
+LEFT OPEN
+- The S24 frame checks (P2 check 5, P3 check 5) need the owner's phone.
+- L57 chase 3 stars unreached by the bots; escort L18 pays at +30 % of its RUN (the as-RUN greedy bot 2-stars it).
+- R5 with combos off: 29 windows past L55 miss a type (inherent until the combos land in 1.5.1).

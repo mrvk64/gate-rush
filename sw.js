@@ -46,9 +46,11 @@
 //            the balance package, scrolling lists and fullscreen in SETTINGS). v7 shipped in the 1.2.2 dist/.
 //   v8 → v9: release 1.4.0 (round 8: harder campaign F12, boss enrage, HORDE and NIGHT levels, save v2). v8 shipped in the
 //            1.3.0 dist/.
+//   v9 → v10: release 1.5.0 (round 9: CHASE and ESCORT levels, half coins on a lost run, gate glow ring, Hulk Twins reach,
+//            REPAIRING feedback; 31 modules). v9 shipped in the 1.4.0 dist/.
 'use strict';
 
-const VERSION = 'v9';
+const VERSION = 'v10';
 const APP_CACHE = 'gaterush-' + VERSION;          // §15.4 cache names gaterush-<VERSION> / gaterush-cdn-<VERSION>
 const CDN_CACHE = 'gaterush-cdn-' + VERSION;
 const CACHE_PREFIX = 'gaterush-';
@@ -90,6 +92,9 @@ const PRECACHE = [
   './js/crowd.js',
   './js/hold.js',
   './js/holdgen.js',
+  './js/escort.js',
+  './js/escortgen.js',
+  './js/chase.js', './js/chasegen.js', './js/obstacles.js',   // 1.5.0 (r9 P2)
   './js/night.js',
 ];
 
