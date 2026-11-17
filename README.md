@@ -104,3 +104,7 @@ node tools/package.js --check
 `check-imports` checks the module graph and banned calls, `check-codex` checks that the Field Guide and the lessons quote the current numbers from the data tables, and `tools/smoke.js` takes `--gpu sw` (software rendering, like a computer with no graphics chip) and `--viewport WxH`.
 
 Add `?debug=1` to the URL for an FPS and draw-call overlay that also shows the newest diagnostics lines. `?level=N` jumps straight to a level, and `?quality=low|med|high` forces a quality tier.
+
+## License
+
+Copyright (c) 2026 mrvk64. All rights reserved. The source is here to view; copying, reuse or republishing needs written permission. See [LICENSE](LICENSE). Three.js, loaded from a CDN at run time, has its own MIT license.

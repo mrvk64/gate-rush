@@ -2,6 +2,7 @@
   "name": "gate-rush",
   "version": "1.5.0",
   "private": true,
+  "license": "UNLICENSED",
   "type": "module",
   "description": "Gate Rush - mobile-first 3D zombie gate-runner (Three.js r170, procedural assets only)",
   "scripts": {

@@ -1,0 +1,11 @@
+Copyright (c) 2026 mrvk64. All rights reserved.
+
+Gate Rush, including its source code, procedural art, sound, level designs, text and documentation in this
+repository, is proprietary. The source is published so it can be viewed; no license is granted to copy, modify,
+distribute, publish, sublicense or sell it, in whole or in part, or to make games or apps derived from it, without
+written permission from the copyright holder.
+
+You may play the game at its official address and view this repository on GitHub.
+
+Third-party software: the game loads Three.js (https://threejs.org) at run time from a CDN. Three.js is not part of
+this repository and is covered by its own MIT license.
