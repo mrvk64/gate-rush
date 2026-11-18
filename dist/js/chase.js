@@ -20,7 +20,7 @@ const SEED = 29;                                        // the horde block's loo
 const HUD_DT = 1 / CHASE.hud.hz;
 const LOOP_S = 1;                                       // the heartbeat loop is re-asserted this often while it plays
 const P_ACTION = { on: false, id: 'chase.drop', icon: 'planks', badge: 0, disabled: false, label: '' };
-const P_BANNER = { text: '', kicker: '', color: 0, seconds: -0 };
+const P_BANNER = { text: '', kicker: '', color: 0, seconds: -0, top: false };
 const P_PILL = { id: '', icon: '', text: '', seconds: -0, x: -0, y: -0 };
 const P_COUNTER = { on: false, text: '', value: 0 };
 const P_LOOP = { id: 'chase_heart', on: false, gain: -0 };
@@ -30,6 +30,7 @@ const P_CUE = { x: -0, z: -0 };
 const HINT_OPTS = { hold: -0, until: null, priority: false, event: -1 };
 const V3 = new Vector3();
 const SCR = { x: -0, y: -0 };
+const LIVE = [];
 
 export class ChaseSystem {
   constructor(ctx) {
@@ -39,6 +40,7 @@ export class ChaseSystem {
     this._obs = new Obstacles(ctx);
     this._spec = null; this._state = ST_IDLE;
     this._inp = { C: 0, ed: 1, sf: 1, w: 1, v: 0.5, d: 0.5 };
+    this._glassAcc = 0.5;
   }
 
   init() {
@@ -56,7 +58,7 @@ export class ChaseSystem {
   /** Per-run state back to idle. */
   _reset() {
     this._state = ST_IDLE; this._spec = null; this._dropQ = 0; this._presses = 0; this._drops = 0; this._sprints = 0;
-    this._trips = 0; this._kills = 0; this._killAcc = 0; this._hudAcc = 0; this._loopAcc = 0; this._heart = false; this._surgeWarned = 0;
+    this._trips = 0; this._kills = 0; this._killAcc = 0; this._glassAcc = 0; this._hudAcc = 0; this._loopAcc = 0; this._heart = false; this._surgeWarned = 0;
     this._safeShown = false; this._gateOn = false; this._survivors = 0; this._gapAtDoors = 0; this._sprintQ = 0; this._plankQ = 0;
     this._lastBadge = -1; this._lastDis = false; this._dangerSeen = false; this._dropHinted = false; this._wreckSeen = false;
     this._sprintSeen = false; this._plankSeen = false; this._lastCounter = -1; this._assistK = 0;
@@ -173,7 +175,10 @@ export class ChaseSystem {
         inp.sf = shopFactor(prof && prof.fireRate > 0 ? (prof.fireRate / FIRE.rateBase) * (prof.damage > 0 ? prof.damage : 1) : sp.pExp, sp.pExp, sp.profileExp, sp.surplusExp);
         const wid = ctx.weapons ? ctx.weapons.weapon : null;
         inp.w = wid && CHASE.rear[wid] > 0 ? CHASE.rear[wid] : 1;
-        const lost = gapStep(st, sp, inp, dt);
+        let lost = gapStep(st, sp, inp, dt);
+        const hd = ctx.hard;                 // HARD GLASS / THICK
+        if (hd && st.surged) st.surgeAmp *= hd.chase;
+        if (hd && lost > 0 && hd.claw > 1) { this._glassAcc += lost * hd.claw; lost = this._glassAcc | 0; this._glassAcc -= lost; }
         if (lost > 0 && squad) squad.removeSoldiers(lost, 'bite', squad.x, back);
         if (st.splintered) { const zb = this._obs.splinter(); this._burst('breach', 0, zb, 16); }
         if (st.surged) { P_MUSIC.swell = true; this._emit('music:mode', P_MUSIC); P_MUSIC.swell = false; }
@@ -215,7 +220,11 @@ export class ChaseSystem {
     while (this._surgeWarned < list.length && d >= list[this._surgeWarned].d - warnM) {
       this._surgeWarned++;
       const last = this._surgeWarned === list.length;
+      const gs = this.ctx.gates;                        // 1.6.0: a gate between z −45 and the commit keeps its digits clear
+      P_BANNER.top = false;
+      for (let i = 0, n = gs ? gs.liveEvents(LIVE, 3) : 0; i < n; i++) if (LIVE[i].z >= -45 && LIVE[i].z <= -4) P_BANNER.top = true;
       this._banner(S().surge, last ? S().safeAhead : '', CHASE.zones.danger, 1.2);
+      P_BANNER.top = false;
       this._emit('chase:surge', this._cue(0, this._backZ() + 8));
     }
   }

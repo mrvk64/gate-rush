@@ -970,7 +970,7 @@ export class Gates {
     const z = ev.z !== undefined && ev.z !== null ? ev.z : WORLD.spawnZ;
     const decorative = ev.decorative === true;
     const centers = this._laneTables[layoutIdx];
-    const rngFx = this.ctx.rngFx;
+    const rngFx = this.ctx.rngFx, hd = this.ctx.hard;
 
     this._evLive[e] = 1;
     this._evLayout[e] = layoutIdx;
@@ -1039,6 +1039,7 @@ export class Gates {
       if (op === OP_PLUS) {
         this._valueF[g] = value;
         this._cap[g] = lane.cap > 0 ? lane.cap : Math.max(GATE_RULES.plus.capMin, GATE_RULES.plus.capMult * value);
+        if (hd && hd.fill > 1) this._cap[g] = Math.min(this._cap[g], Math.max(GATE_RULES.plus.capMin, Math.round(hd.fill * value)));   // HARD TIGHT
         this._flipCap[g] = 0; this._stepCost[g] = 0; this._mult[g] = 1; this._baseMult[g] = 1; this._divStage[g] = 0;
       } else if (op === OP_MINUS) {
         this._valueF[g] = -value;
@@ -1049,6 +1050,7 @@ export class Gates {
         this._mult[g] = m; this._baseMult[g] = m; this._base[g] = m;
         this._cap[g] = lane.cap > 0 ? lane.cap : GATE_RULES.mult.cap;
         this._stepCost[g] = lane.step > 0 ? lane.step : GATE_RULES.mult.stepMin * m;
+        if (hd && hd.step > 1) this._stepCost[g] = Math.round(this._stepCost[g] * hd.step);   // HARD TIGHT
         this._valueF[g] = m; this._flipCap[g] = 0; this._divStage[g] = 0;
       } else if (op === OP_DIV) {
         const ladder = GATE_RULES.div.ladder;

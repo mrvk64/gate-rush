@@ -679,4 +679,56 @@ notes (P1 hooks, P2 chase, P3 escort, P4 integration).
 - **Re-typed levels.** A cleared level that now plays CHASE or ESCORT keeps its stars, wears the ring and pays full coins on its
   first clear as the new type (a player at L45 already has several of them behind).
 - **Waits for 1.5.1.** The night combinations (night chase, night escort, night horde), escort rescue gates and spitters, and a
-  stronger Hulk Twins fix against a player who only sweeps (lever B1 in docs/build/r9/P1-TWINS-DECISION.txt).
+  stronger Hulk Twins fix against a player who only sweeps (lever B1 in docs/build/r9/P1-TWINS-DECISION.txt). (1.6.0 shipped lever B1;
+  see §20.)
+
+## 20. Round 10 (release 1.6.0): 1.6 Challenge
+
+The values are in `js/data.js` (HARD, hardPay, hardHp, HARD_TEXT, HORDE_GEN.rho, HORDE.fire.twinLane, CHASE_GEN.starThreeAt);
+the design is the round-10 plan PLAN-1.6.0 (revision 2, sections 2.8 and 2.9; kept with the build evidence, not in the repo), the package notes are docs/build/r10/ (P1 small items,
+P3 HARD, P4 integration).
+
+- **Why.** The owner plays at about L45 with every shop line at rank 10, reads gates and dodges spit, and finds the game too easy.
+  Rank 10 is the design curve past L30, so normal mode stays as it is; HARD is the answer for a maxed player.
+- **The rule still holds.** From about L3 a squad that is never steered loses, HARD included: HARD has no reinforcements and no
+  assist, and its RETRY reuses the normal retry roads. Hands-off bots with 6-retry HARD streaks: 0 clears on L30 / L45 / L46 / L60,
+  escort L42 and chase L44.
+- **HARD unlock and where.** Clearing L30 shows a one-time card, HARD UNLOCKED. HARD is open on every cleared level from L10
+  (any type) and on the frontier (the next uncleared level); not L1-9, not endless. Entry: PLAY HARD on the title (the frontier)
+  and the HARD toggle on LEVELS (tiles HARD cannot play dim; a tile opens the HARD sheet).
+- **The sheet.** A bottom sheet with the mark line first ("MARK 3 · PAY x1.90"), four chips (each at least 44 px tall at 360 px),
+  the level's best mark, "No reinforcements · no assist" and PLAY HARD (off until a mod is on). The chosen set is remembered.
+- **Same road.** Same script and seed as normal; the mods act at run time on top (no second generator profile, no HARD validation
+  pass). HARD streaks are kept apart from the normal fail / assist streaks.
+- **The modifiers** (pay = 1 + 0.15 base + each mod):
+  - GLASS +0.30: telegraphed hazards hit harder, telegraphs unchanged: boss attack kills x1.6, spitter acid x1.6, hold-boss slam
+    and acid x1.6 (barricade damage unchanged), chase claw / bite x1.5, escort grab ring x1.25 faster.
+  - TIGHT +0.25: a `+` lane fills to 3x its start (not 4x), applied per gate at spawn; an `x` lane's step costs x1.15.
+  - THICK +0.30: wave, guard and run-up HP x1.40 at L30 and below, falling 0.01 a level to x1.25 at L45 and x1.10 at L60+; escort
+    waves x1.10; hold surges x1.15; chase surges x1.2. Never more bodies. The sheet prints the level's figure.
+  - FUSE +0.20: the boss enrages 3 s sooner (campaign and hold bosses); greyed "No boss here" on chase / escort.
+  - All four x2.20 (x2.00 on chase / escort).
+- **Pay, marks, stars.** Every coin of a HARD run is multiplied; a HARD replay pays x0.6 unless it beats the level's best mark
+  (strictly more mods), which pays the first-clear rate. Stars use the normal needs. A HARD clear of the frontier is also its
+  normal clear (stars, the next level unlocked). The tile shows a bone skull with the mark; gold IRON = every applicable mod and
+  3 stars. Results: "HARD CLEAR skull 3 · NEW MARK" and a "HARD +120%" chip. Game over on HARD offers RETRY and NORMAL.
+- **How hard (rank 10, a perfect gate reader that dodges every telegraph, 8 seeds).** All four mods: L30 3/8, L45 4/8, L60 3/8
+  clears (42 % pooled; the target band was 3-5 of 8); the same reader without dodging: 0/24. Single mods at L45 (survivors lost
+  against the same seed on normal): TIGHT 21 %, THICK 11 %, GLASS and FUSE near 0 % for the perfect reader (GLASS costs a player
+  who gets hit about half; FUSE bites in combinations and from L60). Chase L44 2/4, escort L42 5/8.
+- **Small items (from the 1.5.1 list).** Hulk Twins: an in-lane shooter feeds a Twin only within 0.8 m of it (aimers unchanged; a
+  sweeping player clears fewer Twins holds). HORDE holds from L31 push harder (rho ceiling [[30,0.73],[31,0.85],[60,1.0],
+  [120,1.13]]). Escort losses are easy to notice (red "-1" at the seat, the count flashes, LOST tally, "6 -> 12 (+6)", "Delivered
+  12 of 14 - lost 2") and the count label slides off the tailgate. Chase: SURGE! is a solid top pill while a gate is in view;
+  3-star fractions 0.80 at L57 and 0.73 from L62 (measured from skilled runs).
+- **Moved to 1.7: the trade-off gates.** The planned WEAKEN and CAP gates (a gate that pays now but costs at the boss), with their
+  generator contract, pace tick and boss chip, were built but did not pass their model gate, so 1.6.0 ships without them. The
+  reason (P2 lever study): a perfect reader still arrives at the boss with 1.39-1.54x the boss squad on L20-50 and no allowed
+  lever brought its count into the target band (best combination 55 % of levels vs the 80 % needed); and a CAP pair sized at the
+  reader's count lifts every lower line (the never-steering line included) to about the cap, so most generated roads failed
+  validation. 1.7 needs a different sizing for the trade-off, not a retune.
+- **GLASS and FUSE alone.** For a perfect reader at L45 rank 10 they cost close to nothing on their own (GLASS hurts a player who
+  gets hit; FUSE bites in combinations and from L60). The owner chose on 2026-11-17 to ship both as built: FUSE is a mod to stack
+  with others, and a FUSE that bites alone is a 1.7 design question.
+- **Waits for 1.6.1 / 1.7.** See the known-issues list in docs/build/r10-release.md (trade-off gates, Twins sweeper, hold cost,
+  early chases at rank 10).

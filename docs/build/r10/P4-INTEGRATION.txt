@@ -1,0 +1,61 @@
+GATE RUSH 1.6.0 - PACKAGE P4: INTEGRATION, BALANCE CONFIRMATION, OWNER PREVIEW (PLAN-1.6.0 rev 2, section 3 P4)
+==========================================================================================================
+Branch r10/P4 from r10-160 @ ad1ba2b (P1 035217a + P3 ad1ba2b; no P2: the trade-off gates moved to 1.7, owner 2026-11-17).
+Evidence: E:/Temp/claude/gate-rush-evidence/r10/build/P4/ (harness r10/P4/, commits e800837 e222bd9). Version and sw.js are not bumped:
+the main session releases.
+
+MERGE STATE
+- r10-160's tree equals r10/P3 87ad55a (git diff empty), so P3's HARD measurements stand for the merge. levelgen.js and gates
+  generation are 1.5.0's (no P2), every script is 1.5.0's.
+
+FIXES (js +40 raw / +12 gzip; budget 400 / 150)
+- SURGE! top pill (#hud-banner.top) has an opaque background: the level label no longer shows through it (P1 check minor).
+- Escort results line: "Delivered 11 of 14 - lost 3" keeps "of 14" and "lost 3" together with no-break spaces, so at 360 px it
+  breaks after the dash and no number sits alone on a line (P1 check minor).
+- HARD sheet (found on the owner path at 360 px): "MARK 4 · PAY ×2.20" wrapped with "×2.20" alone; no-break spaces now break it
+  "MARK 4 ·" / "PAY ×2.20". The results suffix "· NEW MARK" is joined the same way (fix pass: NEW and MARK too; at 412x915 it
+  broke "... 1 · NEW" / "MARK", now "HARD CLEAR skull 1 ·" / "NEW MARK", one line at 360x640; hardline/). Note: harness
+  r10/P3/hardshots.mjs matches these strings with a literal space and needs \s there if it is re-run.
+- tools/smoke.js --matrix: cells hard45 (L45 night, HARD all mods) and hardfront46 (L46, the HARD frontier). Their pre sets rank
+  10 and clears L1-45 in their types, then setHard(15); a HARD cell also fails unless L45 and L46 are both HARD-open and the run's
+  ctx.hard.mask is 15. hard45 gets night's +2 main draws in the caps. docs/build/CALLSITES.md regenerated.
+
+CHECKS
+- Static: check-imports OK, check-codex 0 errors, callsites, check-save every case PASS; package --lint OK: js/ 3,196,466 raw /
+  999,052 gzip (caps 3,220,000 / 1,005,000; the D6 raise was not needed). validate-levels L1-120 and L250-300: 0 errors;
+  --rotation R1-R8 to L300: 0 errors.
+- RUN digest, HARD off (digest.sh on f651e1d; ff63448 after it changes two HARD strings only): docs/build/r10/digest-160.json
+  (also gate-rush-evidence/r10/digest-160.json) is the 1.6.0 reference. vs digest-150: 35 rows differ, all HORDE - L29 1129 /
+  1229 strongj (Twins lever) and L32 / 39 / 43 / 47 / 52 / 59 passive + strongj (rho + lever; all fails stay fails at about the same
+  coins); L1-15, RUN, NIGHT, CHASE, ESCORT, endless and chunk scripts IDENTICAL (cmp-150.txt). vs the P1 final digest and the
+  check-P3 HARD-off digest: IDENTICAL, 384 rows (cmp-p1final.txt). Part digests: levels a3ebf3138f23cc02, L16-30 3efeb6045fbfed3d,
+  L31-60 1a82616de773ab1c, L1-15 / endless / chunks as 1.5.0.
+- Confirmation row (hardmx, rank 10, HARD all mods, L46 = the frontier after the owner's L45, seeds 0-300 / 1000-4000):
+  reader16 6/8 (stars 3 0 3 2 3 2 2 0), human16 0/8 (6 of 8 die to spit in the run: GLASS acid on a bot that does not dodge
+  spit), idle 0/8; assist 0 on every row. One clear over the 3-5/8 per-level band (L46 opens the next district cycle after the L45
+  finale); pooled with P3's L30 / L45 / L60 reader16 16/32 = 50 % (band 40-65 %). Listed as a known issue to watch, not tuned.
+- Generation time: not re-measured (levelgen untouched since 1.5.0; the PLAN's bound was P2's).
+- Smoke (smoke/): --matrix chase-high-phone, escort-high-phone, hard45-high-phone, hard45-sw-phone, hardfront46-high-phone,
+  hardfront46-low-landscape: 6 cells, 0 failed (verdict CLEAN, programs min = max, draw caps, 0 page errors; every HARD cell
+  'ok 45+46' and ctx.hard.mask 15; the smoke bot loses HARD runs - hardfront46 died in the L46 boss fight, so the full run and
+  boss ran on HARD). --scenario all: CLEAN. (No trade cell: P2 is not in 1.6.0.) The cells ran on f651e1d / ff63448 (two HARD strings apart).
+- Owner path (harness r10/P4/ownerpath.mjs on the real preview export at 92413ac, 360x780 DPR 2, an empty profile so the page's
+  own seed writes the save; owner/ownerpath.json): 8 of 8 PASS - the seeded save loads (v2, artifact shell); coins, all five
+  ranks 10, every L1-44 record and highestUnlocked 45 unchanged; the HARD UNLOCKED card shows on first boot, not on LEVELS after
+  it, not after a reload (hint recorded); HARD opens L10-45 (36 tiles), not L9 / L46; the L45 sheet starts with all four mods
+  (MARK 4 · PAY ×2.20, chips 56 px); after a reload the title shows PLAY HARD and the save is still the seeded one; 0 page
+  errors. This is the check-save (a) rule (nothing earned or bought changes) applied to the preview save in the real build.
+- Shots read (owner/, shots/): unlock card, LEVELS with HARD on, the L45 sheet ("MARK 4 ·" / "PAY ×2.20"), chase SURGE! at
+  412x915 (opaque, no label behind it) and 360x640, escort results at 360x640 ("Delivered 11 of 14 -" / "lost 3").
+
+OWNER PREVIEW (not published)
+- harness r10/P4/mkowner150.mjs builds owner-150.json with 1.5.0's own save.js / data.js (59a8352): frontier L45, every shop line
+  rank 10, 18,450 coins, L1-44 cleared in their 1.5.0 types (every 7th at 2 stars), every 1.5.0 lesson, briefing (horde, night,
+  chase, escort) and Field Guide row seen; L30 cleared so HARD is unlocked; 'hard.unlock' not seen (1.5.0 has no such hint).
+- harness r10/P4/mkpreview.sh (model r9/P4) exports the P4 head: E:/Temp/claude/r10build/preview (plain artifact.html, title
+  "Gate Rush 1.6 preview") and E:/Temp/claude/r10build/preview-owner (the same page with the first-run seed; progress made in the
+  preview stays, since the seed writes only when the page's storage is empty).
+
+DOCS DRAFTS (gate-rush-evidence/r10/build/P4/docs/, applied by the main session at release)
+README-1.6.txt (HARD bullet, version line, fix lines), GDD-20.txt (section 20 "1.6 Challenge", with why the trade-off gates moved),
+ARCHITECTURE-19.txt (section 19), KNOWN-ISSUES.txt (1.6.1 / 1.7), r10-release.txt (release notes with "How it was built").

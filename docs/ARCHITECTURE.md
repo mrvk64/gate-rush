@@ -1593,3 +1593,43 @@ The package notes are under docs/build/r9/ (P1 hooks, P2 chase, P3 escort, P4 in
 - **Tools.** tools/chasesim.js, tools/escortsim.js, validate-levels chase / escort sections (R5 counted as info while the combos
   are off), check-save (h) the owner path, smoke --matrix chase / escort cells, check-imports rules for chasegen / escortgen (pure).
 - **Budgets.** js/ at most 3,220,000 B raw and 1,005,000 B gzip (tools/package.js --lint); draw budget unchanged.
+
+## 19. Round 10 (release 1.6.0): what was added
+
+The package notes are under docs/build/r10/ (P1 small items, P3 HARD, P4 integration); js/data.js is the source of truth. No new
+module: still 31 ES modules. The trade-off gates of the 1.6.0 plan (WEAKEN, CAP, the generator contract, pace tick, boss chip) are
+not in this release (moved to 1.7), so levelgen.js is 1.5.0's; only the HORDE hold scripts from L31 change (holdgen.js reads the new
+HORDE_GEN.rho).
+
+- **HARD data (data.js).** `HARD` (mods GLASS / TIGHT / THICK / FUSE in bit order 1 / 2 / 4 / 8, `bit` maps each ctx.hard factor to
+  its mod, `pay`, `base` 0.15, `hpRamp`, `fuseS` 3, `unlock` 30, `from` 10, `noBoss` chase / escort), `hardPay(mask)`,
+  `hardHp(L, base)` and the `HARD_TEXT` block (after ESCORT_TEXT). The sheet's chip lines in index.html repeat 1.6x / 3x / 3 s as
+  static copy (ui.js rewrites the GLASS and THICK lines per level): change both together.
+- **ctx.hard.** `{ on, mask, fuseS, kill, claw, ring, fill, step, hp, surge, chase }`, written by `level._applyHard(mask)` at every
+  start (FUSE dropped on chase / escort) and reset to off (all factors 1, fuseS 0) at quitToTitle. `level.setHard(mask)` sets the
+  next start's mods (menus pass 0, the sheet its set; RETRY / REPLAY / RESTART keep it; NORMAL on the game-over card clears it).
+  Readers: boss.js (GLASS kills), zombies.js (acid), hold.js (slam / acid, FUSE on the hold boss), chase.js (claw / bite, THICK
+  surges), escort.js (grab ring), gates.js (TIGHT, per gate at spawn: no data write, GATE_RULES stays frozen), level.js (THICK HP
+  after shopComp and the low-side band, FUSE at the valveAfter site, hold surge threat, pay).
+- **Same road.** A HARD run plays the normal script and seed; HARD retry seeds are the normal retry seeds. Streaks: the HARD fail
+  streak lives in level._failStreak under L + 10000; a HARD run never reads or writes the normal fail or assist streak, and assistK
+  is 0 in every mode.
+- **Save (v2, additive).** `levels[n].h = { s, m, b }` (best HARD stars, that clear's mod bits with unknown high bits kept, its
+  survivors / metric), best by mark (popcount(m & 15)), then s, then b. `settings.hardMods` (default 15). `SaveStore.hardOpen(n)`
+  is the one rule (L30 cleared; n from L10; cleared or the frontier), `recordHard`, `hardOf`, `markOf`. A HARD clear also runs
+  recordLevel (the frontier rule). A re-type moves h into rec.prev. Sanitising repairs a corrupt h; 59a8352's (1.5.0) migrate and
+  SaveStore keep h and hardMods (tools/check-save.js H-a..H-g).
+- **UI (ui.js, index.html, css block 1.6.0 P3).** Overlays 'hard' (the bottom sheet) and 'hardnew' (the one-time card, hint
+  'hard.unlock'; its GOT IT button is data-back data-keep, so the BACK relabel in ui.js skips it), the title PLAY HARD pill, the LEVELS HARD toggle (aria-pressed; tiles HARD cannot play are disabled), tile marks
+  (.tile-hard, .iron), results line #complete-hard and chip .bd-hard, game-over NORMAL. The sheet's THICK line is rewritten per
+  level from hardHp.
+- **P1 changes.** hold.js _shot: a Twin's in-lane boss share only within HORDE.fire.twinLane (0.8 m) of that Twin (tools/holdsim.js
+  mirrors it); HORDE_GEN.rho to the ceiling map; escort.js loss notice (fx labels, the HUD counter's red LOST n, roll line) and the
+  count label's tailgate slide (side held while the overlap lasts); chase.js SURGE! as hud:banner { top: true } while a gate event
+  is between z -45 and -4 (#hud-banner.top, an opaque pill over the level label); CHASE_GEN.starThreeAt read by starThreeOf for
+  chase bases. All cosmetic parts use no rng and no gameplay state.
+- **Determinism.** HARD factors are plain multipliers on the fixed step; no new rng stream. High and Low play identical rows with
+  HARD on; the RUN digest with HARD off equals the P1 merge (docs/build/r10/digest-160.json).
+- **Tools.** check-save H-a..H-g; smoke --matrix cells hard45 (L45 night, all mods, rank 10, a save with L1-45 cleared) and
+  hardfront46 (the HARD frontier L46): a HARD cell also fails unless both levels are HARD-open and the run's ctx.hard.mask is 15.
+- **Budgets.** js/ at most 3,220,000 B raw and 1,005,000 B gzip (tools/package.js --lint): 1.6.0 is 3,196,874 / 999,263.

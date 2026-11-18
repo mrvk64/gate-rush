@@ -26,6 +26,7 @@ import {
   starNeed,                                               // round 7 (r7, explain:0): the star thresholds the results print
   CODEX,                                                  // round 7 (r7, teaching:5): FIELD GUIDE entries met in play (_codexSeen)
   LEVEL_TYPES, HORDE_GEN, levelTypeOf, starThreeOf,       // r8 (P1T): level types
+  HARD, hardPay, hardHp,
 } from './data.js';
 import { generateLevel, levelGenerator, generateChunk, solveWaveHp, gateDefaults, endlessGateGuard, eventWorstCase, leakCalib, endlessPressure, endlessParams, endlessDesignMult, endlessHpCap, endlessPoolReserve, profileExpOf, shopOf } from './levelgen.js';
 
@@ -145,11 +146,11 @@ const P_START = { level: 0, seed: 0, endless: false, script: null, district: '',
 const P_DISTRICT = { id: '', name: '', index: 0, label: '', accent: 0, seconds: -0, reason: '', banner: false, first: false, step: 0, steps: 0, modeKey: '', modeName: '', modeColor: 0 };
 const P_PROGRESS = { distance: -0, length: -0, fraction: -0 };
 const P_RUNUP = { secondsToBoss: -0 };
-const P_COMPLETE = { level: 0, stars: 0, survivors: 0, eBoss: 0, coins: 0, breakdown: null, typeKey: '', base: '', night: false, finale: '', eTarget: 0, metric: 0, stat: null, cause: '', firstMeet: false, retypeReward: false, assistK: 0 };
-const P_FAILED = { level: 0, fraction: -0, coinsKept: -0, typeKey: '', base: '', night: false, finale: '', eTarget: 0, stat: null, cause: '', firstMeet: false, retypeReward: false, assistK: 0, counted: false, idle: false };
+const P_COMPLETE = { level: 0, stars: 0, survivors: 0, eBoss: 0, coins: 0, breakdown: null, typeKey: '', base: '', night: false, finale: '', eTarget: 0, metric: 0, stat: null, cause: '', firstMeet: false, retypeReward: false, assistK: 0, hard: null };
+const P_FAILED = { level: 0, fraction: -0, coinsKept: -0, typeKey: '', base: '', night: false, finale: '', eTarget: 0, stat: null, cause: '', firstMeet: false, retypeReward: false, assistK: 0, counted: false, idle: false, hard: null };
 /** r8: mode.begin opts and the mode.stat report (reused). 1.5.0: + presses (mode button / bubble presses, the loss-coin rule),
  *  score (the mode's own score terms for this outcome) and bonus (its coins on a clear: the results' bonusMode chip). */
-const P_BEGIN = { threat: 1, assistK: 0, firstMeet: false, seed: 0, runDecisions: 0, event: null };
+const P_BEGIN = { threat: 1.5, assistK: 0, firstMeet: false, seed: 0, runDecisions: 0, event: null };
 const STAT = { holdActions: 0, holdSurgeWindows: 0, eased: [false, false, false], staggers: 0, lineHeld: false, kits: 0, kills: 0, total: 0, surgesCleared: 0,
   presses: 0, score: 0, bonus: 0 };
 const P_CHUNK = { index: 0, difficulty: -0 };
@@ -438,8 +439,15 @@ export class LevelRunner {
     // r8 (D30 / A1): the counted failures (runs that played, _runCounted) the reinforcements assist reads
     this._assistStreak = new Map();
     this._assistSoldiers = 0;
+    // 1.6.0 (P3): HARD
+    this._hardSet = 0;
+    this._hardPay = 1.5;
+    this._hardNew = false;
+    ctx.hard = { on: false, mask: 0, fuseS: 0 };
+    for (const k in HARD.bit) ctx.hard[k] = 1.5;
     // r8 (P1T): the run's type, mode, cause, first meeting, re-type, assist steps; a pending start's type and programs
     this._type = STANDARD_TYPE;
+    this._applyHard(0);
     this._mode = null;
     this._modeOn = false;
     this._cause = '';
@@ -959,7 +967,7 @@ export class LevelRunner {
    *  rule (a RETRY after a failure rerolls the seed, round-3 QA LVL-21), without a synchronous generation. */
   requestRestart() {
     if (this._endless) { this.startEndless(this._seed); return true; }
-    return this.requestStart(this._level, (this._failStreak.get(this._level) | 0) > 0 ? undefined : this._seed);
+    return this.requestStart(this._level, this._fails(this._level) ? undefined : this._seed);
   }
 
   /**
@@ -1044,7 +1052,24 @@ export class LevelRunner {
     const authored = LEVELS.authored[level];
     if (authored) return authored.seed;
     const step = LEVELS.curve.retrySeedStep | 0;
-    return LEVELS.seedBase + level + step * (this._failStreak.get(level) | 0);
+    return LEVELS.seedBase + level + step * this._fails(level);
+  }
+
+  /** Session fails of `level` in the next start's mode (HARD keyed 1e4 up). */
+  _fails(level) { return this._failStreak.get(this._hardSet ? level + 1e4 : level) | 0; }
+
+  /** HARD mods of the menus' next start (0 = normal). */
+  setHard(mask) { this._hardSet = (mask | 0) & ((1 << HARD.mods.length) - 1); }
+
+  /** ctx.hard for this run (FUSE needs a boss; THICK by level; chase: surges only). */
+  _applyHard(mask) {
+    const h = this.ctx.hard, base = this._type.base;
+    if (HARD.noBoss.indexOf(base) >= 0) mask &= 7;
+    h.on = mask > 0; h.mask = mask;
+    for (const k in HARD.bit) h[k] = mask & HARD.bit[k] ? HARD[k] : 1;
+    if (h.hp > 1) h.hp = base === 'chase' ? 1 : hardHp(this._level, base);
+    h.fuseS = mask & 8 ? HARD.fuseS : 0;
+    this._hardPay = hardPay(mask);
   }
 
   /**
@@ -1184,7 +1209,7 @@ export class LevelRunner {
    */
   restart() {
     if (this._endless) this.startEndless(this._seed);
-    else this.start(this._level, (this._failStreak.get(this._level) | 0) > 0 ? undefined : this._seed);   // round-3 QA LVL-21: RETRY after a fail rerolls
+    else this.start(this._level, this._fails(this._level) ? undefined : this._seed);   // round-3 QA LVL-21: RETRY after a fail rerolls
   }
 
   /** The one entry into the title idle scene (also called by main at boot): undo list, cleanup, title state. */
@@ -1196,6 +1221,7 @@ export class LevelRunner {
     const save = ctx.save;
     this._district = districtForLevel(save && save.data ? Math.max(1, save.data.highestUnlocked | 0) : 1);
     this._undoRuntimeState(WORLD.idleRoadSpeed);
+    this._applyHard(0);
     this._applyDistrict(0, false);                        // r8: the title is a day scene
     if (ctx.zombies) ctx.zombies.killAll('cleanup');
     this._resetSystems();
@@ -1414,11 +1440,14 @@ export class LevelRunner {
     this._cause = '';
     const save = ctx.save;
     const rec = (!this._endless && save && save.data && save.data.levels) ? save.data.levels[this._level] : null;
-    const replay = !!rec && save.isReplay(this._level, type.key);
-    this._retype = !!rec && rec.clears > 0 && !replay;
+    this._applyHard(this._endless ? 0 : this._hardSet);
+    const hard = ctx.hard, hr = hard.on && save ? save.hardOf(this._level) : null;
+    this._hardNew = hard.on && (!hr || save.markOf(hard.mask) > save.markOf(hr.m));
+    const rp = !!rec && save.isReplay(this._level, type.key), replay = rp && !this._hardNew;
+    this._retype = !!rec && rec.clears > 0 && !rp;
     const met = this._endless || !save ? null : save.meetType(type.key);
     this._firstMeet = !!met && met.clears === 0 && met.metAtFrontier >= LEVEL_TYPES[type.key].debut + LEVEL_TYPES.meetAfter;
-    this._assistK = this._assistSteps();
+    this._assistK = hard.on ? 0 : this._assistSteps();
     ctx.run = newRunStats(this._level, seed, this._endless, script, replay);
     ctx.run.assistK = this._assistK;
 
@@ -1859,6 +1888,7 @@ export class LevelRunner {
       this._runupActive = false;                         // r8 (P6): the run's run-up bursts end at the dig-in (no zombies.spawn in a mode)
       this._setPhase(MODE_OF[this._type.base]);
     }
+    P_BEGIN.threat = this.ctx.hard.surge;              // HARD THICK
     P_BEGIN.assistK = this._assistK; P_BEGIN.firstMeet = this._firstMeet; P_BEGIN.seed = this._seed;
     P_BEGIN.runDecisions = this.activity.decisions; P_BEGIN.event = ev;
     this._mode.begin(this._script, P_BEGIN);
@@ -2032,7 +2062,7 @@ export class LevelRunner {
       // QA LVL-15: damped shop-rank scaling (LEAK_MODEL.profileExp); endless: solved at the live count (QA LVL-17); round 5d:
       // endless guards are clamped to the chunk's per-zombie HP cap like its waves (_capEndlessHp); r7: × the low-side band
       const eContact = this._expectedAt(contactAt);
-      let hp = scaleHp(guard.hp || solveWaveHp(eContact, v, units, this._bandMid), this._liveHpMult(guard.hp ? eContact : 0) * low);
+      let hp = scaleHp(guard.hp || solveWaveHp(eContact, v, units, this._bandMid), this._liveHpMult(guard.hp ? eContact : 0) * low * ctx.hard.hp);
       if (this._endless) hp = this._capEndlessHp(hp, units, eContact);
       GUARD_OPTS.guardEventId = hasId ? eid : -1;
       GUARD_OPTS.guardLane = laneIdx;
@@ -2073,7 +2103,7 @@ export class LevelRunner {
     // the gate the squad has not passed yet)
     const eContact = this._expectedAt(contactAt);
     const base = ev.hp ? ev.hp : solveWaveHp(eContact, v, units, this._bandMid);
-    let hp = scaleHp(base, (ev.hpMult || 1) * this._liveHpMult(ev.hp ? eContact : 0) * this._lowSideMult(this._expectedAt(ctx.world.distance)));
+    let hp = scaleHp(base, (ev.hpMult || 1) * this._liveHpMult(ev.hp ? eContact : 0) * this._lowSideMult(this._expectedAt(ctx.world.distance)) * ctx.hard.hp);
     if (this._endless) hp = this._capEndlessHp(hp, units, eContact);
     if (ev.lag) this._spawnStaggered(ev, hp);
     else zombies.spawnWave(ev, hp);
@@ -2260,7 +2290,7 @@ export class LevelRunner {
     const sBar = meanOwnSpeed(units);
     const contactAt = ctx.world.distance + (-WORLD.spawnZ * v) / (v + sBar);
     const hp = scaleHp(ev.hp || solveWaveHp(this._expectedAt(contactAt), v, units, this._bandMid),
-      (ev.hpMult || 1) * this._liveHpMult(ev.hp ? this._expectedAt(contactAt) : 0) * this._lowSideMult(this._expectedAt(ctx.world.distance)));   // QA LVL-15; r7 low side
+      (ev.hpMult || 1) * this._liveHpMult(ev.hp ? this._expectedAt(contactAt) : 0) * this._lowSideMult(this._expectedAt(ctx.world.distance)) * ctx.hard.hp);   // QA LVL-15; r7 low side
     // one small record per run-up (event time): only the types present, counts rewritten per burst
     const burstUnits = {};
     for (let k = 0; k < TYPES.length; k++) {
@@ -2345,7 +2375,7 @@ export class LevelRunner {
     if (vc && !mini) {
       const ms = isFinale(this._level);   // r8v2: every 5th level
       spec.enrageExtra = enrageExtra(vc, archetype, (this.ctx.squad ? this.ctx.squad.count : 0) / eBoss);   // r8v2: slow archetypes, on-curve squads
-      spec.valveAfter = (ms && vc.afterMilestone > 0 ? vc.afterMilestone : vc.after) + spec.enrageExtra;
+      spec.valveAfter = (ms && vc.afterMilestone > 0 ? vc.afterMilestone : vc.after) + spec.enrageExtra - ctx.hard.fuseS;
       spec.chew = Math.max(BOSSES.valve.perSec, Math.round((vc.perSecFrac || 0) * eBoss));
       spec.chewRamp = vc.rampPerSec > 0 ? vc.rampPerSec : 0;
     }
@@ -2779,6 +2809,7 @@ export class LevelRunner {
     }
     if (this._endless) mult *= ECONOMY.endlessPayout;
     else if (run.replay) mult *= ECONOMY.replayPayout;
+    mult *= this._hardPay;
     // round-3 QA LVL-23: boss-fight minions are a soak — a longer fight (a weaker squad) must not pay more than a quick one
     if (!this._endless && source === 'kill' && (this._phase === 'boss' || this._phase === 'bossIntro') && ECONOMY.bossFightKillMult >= 0) mult *= ECONOMY.bossFightKillMult;
     const raw = n * mult;
@@ -3171,20 +3202,23 @@ export class LevelRunner {
       save.setLastIncome(payout);
       save.addStats(this._statsPartial(payout));
     }
-    this._failStreak.delete(level);                       // QA LVL-21: a clear resets the fail-streak assist
-    this._assistStreak.delete(level);
+    const hd = ctx.hard;
+    const newMark = hd.on && !!save && save.recordHard(level, stars, hd.mask, metric);
+    this._failStreak.delete(hd.on ? level + 1e4 : level);   // QA LVL-21: a clear resets the fail-streak assist
+    if (!hd.on) this._assistStreak.delete(level);
     const b = run.breakdown;
     // round 7 (r7, explain:7): the results show the level bonus as its two parts — the star reward and the survivor reward.
     // Since duplicates / refunds count as pickups (ECONOMY.breakdownOf), b.bonus is exactly this bonus as credited (×0.6 on a
     // replay, whole coins after the settle); the star part is its own rounding, the survivor part the rest, so the two
     // always add up to b.bonus and the chips to the payout
-    const pay = run.replay ? ECONOMY.replayPayout : 1;
+    const pay = (run.replay ? ECONOMY.replayPayout : 1) * this._hardPay;
     const bonusStars = clamp(Math.round(starRaw * pay), 0, b.bonus);
     const bonusMode = clamp(Math.round(modeRaw * pay), 0, b.bonus - bonusStars);   // r8: LINE HELD (0 on a plain run)
     // fresh data object (once per run) — ui may keep it
     this._resultData = this._typeData({
       level, stars, coins: payout, survivors, eBoss, score: run.score, endless: false, metric,
       breakdown: { kills: b.kills, gates: b.gates, piles: b.piles, boss: b.boss, bonus: b.bonus, bonusStars, bonusSurvivors: b.bonus - bonusStars - bonusMode, bonusMode },
+      hard: hd.on ? { mask: hd.mask, pct: Math.round(this._hardPay * 100 - 100), newMark } : null,
     }, stat);
   }
 
@@ -3235,10 +3269,11 @@ export class LevelRunner {
     }
     // r8 (D30 / A1): only a run that played joins the reinforcements streak (a run left alone neither adds nor resets);
     // _failStreak counts every fail (RETRY's fresh layout)
-    this._failStreak.set(level, (this._failStreak.get(level) | 0) + 1);
     const counted = this._runCounted();
-    if (counted) this._assistStreak.set(level, (this._assistStreak.get(level) | 0) + 1);
-    this._resultData = this._typeData({ level, fraction, coinsKept: payout, idle, endless: false, counted }, stat);
+    const hard = ctx.hard.on, fk = hard ? level + 1e4 : level;   // 1.6.0: HARD streaks apart
+    this._failStreak.set(fk, (this._failStreak.get(fk) | 0) + 1);
+    if (counted && !hard) this._assistStreak.set(level, (this._assistStreak.get(level) | 0) + 1);
+    this._resultData = this._typeData({ level, fraction, coinsKept: payout, idle, endless: false, counted, hard }, stat);
   }
 
   /** 1.5.0 (PLAN C14): any player input this run — a gate decision, FIRE, ≥ assist.minTravelM of steering travel or a mode press. */

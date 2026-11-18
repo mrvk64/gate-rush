@@ -4,162 +4,168 @@ For each ctx system: every member that OTHER files access (directly or via alias
 
 ## ctx.fx (owner js/fx.js)
 
-- `addTrauma()` — boss.js:1080, boss.js:1534, boss.js:1861, hold.js:1050, hold.js:1253 (+2)
-- `addTrauma` — boss.js:1080, boss.js:1534, boss.js:1861, hold.js:1050, hold.js:1253 (+2)
-- `coinsInFlight` — ui.js:4016
-- `decal()` — boss.js:1546, gates.js:1356, zombies.js:1498, zombies.js:1630
-- `decal` — boss.js:1545, gates.js:1352
-- `decalProgress()` — boss.js:1301, boss.js:1635, boss.js:1804, zombies.js:1512, zombies.js:1639
-- `decalProgress` — boss.js:1301, boss.js:1634, boss.js:1804
-- `emit()` — boss.js:902, boss.js:990, boss.js:1153, boss.js:1535, boss.js:1860 (+10)
-- `emit` — boss.js:902, boss.js:990, boss.js:1153, boss.js:1535, boss.js:1860 (+3)
-- `flash()` — weapons.js:1796
-- `flash` — weapons.js:1796
-- `fovKick()` — weapons.js:1742
-- `fovKick` — weapons.js:1742
-- `getFovKick()` — render.js:3283
-- `getFovKick` — render.js:3282
-- `getShake()` — render.js:3277
-- `getShake` — render.js:3275
-- `hasPos` — gates.js:1647
-- `label` — gates.js:1645, squad.js:429, ui.js:4201
-- `labelMesh` — ui.js:4204
-- `moveDecal()` — gates.js:1283, zombies.js:1513
-- `moveDecal` — gates.js:1282
-- `particleCount` — engine.js:2284
-- `plateH` — gates.js:1659
-- `removeDecal()` — boss.js:1551, boss.js:1563, boss.js:1662, boss.js:1675, boss.js:1837 (+9)
-- `removeDecal` — boss.js:1551, boss.js:1563, boss.js:1662, boss.js:1675, boss.js:1837 (+4)
-- `setWorldPos()` — squad.js:686, squad.js:687
-- `slowmo()` — boss.js:1079, hold.js:1279, level.js:2993, ui.js:4406
-- `slowmo` — boss.js:1079, hold.js:1277, ui.js:4403
+- `addTrauma()` — boss.js:1080, boss.js:1536, boss.js:1864, hold.js:1055, hold.js:1262 (+2)
+- `addTrauma` — boss.js:1080, boss.js:1536, boss.js:1864, hold.js:1055, hold.js:1262 (+2)
+- `coinsInFlight` — ui.js:4042
+- `decal()` — boss.js:1548, escort.js:411, gates.js:1379, zombies.js:1598, zombies.js:1730
+- `decal` — boss.js:1547, escort.js:410, gates.js:1375
+- `decalProgress()` — boss.js:1301, boss.js:1637, boss.js:1807, escort.js:208, zombies.js:1612 (+1)
+- `decalProgress` — boss.js:1301, boss.js:1636, boss.js:1807
+- `emit()` — boss.js:902, boss.js:990, boss.js:1153, boss.js:1537, boss.js:1863 (+10)
+- `emit` — boss.js:902, boss.js:990, boss.js:1153, boss.js:1537, boss.js:1863 (+3)
+- `flash()` — weapons.js:1798
+- `flash` — weapons.js:1798
+- `fovKick()` — weapons.js:1744
+- `fovKick` — weapons.js:1744
+- `getFovKick()` — render.js:3301
+- `getFovKick` — render.js:3300
+- `getShake()` — render.js:3295
+- `getShake` — render.js:3293
+- `haptic()` — escort.js:346
+- `hasPos` — gates.js:1696
+- `label` — escort.js:637, gates.js:1694, squad.js:433, ui.js:4227
+- `label2` — chase.js:91, chase.js:396, escort.js:140, escort.js:630
+- `label2.hide()` — chase.js:91, chase.js:397, escort.js:140, escort.js:634
+- `label2.set()` — chase.js:401, chase.js:402, escort.js:633
+- `labelMesh` — ui.js:4230
+- `moveDecal()` — escort.js:208, gates.js:1306, zombies.js:1613
+- `moveDecal` — gates.js:1305
+- `particleCount` — engine.js:2288
+- `plateH` — gates.js:1708
+- `removeDecal()` — boss.js:1553, boss.js:1565, boss.js:1664, boss.js:1677, boss.js:1840 (+10)
+- `removeDecal` — boss.js:1553, boss.js:1565, boss.js:1664, boss.js:1677, boss.js:1840 (+4)
+- `ribbon()` — chase.js:90, chase.js:408
+- `ribbon` — chase.js:90, chase.js:405
+- `setWorldPos()` — squad.js:703, squad.js:704
+- `slowmo()` — boss.js:1079, hold.js:1288, level.js:3044, ui.js:4432
+- `slowmo` — boss.js:1079, hold.js:1286, ui.js:4429
 - `update()` — engine.js:1765
-- `vignette()` — boss.js:1588, boss.js:1907
-- `vignette` — boss.js:1588, boss.js:1907
-- `width` — gates.js:1647, gates.js:1658
-- `x` — gates.js:1653
-- `y` — gates.js:1653
-- `z` — gates.js:1653
+- `vignette()` — boss.js:1590, boss.js:1910
+- `vignette` — boss.js:1590, boss.js:1910
+- `width` — gates.js:1696, gates.js:1707
+- `x` — gates.js:1702
+- `y` — gates.js:1702
+- `z` — gates.js:1702
 
 ## ctx.render (owner js/render.js)
 
 - `_composerOn` — night.js:616
 - `_sizeDirty` — engine.js:1525
-- `add()` — environment.js:1848, squad.js:423, troops.js:273, zombies.js:331, zombies.js:398 (+1)
-- `addWarmable()` — crowd.js:431, hold.js:359
-- `begin()` — crowd.js:753
-- `begin` — crowd.js:753
-- `blobShadowSlot()` — boss.js:2102, squad.js:670, squad.js:677, squad.js:680, troops.js:1017 (+5)
-- `blobShadowSlot` — boss.js:2101, squad.js:430, troops.js:1010, zombies.js:316, zombies.js:537
-- `bloomBase` — fx.js:2862
-- `callStats` — engine.js:2256
-- `camera` — crowd.js:857, environment.js:1921, fx.js:1646, fx.js:2025, gates.js:1927 (+5)
+- `add()` — environment.js:1848, squad.js:427, troops.js:273, zombies.js:340, zombies.js:411 (+1)
+- `addWarmable()` — chase.js:76, crowd.js:437, escort.js:122, hold.js:362
+- `begin()` — crowd.js:851
+- `begin` — crowd.js:851
+- `blobShadowSlot()` — boss.js:2105, squad.js:687, squad.js:694, squad.js:697, troops.js:1017 (+5)
+- `blobShadowSlot` — boss.js:2104, squad.js:434, troops.js:1010, zombies.js:325, zombies.js:552
+- `bloomBase` — fx.js:3009
+- `callStats` — engine.js:2260
+- `camera` — crowd.js:955, environment.js:1921, fx.js:1735, fx.js:2114, gates.js:1979 (+5)
 - `camera.position` — environment.js:1922
-- `cancelDolly()` — boss.js:780, level.js:1327
+- `cancelDolly()` — boss.js:780, level.js:1364
 - `cancelDolly` — boss.js:780
 - `composer` — night.js:616
 - `depthFor()` — environment.js:1787
 - `depthFor` — environment.js:1785
-- `dirty` — engine.js:1804, engine.js:1805, engine.js:1809, night.js:407, ui.js:2278 (+1)
+- `dirty` — engine.js:1806, engine.js:1807, engine.js:1811, night.js:407, ui.js:2291 (+1)
 - `dollyTo()` — boss.js:744
 - `dollyTo` — boss.js:741
-- `dollying` — ui.js:4103, ui.js:4285
-- `draw()` — engine.js:1528, engine.js:1797, engine.js:1805, engine.js:1813
+- `dollying` — ui.js:4129, ui.js:4311
+- `draw()` — engine.js:1528, engine.js:1799, engine.js:1807, engine.js:1815
 - `draw` — engine.js:1526, engine.js:1532
-- `end()` — crowd.js:842
-- `end` — crowd.js:842
-- `env` — level.js:1332, level.js:1408, level.js:2234
-- `env.setFog()` — level.js:1332, level.js:2234
-- `env.setLevel()` — level.js:1408
+- `end()` — crowd.js:940
+- `end` — crowd.js:940
+- `env` — level.js:1369, level.js:1454, level.js:2283
+- `env.setFog()` — level.js:1369, level.js:2283
+- `env.setLevel()` — level.js:1454
 - `far` — environment.js:1577, environment.js:1581, environment.js:1719
-- `gameOverCamera()` — fx.js:2983, fx.js:2996, level.js:1330
-- `gameOverCamera` — fx.js:2983, fx.js:2996
-- `glyphUV()` — gates.js:520
-- `glyphUV` — gates.js:518
-- `gpu` — engine.js:2415
+- `gameOverCamera()` — fx.js:3131, fx.js:3144, level.js:1367
+- `gameOverCamera` — fx.js:3131, fx.js:3144
+- `glyphUV()` — gates.js:528
+- `glyphUV` — gates.js:526
+- `gpu` — engine.js:2419
 - `h` — engine.js:963, engine.js:1503, engine.js:1507
-- `iconDataURL()` — fx.js:1401
-- `iconDataURL` — fx.js:1397
-- `idleCamera()` — level.js:1209, level.js:1331
-- `init()` — main.js:367
-- `init` — ui.js:5784
-- `lights` — boss.js:252, crowd.js:1136, weapons.js:1029, weapons.js:1935
+- `iconDataURL()` — fx.js:1488
+- `iconDataURL` — fx.js:1484
+- `idleCamera()` — level.js:1245, level.js:1368
+- `init()` — main.js:371
+- `init` — ui.js:5887
+- `lights` — boss.js:252, crowd.js:1234, weapons.js:1031, weapons.js:1937
 - `lights.bossCore` — boss.js:252
-- `lights.laser` — weapons.js:1026, weapons.js:1029, weapons.js:1935
-- `lights.sun` — crowd.js:891
-- `materials` — boss.js:611, environment.js:1327, environment.js:1784, fx.js:1019, fx.js:1079 (+7)
-- `materials.hdrBasic` — weapons.js:637
-- `materials.hpBar()` — zombies.js:384
-- `materials.hpBar` — zombies.js:383
-- `materials.standard()` — boss.js:612
-- `materials.standard` — boss.js:611
+- `lights.laser` — weapons.js:1028, weapons.js:1031, weapons.js:1937
+- `lights.sun` — crowd.js:989
+- `materials` — boss.js:611, environment.js:1327, environment.js:1784, escort.js:753, escort.js:781 (+9)
+- `materials.hdrBasic` — weapons.js:638
+- `materials.hpBar()` — zombies.js:397
+- `materials.hpBar` — zombies.js:396
+- `materials.standard()` — boss.js:612, escort.js:753, escort.js:781
+- `materials.standard` — boss.js:611, escort.js:753, escort.js:781
 - `near` — environment.js:1577, environment.js:1581
-- `onBreach()` — crowd.js:798
-- `onBreach` — crowd.js:798
-- `onClimb()` — crowd.js:771
-- `onClimb` — crowd.js:771
-- `onHold()` — crowd.js:768
-- `onHold` — crowd.js:768
-- `onReach()` — crowd.js:852
-- `onReach` — crowd.js:852
-- `onWall()` — crowd.js:802
-- `onWall` — crowd.js:802
-- `overlayLayer` — fx.js:1131
+- `onBreach()` — crowd.js:896
+- `onBreach` — crowd.js:896
+- `onClimb()` — crowd.js:869
+- `onClimb` — crowd.js:869
+- `onHold()` — crowd.js:866
+- `onHold` — crowd.js:866
+- `onReach()` — crowd.js:950
+- `onReach` — crowd.js:950
+- `onWall()` — crowd.js:900
+- `onWall` — crowd.js:900
+- `overlayLayer` — fx.js:1216
 - `preparePrograms()` — night.js:682
-- `reachZ` — crowd.js:755
+- `reachZ` — crowd.js:853
 - `rebuild()` — engine.js:1613
 - `rebuild` — engine.js:1612, engine.js:1613
-- `remove()` — environment.js:1742, environment.js:1748, troops.js:378, zombies.js:503, zombies.js:508 (+1)
-- `removeWarmable()` — crowd.js:487, hold.js:386
-- `renderer` — crowd.js:428, engine.js:1867, engine.js:1956, hold.js:356
+- `remove()` — environment.js:1742, environment.js:1748, troops.js:378, zombies.js:518, zombies.js:523 (+1)
+- `removeWarmable()` — crowd.js:580, escort.js:148, hold.js:389
+- `renderer` — chase.js:73, crowd.js:434, engine.js:1871, engine.js:1960, escort.js:119 (+1)
 - `renderer.getContext()` — night.js:618
-- `renderer.info` — engine.js:1867, engine.js:1868, engine.js:1956
-- `resize()` — engine.js:1524, ui.js:2281
+- `renderer.info` — engine.js:1871, engine.js:1872, engine.js:1960
+- `resize()` — engine.js:1524, ui.js:2299
 - `resize` — engine.js:1523, engine.js:1524
-- `scene` — boss.js:251, crowd.js:428, crowd.js:450, crowd.js:487, environment.js:1311 (+21)
-- `scene.add()` — environment.js:1801, hold.js:1711
+- `scene` — boss.js:251, chase.js:73, chase.js:107, crowd.js:434, crowd.js:456 (+30)
+- `scene.add()` — environment.js:1801, escort.js:788, hold.js:1724, obstacles.js:88
 - `scene.fog` — environment.js:1573, environment.js:1636, environment.js:1714, environment.js:1881, environment.js:1941 (+2)
-- `scene.remove()` — crowd.js:487, hold.js:386
+- `scene.remove()` — crowd.js:580, escort.js:148, hold.js:389, obstacles.js:198
 - `scene.traverse()` — night.js:401
-- `setBloomStrength()` — fx.js:1517, fx.js:2867, fx.js:2872, level.js:1328
-- `setBloomStrength` — fx.js:1517, fx.js:2867, fx.js:2872
-- `setDesaturate()` — fx.js:2842, fx.js:2845, level.js:1329
-- `setDesaturate` — fx.js:2845
-- `setDistrict()` — level.js:1222
-- `setDistrict` — level.js:1222
-- `setNight()` — level.js:1223
-- `setNight` — level.js:1223
-- `setRenderScale()` — engine.js:2206, hold.js:1828
-- `setRenderScale` — engine.js:2205, engine.js:2206, hold.js:1826
-- `setRig()` — crowd.js:1260, hold.js:439
-- `setRig` — hold.js:439
-- `size` — engine.js:962, engine.js:1501, engine.js:1536, engine.js:1546, engine.js:2273 (+7)
-- `size.dpr` — engine.js:1537, engine.js:2273, engine.js:2413
-- `size.h` — engine.js:1537, engine.js:2598, fx.js:2027, night.js:618
+- `setBloomStrength()` — fx.js:1605, fx.js:3014, fx.js:3019, level.js:1365
+- `setBloomStrength` — fx.js:1605, fx.js:3014, fx.js:3019
+- `setDesaturate()` — fx.js:2989, fx.js:2992, level.js:1366
+- `setDesaturate` — fx.js:2992
+- `setDistrict()` — level.js:1258
+- `setDistrict` — level.js:1258
+- `setNight()` — level.js:1259
+- `setNight` — level.js:1259
+- `setRenderScale()` — engine.js:2210, hold.js:1841
+- `setRenderScale` — engine.js:2209, engine.js:2210, hold.js:1839
+- `setRig()` — chase.js:113, chase.js:243, crowd.js:1358, hold.js:442
+- `setRig` — chase.js:113, chase.js:243, hold.js:442
+- `size` — engine.js:962, engine.js:1501, engine.js:1536, engine.js:1546, engine.js:2277 (+7)
+- `size.dpr` — engine.js:1537, engine.js:2277, engine.js:2417
+- `size.h` — engine.js:1537, engine.js:2602, fx.js:2116, night.js:618
 - `size.portrait` — engine.js:1546
-- `size.w` — engine.js:1537, engine.js:2598, fx.js:2027
-- `spitHold()` — crowd.js:801
-- `spitHold` — crowd.js:801
-- `spitZ` — crowd.js:756
-- `textures()` — materials.js:831
-- `textures` — environment.js:1317, fx.js:1054, fx.js:1379, fxmaterials.js:483, gates.js:512 (+5)
-- `textures.glow` — weapons.js:538
-- `textures.iconDataURL()` — ui.js:5801
-- `textures.iconUV()` — gates.js:1542
-- `textures.muzzle` — weapons.js:556
+- `size.w` — engine.js:1537, engine.js:2602, fx.js:2116
+- `spitHold()` — crowd.js:899
+- `spitHold` — crowd.js:899
+- `spitZ` — crowd.js:854
+- `textures()` — materials.js:833
+- `textures` — environment.js:1317, fx.js:1134, fx.js:1466, fxmaterials.js:483, gates.js:520 (+5)
+- `textures.glow` — weapons.js:539
+- `textures.iconDataURL()` — ui.js:5904
+- `textures.iconUV()` — gates.js:1566, gates.js:1591
+- `textures.muzzle` — weapons.js:557
 - `titleBlend` — environment.js:1919
-- `uniforms` — boss.js:1936, fx.js:881, fx.js:1043, hold.js:1703, pickups.js:207 (+2)
-- `uniforms.uTime` — boss.js:1936, fx.js:881, fxmaterials.js:454, hold.js:1703, materials.js:777 (+7)
-- `update()` — engine.js:1781
-- `update` — fx.js:1626, fx.js:2773, fx.js:2825
-- `value` — squad.js:927, squad.js:1177
+- `uniforms` — boss.js:1939, fx.js:960, fx.js:1123, hold.js:1716, pickups.js:207 (+2)
+- `uniforms.uTime` — boss.js:1939, fx.js:960, fxmaterials.js:454, hold.js:1716, materials.js:779 (+7)
+- `update()` — engine.js:1783
+- `update` — fx.js:1715, fx.js:2920, fx.js:2972
+- `value` — squad.js:966, squad.js:1217
 - `variantForLevel()` — night.js:682
-- `w` — engine.js:1503, engine.js:1507, fx.js:2612, fx.js:2759
-- `wallZ` — crowd.js:754
+- `w` — engine.js:1503, engine.js:1507, fx.js:2759, fx.js:2906
+- `wallZ` — crowd.js:852
 - `warmup()` — engine.js:1617
 - `warmup` — engine.js:1616, engine.js:1617, engine.js:1624
-- `worldToScreen()` — fx.js:2569, fx.js:2651, fx.js:2712, fx.js:2749, hold.js:1523 (+1)
-- `worldToScreen` — fx.js:2567, fx.js:2649, fx.js:2712, fx.js:2747, hold.js:1517 (+1)
+- `worldToScreen()` — chase.js:365, escort.js:553, fx.js:2716, fx.js:2798, fx.js:2859 (+3)
+- `worldToScreen` — chase.js:365, escort.js:553, escort.js:638, fx.js:2714, fx.js:2796 (+4)
 
 ## ctx.models (owner js/models.js)
 
@@ -167,571 +173,596 @@ For each ctx system: every member that OTHER files access (directly or via alias
 - `buildBossRig` — boss.js:434, boss.js:543
 - `buildTroopMesh()` — troops.js:294, troops.js:296
 - `buildTroopMesh` — troops.js:289, troops.js:290, troops.js:299
-- `dispose()` — zombies.js:518
+- `dispose()` — zombies.js:533
 - `geo()` — environment.js:2069
-- `geo` — boss.js:586, boss.js:608, crowd.js:1196, environment.js:2073, fx.js:1269 (+4)
+- `geo` — boss.js:586, boss.js:608, crowd.js:1294, environment.js:2073, fx.js:1356 (+4)
 - `geo.car` — boss.js:608
-- `geo.gateFrame` — gates.js:670
-- `geo.glob` — boss.js:586, zombies.js:406
-- `geo.shard` — fx.js:1269
-- `geo.walker` — crowd.js:1196
-- `id` — render.js:2174
-- `init()` — main.js:377
-- `makeCharacterMaterial()` — squad.js:420
-- `makeCharacterMaterial` — squad.js:419
-- `muzzle` — weapons.js:550
-- `muzzle.clone()` — weapons.js:550
-- `rocket` — weapons.js:580
-- `setEyeGlow()` — render.js:2072
-- `setEyeGlow` — render.js:2070
-- `setGearGlow` — squad.js:439
-- `tracer` — weapons.js:528
+- `geo.gateFrame` — gates.js:678
+- `geo.glob` — boss.js:586, zombies.js:419
+- `geo.shard` — fx.js:1356
+- `geo.walker` — crowd.js:1294
+- `id` — render.js:2190
+- `init()` — main.js:381
+- `makeCharacterMaterial()` — squad.js:424
+- `makeCharacterMaterial` — squad.js:423
+- `muzzle` — weapons.js:551
+- `muzzle.clone()` — weapons.js:551
+- `rocket` — weapons.js:581
+- `setEyeGlow()` — render.js:2088
+- `setEyeGlow` — render.js:2086
+- `setGearGlow` — squad.js:443
+- `tracer` — weapons.js:529
 
 ## ctx.ui (owner js/ui.js)
 
-- `coinIconScreenPos()` — fx.js:2609
-- `coinIconScreenPos` — fx.js:2609
-- `debugPanel` — engine.js:2311
-- `flash()` — fx.js:2811, fx.js:2812
-- `flash` — fx.js:2807, fx.js:2810
-- `hideBoot()` — main.js:451
-- `init()` — main.js:351
-- `powerupIconScreenPos()` — fx.js:2756
-- `powerupIconScreenPos` — fx.js:2756
-- `refit()` — render.js:2210
-- `refit` — render.js:2209
-- `setBootCaption()` — main.js:174
-- `setBootCaption` — main.js:173
-- `setBootProgress()` — main.js:167, render.js:3527
-- `setBootProgress` — main.js:166, main.js:359, main.js:361, main.js:369, render.js:3526
-- `setDebugText()` — engine.js:2310
-- `setDebugText` — engine.js:2245
-- `showError()` — engine.js:825, engine.js:1696, main.js:98
-- `showError` — engine.js:823, engine.js:1695, main.js:97
+- `coinIconScreenPos()` — fx.js:2756
+- `coinIconScreenPos` — fx.js:2756
+- `debugPanel` — engine.js:2315
+- `flash()` — fx.js:2958, fx.js:2959
+- `flash` — fx.js:2954, fx.js:2957
+- `hideBoot()` — main.js:455
+- `init()` — main.js:355
+- `powerupIconScreenPos()` — fx.js:2903
+- `powerupIconScreenPos` — fx.js:2903
+- `refit()` — render.js:2226
+- `refit` — render.js:2225
+- `setBootCaption()` — main.js:177
+- `setBootCaption` — main.js:176
+- `setBootProgress()` — main.js:170, render.js:3545
+- `setBootProgress` — main.js:169, main.js:363, main.js:365, main.js:373, render.js:3544
+- `setDebugText()` — engine.js:2314
+- `setDebugText` — engine.js:2249
+- `showError()` — engine.js:825, engine.js:1696, main.js:101
+- `showError` — engine.js:823, engine.js:1695, main.js:100
 - `showOverlay()` — engine.js:1562
 - `showOverlay` — engine.js:1561
-- `update()` — engine.js:1786
-- `vignette()` — fx.js:2822
-- `vignette` — fx.js:2822
+- `update()` — engine.js:1788
+- `vignette()` — fx.js:2969
+- `vignette` — fx.js:2969
 
 ## ctx.audio (owner js/audio.js)
 
-- `duck()` — engine.js:2453, engine.js:2471, level.js:1334
-- `duck` — engine.js:2452, engine.js:2470
-- `init()` — main.js:386
-- `needsGesture` — engine.js:1971
-- `play()` — fx.js:2216, ui.js:4351, ui.js:5180
-- `play` — fx.js:2214, ui.js:4351, ui.js:5179
-- `setMusic()` — level.js:1210
-- `update()` — engine.js:1790
+- `duck()` — engine.js:2457, engine.js:2475, level.js:1371
+- `duck` — engine.js:2456, engine.js:2474
+- `init()` — main.js:390
+- `needsGesture` — engine.js:1975
+- `play()` — fx.js:2363, ui.js:4377, ui.js:5270
+- `play` — fx.js:2361, ui.js:4377, ui.js:5269
+- `setMusic()` — level.js:1246
+- `update()` — engine.js:1792
 
 ## ctx.weapons (owner js/weapons.js)
 
-- `addTarget()` — crowd.js:453
-- `addTarget` — crowd.js:453
+- `addTarget()` — crowd.js:459
+- `addTarget` — crowd.js:459
 - `damageMult` — troops.js:911
-- `gear` — audio.js:1513, pickups.js:474, ui.js:4556
-- `invulnerable` — crowd.js:1255
-- `liveBullets` — engine.js:2281
-- `pauseTimers()` — boss.js:359, boss.js:740, boss.js:767, level.js:1335
+- `gear` — audio.js:1513, pickups.js:474, ui.js:4582
+- `invulnerable` — crowd.js:1353
+- `liveBullets` — engine.js:2285
+- `pauseTimers()` — boss.js:359, boss.js:740, boss.js:767, level.js:1372
 - `pauseTimers` — boss.js:359, boss.js:740, boss.js:767
-- `removeTarget()` — crowd.js:476
-- `removeTarget` — crowd.js:476
+- `removeTarget()` — crowd.js:569
+- `removeTarget` — crowd.js:569
 - `render()` — engine.js:1776
-- `requestFire()` — ui.js:5966
-- `requestFire` — ui.js:5966
-- `roadSpeed` — crowd.js:1254, crowd.js:1255
-- `setPolicy()` — crowd.js:1261, hold.js:441
-- `setPolicy` — hold.js:441
+- `requestFire()` — ui.js:6069
+- `requestFire` — ui.js:6069
+- `roadSpeed` — crowd.js:1352, crowd.js:1353
+- `setPolicy()` — crowd.js:1359, hold.js:444
+- `setPolicy` — hold.js:444
+- `setTracerClip()` — escort.js:199, escort.js:454
+- `setTracerClip` — escort.js:199, escort.js:454
 - `spawnBullet()` — troops.js:920
-- `squadDps()` — hold.js:1234, hold.js:1568, troops.js:507, troops.js:912
+- `squadDps()` — hold.js:1243, hold.js:1581, troops.js:507, troops.js:912
 - `squadDps` — troops.js:507
 - `startGear()` — pickups.js:477
 - `startGear` — pickups.js:477
 - `startWeapon()` — pickups.js:467
 - `startWeapon` — pickups.js:467
-- `step()` — engine.js:1846
+- `step()` — engine.js:1848
 - `storeWeapon()` — pickups.js:466
 - `storeWeapon` — pickups.js:466
-- `storedCount` — hold.js:497, hold.js:1567, level.js:2827, ui.js:5847
-- `storedId()` — ui.js:5849
-- `storedId` — ui.js:5845
+- `storedCount` — hold.js:500, hold.js:1580, level.js:2877, ui.js:5950
+- `storedId()` — ui.js:5952
+- `storedId` — ui.js:5948
 - `targetAt()` — troops.js:642
 - `targetCount` — troops.js:641
-- `weapon` — hold.js:497, ui.js:4555, ui.js:5848
-- `weaponTimeLeft` — audio.js:1511, ui.js:4555, ui.js:5850
+- `weapon` — chase.js:176, hold.js:500, ui.js:4581, ui.js:5951
+- `weaponTimeLeft` — audio.js:1511, ui.js:4581, ui.js:5953
 
 ## ctx.gates (owner js/gates.js)
 
-- `activeEvent` — level.js:3273, weapons.js:1531, weapons.js:1717
-- `applyHit()` — weapons.js:1549, weapons.js:1716, weapons.js:1727, weapons.js:1847
-- `hitTestSeg()` — weapons.js:1502, weapons.js:1845
-- `hitTestSegment()` — weapons.js:1503, weapons.js:1845
-- `liveEvents()` — night.js:515
-- `pulseEvent()` — ui.js:4394
+- `activeEvent` — level.js:3340, weapons.js:1533, weapons.js:1719
+- `applyHit()` — weapons.js:1551, weapons.js:1718, weapons.js:1729, weapons.js:1849
+- `hitTestSeg()` — weapons.js:1504, weapons.js:1847
+- `hitTestSegment()` — weapons.js:1505, weapons.js:1847
+- `liveEvents()` — chase.js:225, night.js:515
+- `pulseEvent()` — ui.js:4420
 - `render()` — engine.js:1774
-- `reset()` — crowd.js:1257, level.js:672
-- `reset` — level.js:672
-- `spawnEvent()` — level.js:1808, level.js:1976
-- `step()` — engine.js:1850, level.js:1811
+- `reset()` — crowd.js:1355, level.js:690
+- `reset` — level.js:690
+- `setGlyphScale()` — chase.js:112
+- `setGlyphScale` — chase.js:112
+- `spawnEvent()` — level.js:1854, level.js:2025
+- `step()` — engine.js:1852, level.js:1857
 
 ## ctx.pickups (owner js/pickups.js)
 
-- `grantItem()` — gates.js:1422
-- `grantItem` — gates.js:1422
-- `hasClosedCrateAhead()` — level.js:1579, level.js:1890
-- `hit()` — weapons.js:1551, weapons.js:1733
-- `hitTestSeg()` — weapons.js:1508
-- `hitTestSegment()` — weapons.js:1509
+- `grantItem()` — gates.js:1445
+- `grantItem` — gates.js:1445
+- `hasClosedCrateAhead()` — level.js:1625, level.js:1939
+- `hit()` — weapons.js:1553, weapons.js:1735
+- `hitTestSeg()` — weapons.js:1510
+- `hitTestSegment()` — weapons.js:1511
 - `render()` — engine.js:1775
-- `reset()` — crowd.js:1258, level.js:673
-- `reset` — level.js:673
-- `setMagnet()` — weapons.js:954, weapons.js:985
-- `setMagnet` — weapons.js:954, weapons.js:985
-- `spawnCoinLine()` — level.js:2202
-- `spawnCrate()` — level.js:2194
-- `step()` — engine.js:1851
+- `reset()` — crowd.js:1356, level.js:691
+- `reset` — level.js:691
+- `setMagnet()` — weapons.js:956, weapons.js:987
+- `setMagnet` — weapons.js:956, weapons.js:987
+- `spawnCoinLine()` — level.js:2251
+- `spawnCrate()` — level.js:2243
+- `step()` — engine.js:1853
 
 ## ctx.save (owner js/save.js)
 
-- `addCoins()` — level.js:3147, level.js:3209, level.js:3244
-- `addStats()` — level.js:3151, level.js:3211, level.js:3246
-- `data` — audio.js:638, level.js:1129, level.js:1187, level.js:1399, level.js:2785 (+4)
-- `data.coins` — level.js:2785, ui.js:2259, ui.js:2260, ui.js:2837
-- `data.endless` — level.js:3239
-- `data.highestUnlocked` — level.js:1129, level.js:1187, night.js:680
-- `data.levels` — level.js:1399
+- `addCoins()` — level.js:3199, level.js:3266, level.js:3311
+- `addStats()` — level.js:3203, level.js:3268, level.js:3313
+- `data` — audio.js:638, level.js:1164, level.js:1222, level.js:1442, level.js:2835 (+4)
+- `data.coins` — level.js:2835, ui.js:2272, ui.js:2273, ui.js:2859
+- `data.endless` — level.js:3306
+- `data.highestUnlocked` — level.js:1164, level.js:1222, night.js:680
+- `data.levels` — level.js:1442
 - `data.settings` — audio.js:638
-- `haptics` — fx.js:1426
-- `hintDone()` — level.js:732, level.js:777, level.js:2859, ui.js:2833, ui.js:2836 (+8)
-- `hintDone` — ui.js:3343, ui.js:3547, ui.js:3568, ui.js:3629, ui.js:3689 (+1)
-- `hints` — hold.js:1456
-- `isReplay()` — level.js:1400
-- `load()` — main.js:341
-- `markHint()` — hold.js:1454, level.js:778, level.js:2909, ui.js:4175
-- `markHint` — hold.js:1454, level.js:2909, ui.js:4174
-- `meetType()` — level.js:1402
-- `profile()` — main.js:346
-- `recordEndless()` — level.js:3245
-- `recordLevel()` — level.js:3148
-- `recordModeRun()` — level.js:3149, level.js:3210
-- `reducedMotion` — fx.js:1427
-- `reset()` — main.js:343, ui.js:2570
-- `reset` — ui.js:2569
-- `setLastIncome()` — level.js:3150
-- `setSetting()` — ui.js:5529, ui.js:5533
-- `setSetting` — ui.js:5532
-- `setUpgrade()` — ui.js:4962
-- `settings` — audio.js:638, fx.js:1425, materials.js:805, night.js:461, render.js:3466 (+1)
-- `spend()` — ui.js:4960
-- `volatile` — ui.js:4626
+- `haptics` — fx.js:1513
+- `hardOf()` — level.js:1444, ui.js:4859
+- `hardOpen()` — ui.js:4663, ui.js:4791
+- `hintDone()` — level.js:750, level.js:795, level.js:2909, ui.js:2293, ui.js:2855 (+9)
+- `hintDone` — ui.js:3369, ui.js:3573, ui.js:3594, ui.js:3655, ui.js:3715 (+1)
+- `hints` — escort.js:567, hold.js:1469
+- `isReplay()` — level.js:1446
+- `load()` — main.js:345
+- `markHint()` — chase.js:381, escort.js:565, hold.js:1467, level.js:796, level.js:2959 (+1)
+- `markHint` — chase.js:381, escort.js:565, hold.js:1467, level.js:2959, ui.js:4200
+- `markOf()` — level.js:1445, ui.js:4860, ui.js:4880, ui.js:5136
+- `meetType()` — level.js:1448
+- `profile()` — main.js:350
+- `recordEndless()` — level.js:3312
+- `recordHard()` — level.js:3206
+- `recordLevel()` — level.js:3200
+- `recordModeRun()` — level.js:3201, level.js:3267
+- `reducedMotion` — fx.js:1514
+- `reset()` — main.js:347, ui.js:2588
+- `reset` — ui.js:2587
+- `setLastIncome()` — level.js:3202
+- `setSetting()` — ui.js:4872, ui.js:5632, ui.js:5636
+- `setSetting` — ui.js:5635
+- `setUpgrade()` — ui.js:5047
+- `settings` — audio.js:638, fx.js:1512, materials.js:807, night.js:461, render.js:3484 (+1)
+- `settings.hardMods` — ui.js:4865
+- `spend()` — ui.js:5045
+- `volatile` — ui.js:4652
 
 ## ctx.squad (owner js/squad.js)
 
-- `addSoldiers()` — level.js:3338, troops.js:747
-- `applyGate()` — gates.js:1425
-- `applyGate` — gates.js:1380, gates.js:1424
-- `armor` — weapons.js:1142
-- `centerZ` — boss.js:1263, pickups.js:595, troops.js:603, troops.js:611, troops.js:621 (+3)
-- `count` — boss.js:1495, boss.js:1509, engine.js:2279, gates.js:1312, gates.js:1418 (+32)
-- `halfWidth` — boss.js:1651, troops.js:601
-- `intersectsCircle()` — boss.js:869, fx.js:3264, pickups.js:611, pickups.js:636, zombies.js:1533
-- `intersectsCircle` — boss.js:866, fx.js:3264, pickups.js:593, zombies.js:1531
-- `invulnerable` — boss.js:1524, zombies.js:1407, zombies.js:1421, zombies.js:1656
-- `lockLane()` — gates.js:1292, gates.js:1332, gates.js:1465, gates.js:1496, gates.js:1958
-- `lockLane` — gates.js:1292, gates.js:1332, gates.js:1465, gates.js:1496, gates.js:1958
-- `removeSoldiers()` — boss.js:1525, hold.js:1012, hold.js:1025, hold.js:1034, hold.js:1291 (+5)
-- `removeSoldiers` — boss.js:1524
+- `addSoldiers()` — level.js:3407, troops.js:747
+- `applyGate()` — gates.js:1450
+- `applyGate` — gates.js:1403, gates.js:1449
+- `armor` — weapons.js:1144
+- `backZ` — chase.js:139
+- `centerZ` — boss.js:1263, pickups.js:596, troops.js:603, troops.js:611, troops.js:621 (+3)
+- `count` — boss.js:1495, boss.js:1509, chase.js:288, engine.js:2283, gates.js:1335 (+33)
+- `halfWidth` — boss.js:1653, troops.js:601
+- `intersectsCircle()` — boss.js:869, fx.js:3414, pickups.js:612, pickups.js:637, zombies.js:1633
+- `intersectsCircle` — boss.js:866, fx.js:3414, pickups.js:594, zombies.js:1631
+- `invulnerable` — boss.js:1526, zombies.js:1432, zombies.js:1446, zombies.js:1756
+- `lockLane()` — gates.js:1315, gates.js:1355, gates.js:1490, gates.js:1521, gates.js:2011
+- `lockLane` — gates.js:1315, gates.js:1355, gates.js:1490, gates.js:1521, gates.js:2011
+- `removeSoldiers()` — boss.js:1527, hold.js:1017, hold.js:1030, hold.js:1039, hold.js:1300 (+5)
+- `removeSoldiers` — boss.js:1526
 - `render()` — engine.js:1770
-- `setArmor()` — weapons.js:942
-- `setArmor` — weapons.js:942
-- `setFireVisual()` — weapons.js:1365, weapons.js:1793
-- `setFormation()` — crowd.js:1259, hold.js:438
-- `setFormation` — hold.js:438
-- `setInvulnerable()` — boss.js:739, gates.js:1423, level.js:2966
-- `setInvulnerable` — boss.js:739, gates.js:1423
-- `shooterPosition()` — hold.js:796, weapons.js:1324, weapons.js:1767, weapons.js:1881
+- `setArmor()` — weapons.js:944
+- `setArmor` — weapons.js:944
+- `setFireVisual()` — weapons.js:1367, weapons.js:1795
+- `setFormation()` — crowd.js:1357, hold.js:441
+- `setFormation` — hold.js:441
+- `setInvulnerable()` — boss.js:739, gates.js:1446, gates.js:1448, level.js:3017
+- `setInvulnerable` — boss.js:739, gates.js:1446, gates.js:1448
+- `shooterPosition()` — hold.js:800, weapons.js:1326, weapons.js:1769, weapons.js:1883
 - `slotWorld()` — troops.js:608
 - `slotWorld` — troops.js:574
-- `step()` — engine.js:1844, level.js:1810
-- `step` — level.js:1798
-- `visible` — engine.js:2279, render.js:3181
-- `x` — boss.js:1262, boss.js:1335, boss.js:1436, boss.js:1481, boss.js:1652 (+14)
+- `step()` — engine.js:1846, level.js:1856
+- `step` — level.js:1844
+- `visible` — engine.js:2283, render.js:3197
+- `x` — boss.js:1262, boss.js:1335, boss.js:1436, boss.js:1481, boss.js:1654 (+14)
 
 ## ctx.zombies (owner js/zombies.js)
 
-- `alive` — engine.js:2280, troops.js:758, troops.js:887, troops.js:962, troops.js:964 (+1)
-- `aliveOfType()` — level.js:2108
-- `damage()` — troops.js:693, troops.js:791, weapons.js:1544
-- `damageInCircle()` — troops.js:510, weapons.js:1706
+- `alive` — engine.js:2284, troops.js:758, troops.js:887, troops.js:962, troops.js:964 (+1)
+- `aliveOfType()` — level.js:2157
+- `attach()` — escort.js:302
+- `damage()` — troops.js:693, troops.js:791, weapons.js:1546
+- `damageInCircle()` — troops.js:510, weapons.js:1708
 - `damageInCone()` — troops.js:771
-- `damageInLine()` — weapons.js:1774, weapons.js:1903, weapons.js:1911
-- `forEachAlive()` — troops.js:986
-- `forEachAlive` — troops.js:573
+- `damageInLine()` — weapons.js:1776, weapons.js:1905, weapons.js:1913
+- `detach()` — escort.js:331, escort.js:366
+- `forEachAlive()` — escort.js:391, troops.js:986
+- `forEachAlive` — escort.js:388, troops.js:573
 - `highestHp()` — troops.js:691
-- `hitTestSeg()` — weapons.js:1482
-- `hitTestSeg` — weapons.js:1150
-- `hitTestSegment()` — weapons.js:1483
+- `hitTestSeg()` — weapons.js:1484
+- `hitTestSeg` — weapons.js:1152
+- `hitTestSegment()` — weapons.js:1485
 - `hpOf()` — troops.js:788
-- `killAll()` — crowd.js:1256, hold.js:437, level.js:671, level.js:1190, level.js:2967
-- `killAll` — hold.js:437
-- `nearest()` — troops.js:763, troops.js:778, troops.js:890, weapons.js:1180
-- `nearest` — weapons.js:1180
+- `killAll()` — crowd.js:1354, hold.js:440, level.js:689, level.js:1226, level.js:3018
+- `killAll` — hold.js:440
+- `nearest()` — troops.js:763, troops.js:778, troops.js:890, weapons.js:1182
+- `nearest` — weapons.js:1182
 - `nearestOfType()` — troops.js:775, troops.js:776, troops.js:888
-- `position()` — fx.js:1911
-- `position` — fx.js:1909, fx.js:2091
+- `position()` — fx.js:2000
+- `position` — fx.js:1998, fx.js:2180
 - `render()` — engine.js:1771
 - `setBurning()` — troops.js:792
-- `spawn()` — level.js:2032
-- `spawn` — level.js:1840
-- `spawnWave()` — boss.js:1042, boss.js:1053, level.js:1753, level.js:1791, level.js:2060 (+1)
+- `setContactProvider()` — escort.js:172
+- `setContactProvider` — escort.js:172
+- `spawn()` — level.js:2081
+- `spawn` — level.js:1888
+- `spawnWave()` — boss.js:1042, boss.js:1053, level.js:1799, level.js:1837, level.js:2109 (+1)
 - `spawnWave` — boss.js:1037, boss.js:1047
-- `step()` — engine.js:1847
+- `step()` — engine.js:1849
 - `typeOf()` — troops.js:787
 
 ## ctx.crowd (owner js/crowd.js)
 
-- `MODE` — hold.js:885, hold.js:1594
-- `MODE.CLIMB` — hold.js:964
-- `MODE.HOLD` — hold.js:926, hold.js:975, hold.js:982, hold.js:995
-- `MODE.PASS` — hold.js:931
-- `MODE.WALK` — hold.js:945, hold.js:960
-- `active` — hold.js:622, hold.js:746, hold.js:839, hold.js:1246, hold.js:1328 (+4)
-- `alive` — hold.js:602, hold.js:1482, hold.js:1494, hold.js:1563
-- `applyHit()` — hold.js:755
-- `aw` — hold.js:954, hold.js:956, hold.js:995, hold.js:1003, hold.js:1004 (+1)
-- `damageInCircle()` — hold.js:1246
-- `densestCell()` — hold.js:839
-- `flee()` — hold.js:1345
-- `hp` — hold.js:934, hold.js:1604, hold.js:1605
-- `idOf()` — hold.js:755
-- `kill()` — hold.js:984
-- `kills` — hold.js:1404
-- `live` — hold.js:885, hold.js:1598
-- `mode` — hold.js:885, hold.js:926, hold.js:931, hold.js:945, hold.js:960 (+5)
-- `nLive` — hold.js:887, hold.js:1597
-- `queue()` — hold.js:594
-- `queued` — hold.js:602, hold.js:1563
+- `MODE` — hold.js:890, hold.js:1607
+- `MODE.CLIMB` — hold.js:969
+- `MODE.HOLD` — hold.js:931, hold.js:980, hold.js:987, hold.js:1000
+- `MODE.PASS` — hold.js:936
+- `MODE.WALK` — hold.js:950, hold.js:965
+- `active` — hold.js:625, hold.js:750, hold.js:844, hold.js:1255, hold.js:1340 (+4)
+- `alive` — hold.js:605, hold.js:1495, hold.js:1507, hold.js:1576
+- `applyHit()` — hold.js:759
+- `aw` — hold.js:959, hold.js:961, hold.js:1000, hold.js:1008, hold.js:1009 (+1)
+- `beginBlock()` — chase.js:117
+- `beginBlock` — chase.js:115
+- `damageInCircle()` — hold.js:1255
+- `densestCell()` — hold.js:844
+- `flee()` — hold.js:1357
+- `hp` — hold.js:939, hold.js:1617, hold.js:1618
+- `idOf()` — hold.js:759
+- `kill()` — hold.js:989
+- `killNear()` — chase.js:188
+- `killNear` — chase.js:188
+- `kills` — hold.js:1416
+- `live` — hold.js:890, hold.js:1611
+- `mode` — hold.js:890, hold.js:931, hold.js:936, hold.js:950, hold.js:965 (+5)
+- `nLive` — hold.js:892, hold.js:1610
+- `queue()` — hold.js:597
+- `queued` — hold.js:605, hold.js:1576
 - `render()` — engine.js:1772
-- `setStreaks()` — hold.js:1626
-- `spawnBurst()` — hold.js:1331
-- `spd` — hold.js:933
-- `state` — hold.js:753, hold.js:885, hold.js:1599
-- `stats()` — ui.js:2543
-- `step()` — engine.js:1848
-- `t` — hold.js:622
-- `tm` — hold.js:975, hold.js:982, hold.js:995, hold.js:1002, hold.js:1003 (+5)
-- `tx` — hold.js:892, hold.js:1601
-- `type` — hold.js:885, hold.js:932, hold.js:941, hold.js:953, hold.js:974 (+2)
-- `typeIndex()` — hold.js:1329
-- `vz` — hold.js:933, hold.js:993
-- `waiting` — hold.js:1563
-- `x` — hold.js:755, hold.js:885, hold.js:922, hold.js:944, hold.js:966 (+7)
-- `z` — hold.js:755, hold.js:885, hold.js:931, hold.js:943, hold.js:946 (+8)
+- `setDrawBudget()` — chase.js:245
+- `setDrawBudget` — chase.js:245
+- `setFront()` — chase.js:200, chase.js:201
+- `setFront` — chase.js:199
+- `setStreaks()` — hold.js:1639
+- `spawnBurst()` — hold.js:1343
+- `spd` — hold.js:938
+- `state` — hold.js:757, hold.js:890, hold.js:1612
+- `stats()` — ui.js:2561
+- `step()` — engine.js:1850
+- `t` — hold.js:625
+- `tm` — hold.js:980, hold.js:987, hold.js:1000, hold.js:1007, hold.js:1008 (+5)
+- `tx` — hold.js:897, hold.js:1614
+- `type` — hold.js:890, hold.js:937, hold.js:946, hold.js:958, hold.js:979 (+2)
+- `typeIndex()` — hold.js:1341
+- `vz` — hold.js:938, hold.js:998
+- `waiting` — hold.js:1576
+- `x` — hold.js:759, hold.js:890, hold.js:927, hold.js:949, hold.js:971 (+7)
+- `z` — hold.js:759, hold.js:890, hold.js:936, hold.js:948, hold.js:951 (+8)
 
 ## ctx.boss (owner js/boss.js)
 
-- `active` — hold.js:762, hold.js:1425, hold.js:1577
-- `aimPoint()` — troops.js:702, troops.js:898, weapons.js:1172
-- `aimPoint` — troops.js:575, weapons.js:1171
+- `active` — hold.js:766, hold.js:1438, hold.js:1590
+- `aimPoint()` — troops.js:702, troops.js:898, weapons.js:1174
+- `aimPoint` — troops.js:575, weapons.js:1173
 - `capHp` — troops.js:711
-- `damage()` — hold.js:1425, troops.js:713, weapons.js:1712, weapons.js:1780
-- `holdEnraged` — hold.js:1583
-- `holdMode` — hold.js:762, hold.js:1577
-- `holdWindup()` — hold.js:804, hold.js:1581, hold.js:1582
-- `hp` — hold.js:1581, troops.js:696
-- `maxHp` — hold.js:1581, troops.js:711
+- `damage()` — hold.js:1438, troops.js:713, weapons.js:1714, weapons.js:1782
+- `holdEnraged` — hold.js:1596
+- `holdMode` — hold.js:766, hold.js:1590
+- `holdWindup()` — hold.js:809, hold.js:1594, hold.js:1595
+- `hp` — hold.js:1594, troops.js:696
+- `maxHp` — hold.js:1594, troops.js:711
 - `render()` — engine.js:1773
-- `setHoldMode()` — hold.js:453
-- `setHoldMode` — hold.js:453
-- `shieldUp` — hold.js:1585
-- `spawn()` — hold.js:711, level.js:2339
-- `spawn` — hold.js:705
-- `step()` — engine.js:1849
-- `unitAlive()` — hold.js:766, hold.js:1579, hold.js:1580, hold.js:1582
-- `unitX()` — hold.js:769, hold.js:808, hold.js:1581, hold.js:1582
-- `unitZ()` — hold.js:767, hold.js:808, hold.js:1581, hold.js:1582
-- `valve` — level.js:2842
-- `x` — hold.js:1425
-- `z` — hold.js:1425
+- `setHoldMode()` — hold.js:456
+- `setHoldMode` — hold.js:456
+- `shieldUp` — hold.js:1598
+- `spawn()` — hold.js:715, level.js:2388
+- `spawn` — hold.js:708
+- `step()` — engine.js:1851
+- `unitAlive()` — hold.js:770, hold.js:1592, hold.js:1593, hold.js:1595
+- `unitX()` — hold.js:773, hold.js:808, hold.js:813, hold.js:1594, hold.js:1595
+- `unitZ()` — hold.js:771, hold.js:813, hold.js:1594, hold.js:1595
+- `valve` — level.js:2892
+- `x` — hold.js:1438
+- `z` — hold.js:1438
 
 ## ctx.troops (owner js/troops.js)
 
 - `add()` — pickups.js:484
 - `add` — pickups.js:484
-- `apcAbsorb()` — boss.js:1520, hold.js:1033, zombies.js:1366, zombies.js:1377, zombies.js:1655
-- `apcAbsorb` — boss.js:1519, hold.js:1033
-- `apcIntersects()` — boss.js:1520, zombies.js:1540, zombies.js:1654
-- `apcIntersects` — boss.js:1520, zombies.js:1536
-- `apcPool` — zombies.js:1540
+- `apcAbsorb()` — boss.js:1522, hold.js:1038, zombies.js:1391, zombies.js:1402, zombies.js:1755
+- `apcAbsorb` — boss.js:1521, hold.js:1038
+- `apcIntersects()` — boss.js:1522, zombies.js:1640, zombies.js:1754
+- `apcIntersects` — boss.js:1522, zombies.js:1636
+- `apcPool` — zombies.js:1640
 - `render()` — engine.js:1777
-- `setPlacement()` — hold.js:442
-- `setPlacement` — hold.js:442
-- `step()` — engine.js:1845
+- `setPlacement()` — escort.js:173, hold.js:445
+- `setPlacement` — escort.js:173, hold.js:445
+- `step()` — engine.js:1847
 
 ## ctx.hold (owner js/hold.js)
 
-- `active` — ui.js:5258, zombies.js:559
-- `max` — zombies.js:1323
+- `active` — ui.js:5355, zombies.js:574
+- `max` — zombies.js:1343
 - `render()` — engine.js:1778
-- `step()` — engine.js:1852
-- `z` — zombies.js:1323
+- `step()` — engine.js:1854
+- `z` — zombies.js:1343
 
 ## ctx.level (owner js/level.js)
 
+- `addActivity()` — escort.js:262
 - `expectedSquad()` — troops.js:741
-- `finish()` — hold.js:1106
-- `finish` — hold.js:1106
+- `finish()` — escort.js:352, escort.js:447, hold.js:1111
+- `finish` — escort.js:352, escort.js:447, hold.js:1111
 - `idleStep()` — engine.js:1731
 - `idleStep` — engine.js:1731
-- `level` — boss.js:652, night.js:415, troops.js:523, zombies.js:1601
-- `phase` — gates.js:1314, pickups.js:368, weapons.js:895
-- `prepareFor()` — main.js:444
-- `quitToTitle()` — engine.js:1454, main.js:446, ui.js:5421
+- `level` — boss.js:652, night.js:415, troops.js:523, zombies.js:1701
+- `phase` — gates.js:1337, pickups.js:368, weapons.js:897
+- `prepareFor()` — main.js:448
+- `quitToTitle()` — engine.js:1454, main.js:450, ui.js:5518
 - `quitToTitle` — engine.js:1454
-- `requestRestart()` — ui.js:5455, ui.js:5462
-- `requestRestart` — ui.js:5461
-- `requestStart()` — ui.js:5451
-- `requestStart` — ui.js:5450
-- `restart()` — ui.js:5461
-- `script` — hold.js:395
-- `script.events` — hold.js:396
-- `script.roadSpeed` — hold.js:399
-- `showHint()` — gates.js:1065, hold.js:1448, night.js:696
-- `showHint` — gates.js:1065, hold.js:1446
-- `start()` — main.js:445, ui.js:5450
-- `startEndless()` — main.js:440, ui.js:5412, ui.js:5435
-- `step()` — engine.js:1843
-- `step` — crowd.js:469, crowd.js:1254
-- `stopRoad()` — hold.js:432
-- `stopRoad` — hold.js:432
+- `requestRestart()` — ui.js:5558, ui.js:5565
+- `requestRestart` — ui.js:5564
+- `requestStart()` — ui.js:5554
+- `requestStart` — ui.js:5553
+- `restart()` — ui.js:5564
+- `script` — hold.js:398
+- `script.events` — hold.js:399
+- `script.roadSpeed` — hold.js:402
+- `setHard()` — ui.js:5552
+- `showHint()` — chase.js:377, escort.js:562, gates.js:1087, hold.js:1461, night.js:696
+- `showHint` — chase.js:375, escort.js:560, gates.js:1087, hold.js:1459
+- `start()` — main.js:449, ui.js:5553
+- `startEndless()` — main.js:444, ui.js:5509, ui.js:5537
+- `step()` — engine.js:1845
+- `step` — crowd.js:561, crowd.js:1352
+- `stopRoad()` — hold.js:435
+- `stopRoad` — hold.js:435
 - `waveHz()` — troops.js:583
 - `waveHz` — troops.js:579
 
 ## ctx.engine (owner js/engine.js)
 
-- `armBackGuard()` — main.js:460
-- `armBackGuard` — main.js:459
-- `freezeQuality()` — boss.js:737, hold.js:487, level.js:1441
-- `freezeQuality` — boss.js:737, hold.js:487
-- `init()` — main.js:393
-- `inputIdleS()` — ui.js:4182
-- `inputIdleS` — ui.js:4182
-- `lockInput()` — boss.js:358, boss.js:736, boss.js:766, level.js:1309
+- `armBackGuard()` — main.js:464
+- `armBackGuard` — main.js:463
+- `freezeQuality()` — boss.js:737, hold.js:490, level.js:1487
+- `freezeQuality` — boss.js:737, hold.js:490
+- `init()` — main.js:397
+- `inputIdleS()` — ui.js:4208
+- `inputIdleS` — ui.js:4208
+- `lockInput()` — boss.js:358, boss.js:736, boss.js:766, level.js:1345
 - `lockInput` — boss.js:358, boss.js:736, boss.js:766
-- `pause()` — ui.js:3922
-- `resetLevelClock()` — level.js:1310
-- `resetSteering()` — level.js:1311
-- `resume()` — level.js:1307, ui.js:5307
-- `setInputMode()` — hold.js:440
-- `setInputMode` — hold.js:440
-- `setTimeScale()` — fx.js:2804, level.js:1308
-- `setTimeScale` — fx.js:2800
-- `start()` — main.js:454
+- `pause()` — ui.js:3948
+- `resetLevelClock()` — level.js:1346
+- `resetSteering()` — level.js:1347
+- `resume()` — level.js:1343, ui.js:5404
+- `setInputMode()` — hold.js:443
+- `setInputMode` — hold.js:443
+- `setTimeScale()` — fx.js:2951, level.js:1344
+- `setTimeScale` — fx.js:2947
+- `start()` — main.js:458
 
 ## ctx.events
 
 - `debug` — engine.js:598
-- `emit()` — boss.js:794, crowd.js:847, crowd.js:1132, engine.js:1549, engine.js:1693 (+73)
-- `off()` — crowd.js:484, render.js:3605
-- `off` — crowd.js:484, render.js:3604
-- `on()` — crowd.js:415, engine.js:1317, environment.js:1529, fx.js:2898, hold.js:313 (+48)
-- `on` — environment.js:1528, fx.js:2896, squad.js:441
+- `emit()` — boss.js:794, chase.js:383, crowd.js:945, crowd.js:1230, engine.js:1549 (+75)
+- `off()` — crowd.js:577, render.js:3623
+- `off` — crowd.js:577, render.js:3622
+- `on()` — chase.js:50, chase.js:51, chase.js:52, chase.js:53, crowd.js:421 (+55)
+- `on` — environment.js:1528, fx.js:3043, squad.js:445
 - `onListenerError` — engine.js:599, engine.js:706
 
 ## ctx.state
 
 - `current` — engine.js:1316, engine.js:1560, engine.js:1607, engine.js:1749, engine.js:1759 (+11)
-- `data` — ui.js:5477
-- `is()` — audio.js:1509, crowd.js:1086, crowd.js:1114, engine.js:959, engine.js:1062 (+30)
-- `is` — ui.js:4404, ui.js:5634, ui.js:5931, ui.js:5963, weapons.js:1108 (+1)
-- `prev` — ui.js:5481
-- `set()` — engine.js:2450, engine.js:2468, level.js:1208, level.js:1442, level.js:3174 (+3)
+- `data` — ui.js:5580
+- `is()` — audio.js:1509, crowd.js:1184, crowd.js:1212, engine.js:959, engine.js:1062 (+30)
+- `is` — ui.js:4430, ui.js:5737, ui.js:6034, ui.js:6066, weapons.js:1110 (+1)
+- `prev` — ui.js:5584
+- `set()` — engine.js:2454, engine.js:2472, level.js:1244, level.js:1488, level.js:3229 (+3)
 
 ## ctx.input
 
-- `action` — hold.js:1176
-- `activityM` — engine.js:1842
-- `aimTargetX` — engine.js:1837, engine.js:1840, engine.js:1927, hold.js:663, hold.js:1180 (+1)
-- `aimX` — engine.js:1836, engine.js:1838, hold.js:723, hold.js:830, hold.js:852 (+5)
-- `gamepadX` — engine.js:1926, engine.js:1938, engine.js:1939
-- `hasSteered` — engine.js:1938, ui.js:4140, ui.js:4155, ui.js:4370
-- `keyLeft` — engine.js:1083, engine.js:1921
-- `keyRight` — engine.js:1089, engine.js:1922
-- `locked` — engine.js:1914
+- `action` — hold.js:1185
+- `activityM` — engine.js:1844, level.js:1400
+- `aimTargetX` — engine.js:1839, engine.js:1842, engine.js:1931, hold.js:666, hold.js:1189 (+1)
+- `aimX` — engine.js:1838, engine.js:1840, hold.js:727, hold.js:808, hold.js:835 (+6)
+- `gamepadX` — engine.js:1930, engine.js:1942, engine.js:1943
+- `hasSteered` — engine.js:1942, ui.js:4166, ui.js:4181, ui.js:4396
+- `keyLeft` — engine.js:1083, engine.js:1925
+- `keyRight` — engine.js:1089, engine.js:1926
+- `locked` — engine.js:1918
 - `pointerDown` — engine.js:967
-- `steerDx` — engine.js:1927, engine.js:1940, engine.js:1945
-- `style` — ui.js:5018
-- `style.setProperty()` — ui.js:5020
-- `tap` — ui.js:3918
-- `tap.seq` — ui.js:3918
-- `targetX` — engine.js:1840, engine.js:1930, engine.js:1940, gates.js:1230, gates.js:1339 (+1)
-- `targetX.toFixed()` — engine.js:2285
+- `steerDx` — engine.js:1931, engine.js:1944, engine.js:1949
+- `style` — ui.js:5103
+- `style.setProperty()` — ui.js:5105
+- `tap` — ui.js:3944
+- `tap.seq` — ui.js:3944
+- `targetX` — engine.js:1842, engine.js:1934, engine.js:1944, escort.js:168, escort.js:248 (+3)
+- `targetX.toFixed()` — engine.js:2289
 
 ## ctx.world
 
 - `bossActive` — boss.js:377, boss.js:711, boss.js:801, boss.js:1078, boss.js:1165 (+14)
-- `bossX` — boss.js:377, boss.js:711, boss.js:1234, boss.js:1783, fx.js:174 (+8)
-- `bossZ` — boss.js:377, boss.js:711, boss.js:1234, boss.js:1783, fx.js:1608 (+7)
-- `distance` — hold.js:1619, level.js:709, level.js:1278, level.js:1281, level.js:1286 (+33)
-- `invulnerable` — level.js:1321, squad.js:491
-- `roadSpeed` — boss.js:1151, boss.js:1178, fx.js:1717, fx.js:1784, fx.js:2314 (+34)
-- `roadSpeedBase` — level.js:1314, level.js:1513, level.js:1644, level.js:1645, level.js:1646 (+7)
-- `squadCount` — boss.js:1495, level.js:1320, render.js:3181, squad.js:491
-- `squadDepth` — fx.js:3076, gates.js:1265, gates.js:1599, level.js:1319, render.js:3191 (+1)
-- `squadHalfWidth` — boss.js:1651, level.js:1318, night.js:464, squad.js:491, weapons.js:1182
+- `bossX` — boss.js:377, boss.js:711, boss.js:1234, boss.js:1786, fx.js:175 (+8)
+- `bossZ` — boss.js:377, boss.js:711, boss.js:1234, boss.js:1786, fx.js:1697 (+7)
+- `despawnZ` — boss.js:1711, chase.js:110, chase.js:147, gates.js:1246, level.js:1361 (+4)
+- `distance` — chase.js:146, chase.js:291, chase.js:307, chase.js:308, chase.js:326 (+48)
+- `invulnerable` — level.js:1357, squad.js:496
+- `roadSpeed` — boss.js:1151, boss.js:1178, chase.js:146, escort.js:608, escort.js:671 (+37)
+- `roadSpeedBase` — level.js:1350, level.js:1559, level.js:1690, level.js:1691, level.js:1692 (+7)
+- `squadCount` — boss.js:1495, level.js:1356, render.js:3197, squad.js:496
+- `squadDepth` — fx.js:3224, gates.js:1288, gates.js:1648, level.js:1355, render.js:3207 (+1)
+- `squadHalfWidth` — boss.js:1653, level.js:1354, night.js:464, squad.js:496, weapons.js:1184
 - `squadX` — boss.js:860, boss.js:1232, boss.js:1262, boss.js:1335, boss.js:1436 (+13)
-- `squadX.toFixed()` — engine.js:2285
+- `squadX.toFixed()` — engine.js:2289
 
 ## ctx.time
 
 - `alpha` — engine.js:1722, engine.js:1736, engine.js:1739, engine.js:1769, night.js:543 (+2)
-- `dt` — boss.js:1934, engine.js:1714, engine.js:1728, engine.js:1765, engine.js:1781 (+5)
-- `elapsed` — crowd.js:648, engine.js:1907, fx.js:1565, fx.js:1569, fx.js:1653 (+20)
-- `frame` — engine.js:1973, engine.js:2275, engine.js:2411, environment.js:1896, environment.js:1900 (+5)
-- `levelTime` — engine.js:1910, night.js:707, ui.js:945, ui.js:2949, ui.js:3181
-- `now` — engine.js:1873, engine.js:1959, engine.js:1974, engine.js:2199, fx.js:2882
-- `refreshMs` — engine.js:2065
-- `refreshMs.toFixed()` — engine.js:2264
-- `scale` — engine.js:1906, fx.js:2803, level.js:1542
-- `scale.toFixed()` — engine.js:2275
-- `slowmoLeft` — engine.js:1898, engine.js:1899, engine.js:1900, engine.js:1901, fx.js:2803
-- `step` — boss.js:2129
-- `theatre()` — boss.js:152, gates.js:404, render.js:250
-- `theatre` — engine.js:1895, engine.js:2085, environment.js:1892, gates.js:468, gates.js:819 (+2)
-- `unscaledDt` — engine.js:1765, engine.js:1786, engine.js:1790, engine.js:1880, engine.js:1962 (+4)
+- `dt` — boss.js:1937, engine.js:1714, engine.js:1728, engine.js:1765, engine.js:1783 (+6)
+- `elapsed` — chase.js:399, chase.js:407, crowd.js:741, engine.js:1911, fx.js:1653 (+22)
+- `frame` — engine.js:1977, engine.js:2279, engine.js:2415, environment.js:1896, environment.js:1900 (+5)
+- `levelTime` — engine.js:1914, night.js:707, ui.js:955, ui.js:2971, ui.js:3207
+- `now` — engine.js:1877, engine.js:1963, engine.js:1978, engine.js:2203, fx.js:3029
+- `refreshMs` — engine.js:2069
+- `refreshMs.toFixed()` — engine.js:2268
+- `scale` — engine.js:1910, fx.js:2950, level.js:1588
+- `scale.toFixed()` — engine.js:2279
+- `slowmoLeft` — engine.js:1902, engine.js:1903, engine.js:1904, engine.js:1905, fx.js:2950
+- `step` — boss.js:2132
+- `theatre()` — boss.js:152, gates.js:412, render.js:250
+- `theatre` — engine.js:1899, engine.js:2089, environment.js:1892, gates.js:476, gates.js:829 (+2)
+- `unscaledDt` — engine.js:1765, engine.js:1788, engine.js:1792, engine.js:1884, engine.js:1966 (+4)
 
 ## ctx.quality
 
-- `auto` — engine.js:737, engine.js:740, engine.js:744, engine.js:2085, engine.js:2234 (+3)
-- `bloom` — gates.js:1601
-- `dpr` — engine.js:722, engine.js:2273, engine.js:2413, render.js:1785, render.js:2257
-- `fogFar` — gates.js:1602
-- `frozenUntil` — engine.js:730, engine.js:2085
-- `initialTier` — engine.js:2412
-- `maxAutoTier` — engine.js:729, engine.js:2126, engine.js:2272, engine.js:2412
-- `params` — engine.js:728, engine.js:738, engine.js:1803, engine.js:2232, environment.js:1318 (+22)
-- `params.bloom` — weapons.js:2190
-- `params.blur` — engine.js:1803
-- `params.fogFar` — level.js:1349, render.js:1967, render.js:3031
-- `params.propDensity` — level.js:1354
-- `params.shadows` — squad.js:657
-- `params.vmax` — squad.js:431, squad.js:492
-- `renderScale` — engine.js:723, engine.js:731, engine.js:744, engine.js:2137, engine.js:2193 (+7)
-- `renderScale.toFixed()` — engine.js:2274
-- `shadows` — zombies.js:314, zombies.js:536
-- `software` — crowd.js:512, crowd.js:1167, engine.js:732, engine.js:735, engine.js:1757 (+7)
-- `tier` — crowd.js:512, engine.js:727, engine.js:728, engine.js:729, engine.js:738 (+8)
-- `vmax` — squad.js:625
+- `auto` — engine.js:737, engine.js:740, engine.js:744, engine.js:2089, engine.js:2238 (+3)
+- `bloom` — gates.js:1650
+- `dpr` — engine.js:722, engine.js:2277, engine.js:2417, render.js:1801, render.js:2273
+- `fogFar` — gates.js:1651
+- `frozenUntil` — engine.js:730, engine.js:2089
+- `initialTier` — engine.js:2416
+- `maxAutoTier` — engine.js:729, engine.js:2130, engine.js:2276, engine.js:2416
+- `params` — engine.js:728, engine.js:738, engine.js:1805, engine.js:2236, environment.js:1318 (+22)
+- `params.bloom` — weapons.js:2198
+- `params.blur` — engine.js:1805
+- `params.fogFar` — level.js:1386, render.js:1983, render.js:3047
+- `params.propDensity` — level.js:1391
+- `params.shadows` — squad.js:664
+- `params.vmax` — squad.js:435, squad.js:497
+- `renderScale` — engine.js:723, engine.js:731, engine.js:744, engine.js:2141, engine.js:2197 (+7)
+- `renderScale.toFixed()` — engine.js:2278
+- `shadows` — zombies.js:323, zombies.js:551
+- `software` — chase.js:116, chase.js:245, crowd.js:605, crowd.js:1265, engine.js:732 (+9)
+- `tier` — chase.js:116, chase.js:245, crowd.js:605, engine.js:727, engine.js:728 (+11)
+- `vmax` — squad.js:632
 
 ## ctx.run
 
-- `assist` — level.js:3340
-- `assistK` — level.js:1406
-- `bossHpScale` — level.js:2306
-- `bossSeconds` — level.js:2950, level.js:2951
-- `bossStartTime` — level.js:2814, level.js:2949, level.js:2950
-- `bossTtkBand` — level.js:2304
-- `breakdown` — level.js:2768, level.js:2778, level.js:2783, level.js:3155
-- `chunks` — level.js:1688, level.js:3248
-- `coins` — level.js:2778, level.js:2782, level.js:2785, level.js:2786, level.js:3145 (+4)
-- `countAtBoss` — level.js:2343, level.js:2344
-- `distance` — level.js:1539
-- `eBoss` — level.js:1648
-- `elapsed` — level.js:1540, level.js:2814, level.js:2950, level.js:3098
-- `finalVsBase.push()` — level.js:2683
-- `gatesFlipped` — level.js:2666, level.js:3144, level.js:3206
-- `gatesMaxed` — level.js:2660
-- `gatesPassed` — level.js:2675, level.js:3098
-- `hintsShown` — level.js:734, level.js:2859
-- `hintsShown.indexOf()` — level.js:735, level.js:2859
-- `hintsShown.push()` — level.js:736
-- `hitsPerGate` — level.js:2578
-- `hitsPerGate.push()` — level.js:2582
-- `killCoins` — level.js:2726, level.js:2736, level.js:3143, level.js:3206
-- `kills` — level.js:2715, level.js:2735, level.js:3098, level.js:3149, level.js:3210
-- `killsByType` — level.js:2716
-- `kits` — hold.js:445, level.js:2739, level.js:2743
-- `length` — level.js:1687, squad.js:944
-- `level` — level.js:1642
-- `lostPerWave.push()` — level.js:2184, level.js:3056
-- `lostToRed` — level.js:2676, level.js:3144, level.js:3207
-- `miniBossKills` — level.js:2954
-- `newBest` — level.js:3242
-- `peakSquad` — level.js:3000, level.js:3143, level.js:3206
-- `phase` — level.js:599, level.js:1476
-- `redCapped` — level.js:1960
-- `replay` — level.js:2762, level.js:3160
-- `roadSpeedBase` — level.js:1645
-- `rubberEvents` — level.js:1930
-- `score` — level.js:1666, level.js:2699, level.js:2717, level.js:2955, level.js:3143 (+5)
-- `soldiersLost` — level.js:2975
-- `stars` — level.js:3129
-- `streakMult` — level.js:1663, level.js:1666, level.js:2699, level.js:2717, level.js:2955 (+1)
-- `streakSeconds` — level.js:1660, level.js:1661, level.js:1662, level.js:2977
-- `survivors` — level.js:2965, level.js:3121
-- `waveHz` — level.js:2182
+- `assist` — level.js:3409
+- `assistK` — level.js:1452
+- `bossHpScale` — level.js:2355
+- `bossSeconds` — level.js:3001, level.js:3002
+- `bossStartTime` — level.js:2864, level.js:3000, level.js:3001
+- `bossTtkBand` — level.js:2353
+- `breakdown` — level.js:2818, level.js:2828, level.js:2833, level.js:3209
+- `chunks` — level.js:1734, level.js:3315
+- `coins` — level.js:2828, level.js:2832, level.js:2835, level.js:2836, level.js:3197 (+2)
+- `countAtBoss` — level.js:2392, level.js:2393
+- `distance` — level.js:1585
+- `eBoss` — level.js:1694
+- `elapsed` — level.js:1586, level.js:2864, level.js:3001, level.js:3150
+- `finalVsBase.push()` — level.js:2732
+- `gatesFlipped` — level.js:2715, level.js:3196, level.js:3263
+- `gatesMaxed` — level.js:2709
+- `gatesPassed` — level.js:2724, level.js:3150
+- `hintsShown` — level.js:752, level.js:2909
+- `hintsShown.indexOf()` — level.js:753, level.js:2909
+- `hintsShown.push()` — level.js:754
+- `hitsPerGate` — level.js:2627
+- `hitsPerGate.push()` — level.js:2631
+- `killCoins` — level.js:2775, level.js:2785, level.js:3195, level.js:3263
+- `kills` — level.js:2764, level.js:2784, level.js:3150, level.js:3201, level.js:3267
+- `killsByType` — level.js:2765
+- `kits` — hold.js:448, level.js:2788, level.js:2792
+- `length` — level.js:1733, squad.js:983
+- `level` — level.js:1688
+- `lostPerWave.push()` — level.js:2233, level.js:3107
+- `lostToRed` — level.js:2725, level.js:3196, level.js:3264
+- `miniBossKills` — level.js:3005
+- `newBest` — level.js:3309
+- `peakSquad` — level.js:3051, level.js:3195, level.js:3263
+- `phase` — level.js:617, level.js:1522
+- `redCapped` — level.js:2009
+- `replay` — level.js:2811, level.js:3214
+- `roadSpeedBase` — level.js:1691
+- `rubberEvents` — level.js:1979
+- `score` — level.js:1712, level.js:2748, level.js:2766, level.js:3006, level.js:3195 (+5)
+- `soldiersLost` — level.js:3026
+- `stars` — level.js:3181
+- `streakMult` — level.js:1709, level.js:1712, level.js:2748, level.js:2766, level.js:3006 (+1)
+- `streakSeconds` — level.js:1706, level.js:1707, level.js:1708, level.js:3028
+- `survivors` — level.js:3016, level.js:3173
+- `waveHz` — level.js:2231
 
 ## ctx.profile
 
-- `bossDamage` — boss.js:923, hold.js:467, hold.js:708, level.js:2404, level.js:2423 (+2)
-- `coinMult` — level.js:2759
-- `damage()` — troops.js:587, weapons.js:1014
-- `damage` — hold.js:466, level.js:2132, level.js:2404, level.js:2423, level.js:2452 (+5)
-- `fireRate()` — weapons.js:1020
-- `fireRate` — hold.js:466, hold.js:778, level.js:1928, level.js:2132, level.js:2404 (+6)
-- `hitTestSeg` — weapons.js:1153
-- `startSquad` — squad.js:495
+- `bossDamage` — boss.js:923, hold.js:470, hold.js:711, level.js:2453, level.js:2472 (+2)
+- `coinMult` — level.js:2808
+- `damage()` — troops.js:587, weapons.js:1016
+- `damage` — chase.js:175, hold.js:469, level.js:2181, level.js:2453, level.js:2472 (+6)
+- `fireRate()` — weapons.js:1022
+- `fireRate` — chase.js:175, hold.js:469, hold.js:782, level.js:1977, level.js:2181 (+7)
+- `hitTestSeg` — weapons.js:1155
+- `startSquad` — squad.js:500
 
 ## ctx.config
 
-- `debug` — engine.js:584, level.js:845, render.js:1809, ui.js:1024, ui.js:2534
-- `endless` — main.js:440
-- `isArtifact` — engine.js:1304, main.js:327, ui.js:1722, ui.js:3714
-- `level` — main.js:441, main.js:444, main.js:445
+- `debug` — engine.js:584, level.js:863, render.js:1825, ui.js:1034, ui.js:2552
+- `endless` — main.js:444
+- `isArtifact` — engine.js:1304, main.js:331, ui.js:1734, ui.js:3740
+- `level` — main.js:445, main.js:448, main.js:449
 - `nomusic` — audio.js:643
-- `quality` — engine.js:715, render.js:1772
-- `reset` — main.js:342
-- `seed` — level.js:1157, main.js:440, main.js:443
-- `type` — level.js:845
+- `quality` — engine.js:715, render.js:1788
+- `reset` — main.js:346
+- `seed` — level.js:1192, main.js:444, main.js:447
+- `type` — level.js:863
 
 ## ctx.debug
 
-- `calls` — engine.js:1957
-- `dropped` — boss.js:1597, crowd.js:742, engine.js:2287, fx.js:599, fx.js:601 (+7)
-- `enabled()` — level.js:3003
-- `enabled` — boss.js:1597, crowd.js:1250, engine.js:821, engine.js:1961, hold.js:1555 (+2)
-- `histograms` — engine.js:62, engine.js:2294
-- `holdShiftM` — level.js:1744
-- `jsMs` — engine.js:594, engine.js:1953, engine.js:2250
-- `laserBeams` — engine.js:2283, weapons.js:1105
-- `levelGenHits` — level.js:1076
-- `levelGenMisses` — level.js:1077
-- `levelGenMs` — engine.js:595, level.js:1075
-- `shotsPerSec` — engine.js:2283, weapons.js:1101
+- `calls` — engine.js:1961
+- `dropped` — boss.js:1599, crowd.js:840, engine.js:2291, fx.js:600, fx.js:602 (+7)
+- `enabled()` — level.js:3054
+- `enabled` — boss.js:1599, crowd.js:1348, engine.js:821, engine.js:1965, escort.js:575 (+3)
+- `histograms` — engine.js:62, engine.js:2298
+- `holdShiftM` — level.js:1790
+- `jsMs` — engine.js:594, engine.js:1957, engine.js:2254
+- `laserBeams` — engine.js:2287, weapons.js:1107
+- `levelGenHits` — level.js:1111
+- `levelGenMisses` — level.js:1112
+- `levelGenMs` — engine.js:595, level.js:1110
+- `shotsPerSec` — engine.js:2287, weapons.js:1103
 
 ## ctx.rng
 
-- `fork()` — level.js:36, level.js:38, level.js:1389, level.js:1390, main.js:31 (+1)
-- `range()` — boss.js:1401, boss.js:1617, boss.js:1618, level.js:2030, zombies.js:583 (+11)
+- `fork()` — level.js:37, level.js:39, level.js:1432, level.js:1433, main.js:33 (+1)
+- `range()` — boss.js:1401, boss.js:1619, boss.js:1620, level.js:2079, zombies.js:598 (+11)
 
 ## ctx.rngFx
 
-- `next()` — fx.js:1663, zombies.js:606, zombies.js:607, zombies.js:608
-- `next` — fx.js:1663
-- `range()` — boss.js:1148, boss.js:1152, boss.js:1611, boss.js:1687, boss.js:1698 (+10)
+- `next()` — fx.js:1752, zombies.js:622, zombies.js:623, zombies.js:624
+- `next` — fx.js:1752
+- `range()` — boss.js:1148, boss.js:1152, boss.js:1613, boss.js:1689, boss.js:1700 (+10)
 
 ## ctx.rngShot
 
-- `next()` — boss.js:851, weapons.js:694
-- `range()` — weapons.js:1357, weapons.js:1379
+- `next()` — boss.js:851, weapons.js:696
+- `range()` — weapons.js:1359, weapons.js:1381
 
 ## Events (string-literal emits/listens, incl. _emit/on helpers and *EVENTS tables)
 
 | event | emitted by | listened by |
 |---|---|---|
 | `armor:change` | squad.js | fx.js, level.js, squad.js, ui.js |
-| `audio:loop` | hold.js, night.js | audio.js |
+| `audio:loop` | chase.js, hold.js, night.js | audio.js |
 | `audio:unlocked` | audio.js | engine.js |
 | `boss:attack` | boss.js | audio.js, level.js |
 | `boss:dead` | boss.js | audio.js, fx.js, hold.js, level.js, ui.js |
@@ -744,6 +775,12 @@ For each ctx system: every member that OTHER files access (directly or via alias
 | `boss:shield` | boss.js | fx.js, ui.js |
 | `boss:spawn` | boss.js | ui.js |
 | `boss:stagger` | boss.js | — |
+| `chase:breach` | chase.js | — |
+| `chase:doors` | chase.js | — |
+| `chase:drop` | chase.js | — |
+| `chase:sprint` | chase.js | — |
+| `chase:surge` | chase.js | — |
+| `chase:trip` | chase.js | — |
 | `codex:new` | level.js | ui.js |
 | `coin:pickup` | boss.js, gates.js, level.js, pickups.js, weapons.js, zombies.js | audio.js, fx.js, level.js |
 | `coins:change` | level.js | ui.js |
@@ -755,8 +792,14 @@ For each ctx system: every member that OTHER files access (directly or via alias
 | `endless:chunk` | level.js | — |
 | `endless:end` | level.js | audio.js, fx.js, save.js, ui.js |
 | `error` | engine.js, main.js | engine.js, main.js, ui.js |
+| `escort:break` | escort.js | — |
+| `escort:checkpoint` | escort.js | — |
+| `escort:delivered` | escort.js | — |
+| `escort:grab` | escort.js | — |
+| `escort:horn` | escort.js | — |
+| `escort:plate` | escort.js | — |
 | `explosion` | troops.js, weapons.js | audio.js, fx.js |
-| `fx:burst` | hold.js, night.js | fx.js |
+| `fx:burst` | chase.js, escort.js, hold.js, night.js | fx.js |
 | `fx:decal` | hold.js | fx.js |
 | `gate:commit` | gates.js | level.js |
 | `gate:event` | gates.js | level.js |
@@ -764,8 +807,8 @@ For each ctx system: every member that OTHER files access (directly or via alias
 | `gate:hit` | gates.js | audio.js, fx.js, level.js |
 | `gate:max` | gates.js | audio.js, fx.js, level.js |
 | `gate:miss` | gates.js | level.js |
-| `gate:pass` | gates.js | audio.js, fx.js, level.js |
-| `gate:spawn` | gates.js | audio.js, level.js |
+| `gate:pass` | gates.js | audio.js, chase.js, fx.js, level.js |
+| `gate:spawn` | gates.js | audio.js, chase.js, level.js |
 | `gate:step` | gates.js | audio.js, fx.js, level.js |
 | `gear:end` | weapons.js | fx.js, squad.js, ui.js |
 | `gear:start` | weapons.js | fx.js, level.js, squad.js, ui.js |
@@ -785,12 +828,12 @@ For each ctx system: every member that OTHER files access (directly or via alias
 | `horde:start` | hold.js | — |
 | `horde:supply` | hold.js | — |
 | `horde:surge` | hold.js | — |
-| `hud:action` | hold.js | ui.js |
+| `hud:action` | chase.js, escort.js, hold.js | ui.js |
 | `hud:anchors` | hold.js | ui.js |
-| `hud:banner` | hold.js | ui.js |
-| `hud:counter` | hold.js | ui.js |
-| `hud:pill` | hold.js, night.js | ui.js |
-| `hud:progress` | hold.js | ui.js |
+| `hud:banner` | chase.js, escort.js, hold.js | ui.js |
+| `hud:counter` | chase.js, escort.js, hold.js | ui.js |
+| `hud:pill` | chase.js, escort.js, hold.js, night.js | ui.js |
+| `hud:progress` | escort.js, hold.js | ui.js |
 | `item:grant` | pickups.js | level.js |
 | `item:pickup` | pickups.js | fx.js, level.js |
 | `level:complete` | level.js | audio.js, fx.js, save.js, ui.js |
@@ -798,7 +841,7 @@ For each ctx system: every member that OTHER files access (directly or via alias
 | `level:progress` | level.js | ui.js |
 | `level:runup` | level.js | audio.js, ui.js |
 | `level:start` | level.js | audio.js, fx.js, hold.js, night.js, render.js, squad.js, ui.js |
-| `music:mode` | hold.js | audio.js |
+| `music:mode` | chase.js, hold.js | audio.js |
 | `night:click` | night.js | — |
 | `night:flare` | night.js | — |
 | `night:groan` | night.js | — |
@@ -814,7 +857,7 @@ For each ctx system: every member that OTHER files access (directly or via alias
 | `shot` | weapons.js | audio.js, night.js |
 | `spit:impact` | boss.js, zombies.js | audio.js, fx.js |
 | `squad:count` | squad.js | audio.js, fx.js, level.js |
-| `squad:dead` | squad.js | hold.js, level.js |
+| `squad:dead` | squad.js | chase.js, escort.js, hold.js, level.js |
 | `squad:invuln` | squad.js | — |
 | `squad:loss` | squad.js | audio.js, fx.js, level.js |
 | `squad:spawn` | squad.js | fx.js |
@@ -822,7 +865,7 @@ For each ctx system: every member that OTHER files access (directly or via alias
 | `troop:add` | troops.js | — |
 | `troop:fire` | troops.js | fx.js |
 | `troop:remove` | troops.js | — |
-| `ui:action` | ui.js | hold.js |
+| `ui:action` | ui.js | chase.js, escort.js, hold.js |
 | `ui:anchorTap` | ui.js | hold.js |
 | `ui:button` | ui.js | audio.js |
 | `ui:screen` | ui.js | engine.js |
@@ -831,7 +874,7 @@ For each ctx system: every member that OTHER files access (directly or via alias
 | `weapon:start` | weapons.js | audio.js, fx.js, level.js, ui.js |
 | `weapon:stored` | weapons.js | level.js |
 | `zombie:bite` | zombies.js | audio.js, fx.js |
-| `zombie:die` | zombies.js | audio.js, fx.js, level.js |
+| `zombie:die` | zombies.js | audio.js, escort.js, fx.js, level.js |
 | `zombie:hit` | zombies.js | audio.js, fx.js |
 | `zombie:spawn` | zombies.js | level.js |
 | `zombie:stagger` | zombies.js | fx.js |

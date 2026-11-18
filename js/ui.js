@@ -49,6 +49,7 @@ import {
   starNeed, eBossOf, isFinale,                                    // round 7 (r7, explain:0): star thresholds on the results / title captions
   CODEX, GATE_RULES,                                    // round 7 (r7, teaching:5): the FIELD GUIDE and its gate chips
   LEVEL_TYPES, levelTypeOf, eTargetOf, starThreeOf, nextLevelOfType, HORDE_GEN, NIGHT,   // r8 (P7)
+  HARD, hardPay, hardHp,
 } from './data.js';
 
 // ---------------------------------------------------------------------------------------------
@@ -320,9 +321,10 @@ const P_BRIEF = { brief: '' };
 const SCREEN_EL_ID = Object.freeze({
   boot: 'scr-boot', title: 'scr-title', levels: 'scr-levels', shop: 'scr-shop', settings: 'scr-settings',
   pause: 'scr-pause', complete: 'scr-complete', gameover: 'scr-gameover', endless: 'scr-endless', guide: 'scr-guide', brief: 'scr-brief',
+  hard: 'scr-hard', hardnew: 'scr-hardnew',
 });
-const SCREEN_IDS = Object.freeze(['boot', 'title', 'levels', 'shop', 'settings', 'pause', 'complete', 'gameover', 'endless', 'guide', 'brief']);
-const OVERLAY_IDS = Object.freeze({ settings: true, guide: true });
+const SCREEN_IDS = Object.freeze(['boot', 'title', 'levels', 'shop', 'settings', 'pause', 'complete', 'gameover', 'endless', 'guide', 'brief', 'hard', 'hardnew']);
+const OVERLAY_IDS = Object.freeze({ settings: true, guide: true, hard: true, hardnew: true });
 // screens behind which the HUD stays visible (§10.1 "HUD is visible in playing, paused and during complete/gameover")
 const HUD_UNDER = Object.freeze({ pause: true, complete: true, gameover: true, endless: true, brief: true });
 // BACK returns to these states, anything else falls back to the title (§10.3)
@@ -850,7 +852,7 @@ export class UI {
     // results (r7, explain:7: bonusStars / bonusSurv = the level bonus's star and survivor parts, split = the payload had them)
     this._cmp = { level: 1, stars: 0, coins: 0, survivors: 0, eBoss: 0, score: 0, kills: 0, gates: 0, piles: 0, boss: 0, bonus: 0,
       bonusStars: 0, bonusSurv: 0, split: false,
-      typeKey: 'standard', eTarget: 0, metric: 0, modeKills: 0, bonusMode: 0 };   // r8 (P7)
+      typeKey: 'standard', eTarget: 0, metric: 0, modeKills: 0, bonusMode: 0, hard: null };   // r8 (P7)
     this._cmpFresh = false;
     this._cmpAnimating = false;
     this._cmpT = 0.5; this._cmpT = 0;
@@ -861,7 +863,7 @@ export class UI {
     this._cmpDrive = false;
     this._cmpBase = 0;               // save.data.coins − payout (the wallet before this run)
     this._cmpWalletFrom = 0;         // the header's value when the results appeared
-    this._fail = { level: 1, fraction: 0, coinsKept: 0, idle: false, cause: '', base: '', counted: true, hold: false, holdActions: 0, surgesCleared: 0, kills: 0, total: 0 };   // r8 (P7); 1.5.0: + base
+    this._fail = { level: 1, fraction: 0, coinsKept: 0, idle: false, cause: '', base: '', counted: true, hold: false, holdActions: 0, surgesCleared: 0, kills: 0, total: 0, hard: null };   // r8 (P7); 1.5.0: + base
     this._end = { distance: 0, score: 0, best: 0, coins: 0, chunks: 0, newBest: false };
 
     // shop (r7, flow-coins:5: no shop coin tween any more — the one wallet model below drives the HUD, title and shop pills)
@@ -877,6 +879,9 @@ export class UI {
     // level grid (UI-19 / UI-24: built once, updated in place)
     this._lvTiles = null;            // [{ btn, num, on, off, stars, skull, n }] for 1..LEVELS.count, then the window pool
     this._lvEndless = null;          // { btn, num, stars }
+    this._hardMode = false;          // 1.6.0 (P3): HARD toggle, sheet level / mods
+    this._hardL = 0;
+    this._hardMods = 0;
     this._lvScrollPending = false;   // read-first: scroll the current tile into view at the start of the next update()
 
     // errors / debug
@@ -960,7 +965,7 @@ export class UI {
     this._hkLabel = '';
     this._hkProgDirty = false;
     this._hkSegsShown = -1; this._hkEndShown = ''; this._hkLabelShown = null;
-    this._hcText = ''; this._hcDirty = false; this._hcShownOn = false; this._hcShownText = '';
+    this._hcText = ''; this._hcRed = false; this._hcDirty = false; this._hcShownOn = false; this._hcShownText = '';
     this._anN = 0;
     this._anId = []; this._anX = []; this._anY = []; this._anState = []; this._anLabel = [];
     this._anDirty = false;
@@ -971,8 +976,8 @@ export class UI {
     this._acShown = { on: false, icon: '', label: '', badge: -2, disabled: false };
     this._acClickUntil = 0;          // a bare click before this (_realNow) repeats the activation just made (held Enter)
     this._acAnim = null;
-    this._hb = { text: '', kicker: '', color: -1, seconds: 0 };                              // hud:banner
-    this._hbReq = false; this._hbShown = false; this._hbUntil = 0;
+    this._hb = { text: '', kicker: '', color: -1, seconds: 0, top: false };                  // hud:banner
+    this._hbReq = false; this._hbShown = false; this._hbUntil = 0; this._hbTop = false;
     this._hbShownKicker = null; this._hbShownColor = -2;
     this._hlb = []; this._hlbNext = 0; this._hlbOn = false;   // hud:pill labels [{ node, text, x, y, seconds, until, req }]
 
@@ -1162,6 +1167,8 @@ export class UI {
       levelsLegend2: g('levels-legend2'), completeKicker: g('complete-kicker'), completeLine: g('complete-line'),
       gameoverTitle: g('gameover-title'), gameoverTip: g('gameover-tip'),
       setLeft: g('set-lefthand'), setNight: g('set-night'), rowNight: g('row-night'), playType: null, nextType: null,
+      btnHard: g('btn-hard'), btnHardMode: g('btn-hard-mode'), hardKicker: g('hard-kicker'), hardMark: g('hard-mark'),
+      hardChips: g('hard-chips'), hardBest: g('hard-best'), btnHardGo: g('btn-hard-go'), completeHard: g('complete-hard'), btnNormal: g('btn-normal'),
     };
     try { if (el.districtBanner) el.dbText = el.districtBanner.querySelector('.db-text'); } catch (_) { el.dbText = null; }
     // r7 (explain:4): the big card's kicker ("NEW DISTRICT 2") above the name — created once (both shells share the markup)
@@ -1401,7 +1408,7 @@ export class UI {
     try {
       const logos = doc.querySelectorAll('#ui .logo');
       for (let i = 0; i < logos.length; i++) logos[i].textContent = STRINGS.boot.logo;
-      const backs = doc.querySelectorAll('#ui [data-back]');
+      const backs = doc.querySelectorAll('#ui [data-back]:not([data-keep])');   // r10: data-keep keeps its own label (HARD UNLOCKED's GOT IT)
       for (let i = 0; i < backs.length; i++) { backs[i].textContent = STRINGS.common.back; backs[i].setAttribute('aria-label', STRINGS.aria.back); }
     } catch (_) { /* ignore */ }
     // settings row labels: the row's .row-label span (round 7: a real element, so it can shrink to its longest word
@@ -1441,7 +1448,7 @@ export class UI {
       this._anEls = [];
       for (const root of el.hudAnchors.children) this._anEls.push({ root, label: root.lastChild, x: -1, y: -1, cls: '', text: null });
     }
-    for (const node of doc.querySelectorAll('.hud-label')) this._hlb.push({ node, text: '', x: 0, y: 0, seconds: 0, until: 0, req: false });
+    for (const node of doc.querySelectorAll('.hud-label')) this._hlb.push({ node, id: '', text: '', x: 0, y: 0, seconds: 0, until: 0, req: false });
     // legend line 2: its chips wear the colours of the badges they explain
     for (const key of LEGEND2_KEYS) {
       const chip = q(el.levelsLegend2, '.lg-' + key + ' .tt');
@@ -1655,10 +1662,10 @@ export class UI {
     on('boss:enrage', () => this._onBossEnrage());
     // r8 (P7): the HUD KIT
     on('hud:progress', (p) => this._onHudProgress(p));
-    on('hud:counter', (p) => { this._hcText = p.on ? p.text : ''; this._hcDirty = true; });
+    on('hud:counter', (p) => { this._hcText = p.on ? p.text : ''; this._hcRed = !!p.red; this._hcDirty = true; });
     on('hud:anchors', (p) => this._onHudAnchors(p));
     on('hud:action', (p) => { Object.assign(this._ac, p); this._acDirty = true; });
-    on('hud:banner', (p) => { this._hb.kicker = ''; this._hb.color = -1; Object.assign(this._hb, p); this._hbReq = true; });
+    on('hud:banner', (p) => { this._hb.kicker = ''; this._hb.color = -1; this._hb.top = false; Object.assign(this._hb, p); this._hbReq = true; });
     on('hud:pill', (p) => this._onHudPill(p));
     on('level:complete', (p) => this._copyComplete(p));
     on('level:failed', (p) => this._copyFailed(p));
@@ -2253,6 +2260,7 @@ export class UI {
       case 'gameover': this._fillGameover(); break;
       case 'endless': this._fillEndless(); break;
       case 'brief': this._fillBrief(); break;               // r8 (P7)
+      case 'hard': this._fillHard(); break;
       default: break;
     }
     if (target === 'complete' || target === 'gameover' || target === 'endless') {
@@ -2281,6 +2289,11 @@ export class UI {
     if (events) events.emit('ui:screen', P_SCREEN);
     const render = this.ctx.render;
     if (render) render.dirty = true;
+    // 1.6.0 (P3): HARD UNLOCKED, once
+    if ((target === 'title' || target === 'levels') && this._hardUnlocked() && !this.ctx.save.hintDone('hard.unlock')) {
+      this._markHint('hard.unlock');
+      this.showScreen('hardnew');
+    }
   }
 
   /** Writes the unitless --ui custom property from #app's box (§10.2); called by init() and render.resize(). */
@@ -2688,6 +2701,7 @@ export class UI {
     c.eTarget = p.eTarget > 0 ? p.eTarget : c.eBoss;
     c.metric = Number.isFinite(p.metric) ? p.metric : c.survivors;
     c.modeKills = p.stat ? p.stat.kills | 0 : 0;
+    c.hard = p.hard || null;
     this._lastCompleteEndless = false;
   }
 
@@ -2708,6 +2722,7 @@ export class UI {
     f.surgesCleared = s ? s.surgesCleared | 0 : 0;
     f.kills = s ? s.kills | 0 : 0;
     f.total = s ? s.total | 0 : 0;                  // the hold's unit total ("x OF y"), when the mode reports it
+    f.hard = p.hard || null;
   }
 
   _copyEndless(p) {
@@ -2996,10 +3011,11 @@ export class UI {
   }
 
   _onHudPill(p) {
-    if (p.text) {                                   // a label: the next slot of the pool, written by _updateHudLabels
-      const s = this._hlb[this._hlbNext];
-      this._hlbNext = (this._hlbNext + 1) % this._hlb.length;
-      s.text = p.text; s.x = p.x; s.y = p.y; s.seconds = p.seconds; s.req = true;
+    if (p.text) {                                   // a label: the next slot of the pool (1.6.0: or, merge, the shown id)
+      let s = this._hlb[this._hlbNext];
+      for (let i = 0; p.merge && i < this._hlb.length; i++) if (this._hlb[i].id === p.id && !this._hlb[i].node.hidden) s = this._hlb[i];
+      if (s === this._hlb[this._hlbNext]) this._hlbNext = (this._hlbNext + 1) % this._hlb.length;
+      s.id = p.id; s.text = p.text; s.x = p.x; s.y = p.y; s.seconds = p.seconds; s.req = true;
       this._hlbOn = true;
     } else if (p.seconds > 0) this._pillAdd(p.id, p.seconds, p.icon, p.color, true);
     else this._pillRemove(p.id);
@@ -3058,7 +3074,7 @@ export class UI {
     this._hcDirty = false;
     const el = this._el, n = el.hudCounter, on = !!this._hcText;
     if (!n) return;
-    if (on && this._hcText !== this._hcShownText) { this._hcShownText = this._hcText; n.textContent = this._hcText; }
+    if (on && this._hcText !== this._hcShownText) { this._hcShownText = this._hcText; n.textContent = this._hcText; n.classList.toggle('red', !!this._hcRed); }
     if (on === this._hcShownOn) return;
     this._hcShownOn = on;
     n.hidden = !on;
@@ -3171,6 +3187,7 @@ export class UI {
           node.style.setProperty('--hb-color', hexCss(c)); node.style.setProperty('--hb-glow', rgbaCss(c, DB_GLOW_ALPHA));
         }
         this._hbUntil = tnow + B.seconds;
+        if (B.top !== this._hbTop) { this._hbTop = B.top; node.classList.toggle('top', B.top); }
         if (!same) { node.hidden = false; this._animate(node, KF_POP_IN, T_NAMECARD); }
         this._hbShown = true;
       }
@@ -4643,6 +4660,7 @@ export class UI {
       }
     }
     if (el.btnEndless) el.btnEndless.hidden = !(hl > LEVELS.endlessUnlock);
+    if (el.btnHard) el.btnHard.hidden = !this.ctx.save.hardOpen(hl);
     this._paintStartBadge(el.btnPlay, el.playType, hl, STRINGS.types.aria.play);   // r8 (P7)
     this._syncShopBadges();
     this._syncGuideBadge();                         // r7 (teaching:5): "?" wears a badge while a met entry is unread
@@ -4672,6 +4690,11 @@ export class UI {
     const tiles = this._lvTiles;
     const base = LEVELS.count;
     let rings = 0;                                   // r8 (P7): tiles wearing the D21 ring
+    const hb = this._el.btnHardMode, hon = this._hardUnlocked();   // 1.6.0 (P3)
+    this._hardMode = this._hardMode && hon;
+    hb.hidden = !hon;
+    hb.setAttribute('aria-pressed', this._hardMode);
+    grid.classList.toggle('hard-on', this._hardMode);
     for (let i = 0; i < base; i++) if (this._setTile(tiles[i], i + 1, hl, d)) rings++;
     const from = Math.max(base + 1, hl - LEVEL_WINDOW + 1);
     for (let i = 0; i < LEVEL_WINDOW; i++) {
@@ -4730,9 +4753,10 @@ export class UI {
       // round 5: district band — a short accent rule at the tile's top and a faint accent wash at its foot (css .tile-band)
       const band = doc.createElement('span'); band.className = 'tile-band'; band.setAttribute('aria-hidden', 'true');
       const tt = doc.createElement('span'); tt.dataset.keep = 'tile-type'; tt.className = 'tile-type'; tt.setAttribute('aria-hidden', 'true'); tt.hidden = true;   // r8 (P7)
-      btn.appendChild(band); btn.appendChild(num); btn.appendChild(stars); btn.appendChild(skull); btn.appendChild(tt);
+      const hm = doc.createElement('span'); hm.className = 'tile-hard'; hm.setAttribute('aria-hidden', 'true'); hm.hidden = true;
+      btn.appendChild(band); btn.appendChild(num); btn.appendChild(stars); btn.appendChild(skull); btn.appendChild(tt); btn.appendChild(hm);
       grid.appendChild(btn);
-      return { btn, num, stars, on, off, skull, tt, n: 0, key: '', dname: '' };
+      return { btn, num, stars, on, off, skull, tt, hm, n: 0, key: '', dname: '' };
     };
     for (let n = 1; n <= LEVELS.count; n++) {
       tiles.push(mk());
@@ -4764,7 +4788,9 @@ export class UI {
     const bl = isBlackout(n, type);
     const retype = !!rec && (rec.clears | 0) > 0 && (typeof rec.t === 'string' && rec.t ? rec.t : 'standard') !== tkey
       && LEVEL_TYPES.retypeRewardSkip.indexOf(n) === -1;
-    const key = n + (locked ? 'L' : '') + (current ? 'C' : '') + (blank ? 'b' : stars) + tkey + (bl ? 'B' : '') + (retype ? 'R' : '');
+    const mk = rec ? this._markOf(n) : null, hx = this._hardMode && !locked && !this.ctx.save.hardOpen(n);
+    const key = n + (locked ? 'L' : '') + (current ? 'C' : '') + (blank ? 'b' : stars) + tkey + (bl ? 'B' : '') + (retype ? 'R' : '')
+      + (mk ? 'h' + mk.k + (mk.iron ? 'I' : '') : '') + (hx ? 'X' : '');
     if (t.key === key) return retype;
     t.key = key;
     if (t.n !== n) {
@@ -4789,10 +4815,13 @@ export class UI {
     if ((n - 1) % TILE_BAND_LEVELS === 0) cls += ' band-start';
     if (type.night) cls += ' night';                  // r8 (P7)
     if (retype) cls += ' retype';
+    if (hx) cls += ' nohard';
     if (t.btn.className !== cls) t.btn.className = cls;
+    t.hm.hidden = !mk;
+    if (mk) { t.hm.className = mk.iron ? 'tile-hard iron' : 'tile-hard'; t.hm.textContent = mk.k; }
     paintBadge(t.tt, tkey, bl);
     if (retype) t.btn.style.setProperty('--tt-color', hexCss(LEVEL_TYPES[tkey].color));
-    t.btn.disabled = locked;
+    t.btn.disabled = locked || hx;
     if (current) t.btn.setAttribute('aria-current', 'true'); else t.btn.removeAttribute('aria-current');
     const sep = STRINGS.common.separator;
     const dsuffix = t.dname ? sep + t.dname : '';     // round 5: the district is part of the tile's name
@@ -4800,7 +4829,7 @@ export class UI {
     const tname = tkey !== 'standard' ? typeName(tkey, bl) : '';
     t.btn.setAttribute('aria-label', (locked ? STRINGS.aria.level(n) + sep + STRINGS.levels.locked
       : (milestone ? STRINGS.aria.level(n) + sep + STRINGS.levels.finale : STRINGS.aria.level(n)))
-      + (tname ? sep + tname : '') + (retype ? sep + STRINGS.types.aria.retype : '') + dsuffix);
+      + (tname ? sep + tname : '') + (retype ? sep + STRINGS.types.aria.retype : '') + (mk ? sep + 'HARD ' + mk.k + (mk.iron ? ' IRON' : '') : '') + dsuffix);
     const star = STRINGS.common.star;
     t.on.textContent = blank ? '' : star.repeat(stars);
     t.off.textContent = blank ? '' : star.repeat(3 - stars);
@@ -4816,6 +4845,51 @@ export class UI {
       const cur = grid.querySelector('.current');
       if (cur && grid.scrollHeight > grid.clientHeight) grid.scrollTop = Math.max(0, cur.offsetTop - grid.offsetTop - grid.clientHeight / 2 + cur.offsetHeight / 2);
     } catch (_) { /* cosmetic */ }
+  }
+
+  // ---- 1.6.0 (P3): HARD ----
+
+  _hardUnlocked() { const d = this._saveData(), r = d && d.levels[HARD.unlock]; return !!r && r.stars > 0; }
+
+  /** Mods that count on level n (FUSE needs a boss). */
+  _hardAll(n) { return HARD.noBoss.indexOf(levelTypeOf(n, null, this._typesOn).base) >= 0 ? 7 : 15; }
+
+  /** Best HARD clear { k mark, iron, h } or null. */
+  _markOf(n) {
+    const save = this.ctx.save, h = save.hardOf(n), all = this._hardAll(n);
+    return h && { k: save.markOf(h.m), iron: h.s === 3 && (h.m & all) === all, h };
+  }
+
+  _openHard(n) {
+    this._hardL = n;
+    this._hardMods = this.ctx.save.settings.hardMods;
+    this.showScreen('hard');
+  }
+
+  _toggleMod(i) {
+    if (!(this._hardAll(this._hardL) & (1 << i))) return;
+    this._hardMods ^= 1 << i;
+    if (this._hardMods) this.ctx.save.setSetting('hardMods', this._hardMods);
+    this._fillHard();
+  }
+
+  /** The sheet: mark first, pay second (critic m11). */
+  _fillHard() {
+    const el = this._el, n = this._hardL, all = this._hardAll(n), m = this._hardMods & all, mk = this._markOf(n), c = el.hardChips.children;
+    el.hardKicker.textContent = STRINGS.hud.level(n);
+    el.hardMark.lastChild.textContent = STRINGS.hard.pay(this.ctx.save.markOf(m), hardPay(m));
+    const base = levelTypeOf(n, null, this._typesOn).base;
+    c[0].lastChild.textContent = STRINGS.hard.glass(base);   // release check: GLASS is x1.5 claws on chase, x1.25 grab rings on escort
+    c[2].lastChild.textContent = STRINGS.hard.thick(Math.round((hardHp(n, base) - 1) * 100));
+    for (let i = 0; i < c.length; i++) {
+      const ok = (all >> i) & 1, on = ok && (m >> i) & 1;
+      c[i].disabled = !ok;                           // css: "No boss here"
+      c[i].setAttribute('aria-pressed', !!on);
+      c[i].classList.toggle('on', !!on);
+    }
+    el.hardBest.hidden = !mk;
+    if (mk) { el.hardBest.classList.toggle('iron', mk.iron); el.hardBest.lastChild.textContent = mk.k + ' ' + HARD.mods.filter((_, i) => (mk.h.m >> i) & 1).join(' ') + ' ' + STRINGS.common.star.repeat(mk.h.s); }
+    el.btnHardGo.disabled = !m;
   }
 
   _fillShop() {
@@ -4847,7 +4921,7 @@ export class UI {
     // round 7 (r7, explain:2): the legend under the coin pill says what "~N runs away" counts, while a card shows one
     const legend = income > 0 ? STRINGS.shop.note(fmtCoins(income)) : '';
     for (let i = 0; i < UPGRADE_IDS.length; i++) if (this._refreshCard(UPGRADE_IDS[i], d, coins, income, legend)) estimates = true;
-    const note = estimates ? legend : '';
+    const note = estimates ? legend : (d && UPGRADE_IDS.every((id) => d.upgrades[id] >= UPGRADES[id].ranks) ? STRINGS.hard.shop : '');   // 1.6.0
     if (note !== this._shopNoteText) {
       this._shopNoteText = note;
       if (this._el.shopNote) this._el.shopNote.textContent = note;
@@ -5054,8 +5128,12 @@ export class UI {
     const R = RS[c.typeKey] || RS[LEVEL_TYPES[c.typeKey].base] || null;
     if (el.completeTitle) el.completeTitle.textContent = R ? R.title : STRINGS.complete.title(c.level);
     if (el.completeKicker) { el.completeKicker.textContent = R ? STRINGS.hud.level(c.level) : ''; el.completeKicker.hidden = !R; }
-    const killsLine = R && R.kills && c.modeKills > 0 ? R.kills(fmtCoins(c.modeKills)) : '';
+    const killsLine = R && R.kills && c.modeKills > 0 ? R.kills(fmtCoins(c.modeKills))
+      : (LEVEL_TYPES[c.typeKey].base === 'escort' ? STRINGS.escort.delivered(c.metric, c.eTarget) : '');   // 1.6.0
     if (el.completeLine) { el.completeLine.textContent = killsLine; el.completeLine.hidden = !killsLine; }
+    const hc = c.hard, all = this._hardAll(c.level);   // 1.6.0 (P3)
+    el.completeHard.hidden = !hc;
+    if (hc) { el.completeHard.classList.toggle('iron', c.stars === 3 && (hc.mask & all) === all); el.completeHard.lastChild.textContent = this.ctx.save.markOf(hc.mask) + (hc.newMark ? STRINGS.hard.newMark : ''); }
     this._paintStartBadge(el.btnNext, el.nextType, (c.level | 0) + 1, STRINGS.types.aria.next);
     const stars = el.stars;
     if (stars) {
@@ -5089,6 +5167,7 @@ export class UI {
         }
         this._chip(list, 'bd-' + key, B[key], c[key] | 0);
       }
+      if (c.hard) { const li = this._doc.createElement('li'); li.className = 'bd-hard'; li.textContent = STRINGS.hard.chip(c.hard.pct); list.appendChild(li); }
     }
     if (el.completeBest) {
       const d = this._saveData();
@@ -5208,7 +5287,8 @@ export class UI {
     const el = this._el;
     // round 3 (GDD §14 UI-33): the failed level as a kicker above SQUAD LOST, spelled like the HUD and results ('LEVEL 7')
     const lv = el.gameoverLevel;
-    if (lv) lv.textContent = (STRINGS.gameover.level || STRINGS.hud.level)(f.level);
+    if (lv) lv.textContent = (STRINGS.gameover.level || STRINGS.hud.level)(f.level) + (f.hard ? ' · HARD' : '');
+    el.btnNormal.hidden = !f.hard;                  // 1.6.0 (P3)
     // r8 (P7): a Horde run lost at the barricade names its cause and how far it got ("SURGE 2/3 · 6,820 OF 10,200 ZOMBIES · Coins
     // kept +N"); a fail with no play under it gets the coaching line (D30)
     const RS = STRINGS.types.results, H = RS.horde, hold = f.hold;
@@ -5440,13 +5520,18 @@ export class UI {
       case 'btn-reset-save': this.confirmReset(); return;
       case 'btn-reload': this._reload(); return;
       case 'btn-update': this._applyUpdate(); return;      // round 5: the title's "Update ready" pill (sw.js v4)
+      case 'btn-hard': this._openHard(this._highestUnlocked()); return;
+      case 'btn-hard-mode': this._hardMode = !this._hardMode; this._fillLevels(false); return;
+      case 'btn-hard-go': this._startLevel(this._hardL, btn, this._hardMods & this._hardAll(this._hardL)); return;
+      case 'btn-normal': this._startLevel(this._fail.level, btn); return;
       default: break;
     }
     if (btn.hasAttribute('data-back')) { this._back(); return; }
     const ds = btn.dataset || {};
+    if (ds.mod !== undefined) { this._toggleMod(ds.mod | 0); return; }
     if (ds.level !== undefined) {
       const n = parseInt(ds.level, 10);
-      if (n >= 1) this._startLevel(n, btn);
+      if (n >= 1) { if (this._hardMode) this._openHard(n); else this._startLevel(n, btn); }
       return;
     }
     if (ds.endless !== undefined) { if (level) level.startEndless(); return; }
@@ -5460,10 +5545,11 @@ export class UI {
    * script starts at once; a miss generates in frame slices first (no frame waits on a whole generateLevel), and the tapped
    * button wears .starting meanwhile (taken off with the next screen change). Older levels without requestStart: start().
    */
-  _startLevel(n, btn) {
+  _startLevel(n, btn, mods) {
     const level = this.ctx.level;
     if (!level) return;
     this._clearStarting();
+    level.setHard(mods | 0);                          // 1.6.0: 0 = normal
     if (typeof level.requestStart !== 'function') { level.start(n); return; }
     if (level.requestStart(n)) return;
     this._markStarting(btn);
@@ -5583,7 +5669,7 @@ export class UI {
     }
     if (code !== 'Escape' || e.repeat) return;
     const cur = this._current;
-    if (cur !== 'settings' && cur !== 'guide' && cur !== 'levels' && cur !== 'shop') return;
+    if (!OVERLAY_IDS[cur] && cur !== 'levels' && cur !== 'shop') return;
     try { e.preventDefault(); e.stopPropagation(); } catch (_) { /* ignore */ }
     P_BUTTON.id = 'back';
     const events = this.ctx.events;

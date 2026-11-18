@@ -32,6 +32,8 @@ const CP_SIDE = 1.15;                                    // the checkpoint post 
 
 /** A stable [0, 1) hash of an integer (cosmetic choices that must not draw a stream). */
 function hash01(n) { let h = Math.imul(n ^ 0x9E3779B9, 0x85EBCA6B); h ^= h >>> 13; h = Math.imul(h, 0xC2B2AE35); h ^= h >>> 16; return (h >>> 0) / 4294967296; }
+/** Screen x of a world point. */
+function sx(r, x, y, z) { V3.set(x, y, z); r.worldToScreen(V3, SCR); return SCR.x; }
 /** Smoothstep of u in [0, 1]. */
 function smooth(u) { return u <= 0 ? 0 : (u >= 1 ? 1 : u * u * (3 - 2 * u)); }
 
@@ -41,7 +43,8 @@ function smooth(u) { return u <= 0 ? 0 : (u >= 1 ? 1 : u * u * (3 - 2 * u)); }
 const P_PROGRESS = { variant: 'segments', segments: 2, filled: -0, endIcon: 'flag', label: '' };
 const P_ACTION = { on: false, icon: 'plate', badge: 0, disabled: false, label: '' };
 const P_BANNER = { text: '', kicker: '', color: 0, seconds: -0 };
-const P_PILL = { id: '', icon: '', text: '', seconds: -0, x: -0, y: -0 };
+const P_PILL = { id: '', icon: '', text: '', seconds: -0, x: -0, y: -0, merge: false };
+const P_COUNTER = { on: false, text: '', red: true };
 const P_CUE = { x: -0, z: -0, survivors: 0 };
 const P_BURST = { kind: '', x: -0, y: -0, z: -0, n: 0 };
 const HINT_OPTS = { hold: -0, until: null, priority: false, event: -1 };
@@ -57,6 +60,7 @@ export class EscortSystem {
     this._tx = 0.5; this._tx = 0; this._t = 0.5; this._t = 0; this._hudAcc = 0.5; this._hudAcc = 0; this._v = 0.5; this._v = 1;
     // the follow window (_stepFollow): truck x, end (m, < 0 closed), travel, last target x, decided?, next change
     this._fwX = 0.5; this._fwEnd = 0.5; this._fwTravel = 0.5; this._fwPrevX = 0.5; this._fwOk = false; this._fwNext = 0;
+    this._lossAt = 0.5; this._slide = 0.5; this._slide = 0;
   }
 
   /** Per-run tables, the providers (objects made once: no per-call closures), listeners. No GPU work (prepare() builds the meshes). */
@@ -99,7 +103,7 @@ export class EscortSystem {
     this._cpDone = false; this._gauntletOn = false; this._changeI = 0; this._hornI = -1; this._blink = 0;
     this._climbSeen = false; this._laneSeen = false; this._plateSeen = false; this._bruteSeen = false;
     this._deliverT = -1; this._deliverN = 0; this._popT = 0; this._lastBadge = -1; this._lastDisabled = false;
-    this._fwEnd = -1; this._fwNext = 0;
+    this._fwEnd = -1; this._fwNext = 0; this._tally = 0; this._lossN = 0; this._lossAt = -9; this._slide = 0;
     this._occ.fill(-1); this._grabT.fill(0); this._plateHp.fill(0); this._figT.fill(-1);
     this._removeRings();
   }
@@ -196,10 +200,10 @@ export class EscortSystem {
     this._stepChanges(d);
     this._stepFollow(d);
     // the slots: grab gauges (the ring fills and rides with the truck)
-    const fx = ctx.fx;
+    const fx = ctx.fx, rk = ctx.hard ? ctx.hard.ring : 1;   // HARD GLASS
     for (let s = 0; s < NS; s++) {
       if (this._occ[s] < 0) continue;
-      const t = this._grabT[s] + dt;
+      const t = this._grabT[s] + dt * rk;
       this._grabT[s] = t;
       if (this._ring[s] >= 0 && fx) { fx.moveDecal(this._ring[s], this._tx + SLX[s], ZC + SLZ[s]); fx.decalProgress(this._ring[s], t / sp.grab); }
       if (!this._plateSeen && this._plates > 0 && t >= sp.grab * ESCORT.lessons.plateAt) {
@@ -335,7 +339,11 @@ export class EscortSystem {
     this._lost++;
     P_CUE.x = x; P_CUE.z = z; P_CUE.survivors = this._survivors;
     this._emit('escort:grab', P_CUE);
-    this._pill('escort.grab', STRINGS.escort.grabbed, x, ET.bedY + 1.4, z, 1.0);
+    this._lossN = this._t - this._lossAt < 1.5 ? this._lossN + 1 : 1;   // 1.6.0: −n, merged over 1.5 s
+    this._lossAt = this._t;
+    P_PILL.merge = true; this._pill('escort.grab', STRINGS.escort.minus(this._lossN), x, ET.bedY + 1.4, z, 1.2); P_PILL.merge = false;
+    this._tally++; this._counter();
+    if (this.ctx.fx) this.ctx.fx.haptic(20);
     this._figStart(1, x, z);
     this._hud();
     if (this._survivors <= 0) {
@@ -415,12 +423,14 @@ export class EscortSystem {
   _checkpoint() {
     const sp = this._spec;
     this._cpDone = true;
+    const was = this._survivors;
     this._survivors += sp.board;
+    this._tally = 0; this._counter();
     this._plates += ESCORT.plates.checkpoint;
     this._popT = 0.45;
     P_CUE.x = this._tx; P_CUE.z = ZC; P_CUE.survivors = this._survivors;
     this._emit('escort:checkpoint', P_CUE);
-    this._banner(STRINGS.escort.checkpoint, STRINGS.escort.board(sp.board), EH.banner, EH.bannerS);
+    this._banner(STRINGS.escort.checkpoint, STRINGS.escort.roll(was, this._survivors, sp.board), EH.banner, EH.bannerS);
     this._pill('escort.plates', STRINGS.escort.plus(ESCORT.plates.checkpoint), this._tx, ET.bedY + 2.0, ZC, 1.4);
     this._seen(SEEN[3]);
     this._lesson('escort.checkpoint', null, 3);
@@ -525,8 +535,11 @@ export class EscortSystem {
   _hudOff() {
     P_ACTION.on = false;
     this._emit('hud:action', P_ACTION);
+    this._tally = 0; this._counter();
     this._lastBadge = -1;
   }
+
+  _counter() { P_COUNTER.on = this._tally > 0; P_COUNTER.text = STRINGS.escort.lost(this._tally); this._emit('hud:counter', P_COUNTER); }
 
   _banner(text, kicker, color, seconds) {
     P_BANNER.text = text; P_BANNER.kicker = kicker || ''; P_BANNER.color = color; P_BANNER.seconds = seconds;
@@ -612,14 +625,23 @@ export class EscortSystem {
     if (this._cpMesh.visible) this._cpMesh.position.set((this._routeX(sp.checkpoint) < 0 ? 1 : -1) * (EP.cpX + CP_SIDE), 0, cpz);
     this._szMesh.visible = szz > EP.appearZ && szz < 20;
     if (this._szMesh.visible) this._szMesh.position.set(0, 0, szz);
-    // the survivors' count over the cab (fx.label2; red for the last few)
-    const fx = ctx.fx;
+    // the survivors' count over the cab (fx.label2; red for the last few or under 40 %; 1.6.0: a loss punches it)
+    const fx = ctx.fx, run = this._state === ST_RUN;
     if (fx && fx.label2) {
-      if (this._state === ST_RUN || this._deliverT >= 0) {
-        const n = this._state === ST_WON ? Math.max(0, this._delivered - this._deliverN) : this._survivors;
-        fx.label2.set(EH.slot, n, '', n <= EH.lowAt ? EH.low : EH.color, EH.px, tx, EH.y, ZC - 1.6, 0);
+      if (run || this._deliverT >= 0) {
+        const n = run ? this._survivors : Math.max(0, this._delivered - this._deliverN), a = run ? t - this._lossAt : 9, low = run && n < 0.4 * sp.T;
+        fx.label2.set(EH.slot, n, '', n <= EH.lowAt || low || a < 0.3 ? EH.low : EH.color, a < 0.35 ? EH.px * (1.4 - a * 8 / 7) : EH.px, tx, EH.y, ZC - 1.6, 0);
       } else fx.label2.hide(EH.slot);
     }
+    // 1.6.0: the squad's label slides clear of the tailgate (6 px), outward
+    const lb = fx && fx.label, r = ctx.render;
+    if (!run || !lb || !lb.hasPos || !r || !r.worldToScreen) return;
+    const lx = sx(r, lb.x, lb.y, lb.z), hw = lb.width * 0.5 / lb.mPerPx + 6;
+    const l = sx(r, tx - ET.halfW - 0.3, 1, ZR) - hw, rr = sx(r, tx + ET.halfW + 0.3, 1, ZR) + hw;
+    let s = this._slide;
+    const want = lx > l && lx < rr ? ((s * s > 0.25 ? s > 0 : lb.x > tx || (lb.x === tx && tx < 0)) ? rr : l) - lx : 0;
+    this._slide = s += (want - s) * Math.min(1, (ctx.time ? ctx.time.dt : 0.017) / 0.15);
+    if (s * s > 0.25) lb.setWorldPos(lb.x + s * lb.mPerPx, lb.y, lb.z);
   }
 
   /** The bed's figures (2 rows of 6, facing the squad, swaying) and the fx figures; a boarding pop scales the newest in. */

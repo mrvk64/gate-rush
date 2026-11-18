@@ -5,6 +5,9 @@ node_modules/
 # build against the last shipped dist/ to enforce the service-worker VERSION bump)
 gate-rush-dist.zip
 
+# tools/smoke.js default screenshot / report output (local only)
+docs/build/smoke/
+
 # local tool output and OS clutter
 *.log
 .DS_Store

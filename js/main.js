@@ -28,7 +28,7 @@ import { ChaseSystem } from './chase.js';
 import { EscortSystem } from './escort.js';     // 1.5.0 (P3)
 import { LevelRunner } from './level.js';
 
-const VERSION = '1.5.0';            // ARCHITECTURE §3 ctx.version (= package.json version; round-9 release 1.5.0, sw.js v10)
+const VERSION = '1.6.0';            // ARCHITECTURE §3 ctx.version (= package.json version; round-10 release 1.6.0, sw.js v11)
 const RNG_BOOT_SEED = 1;            // §4.1 step 1: boot RNG for the title idle scene
 const RNG_FX_FORK = 7;              // §3: ctx.rngFx = ctx.rng.fork(7) — cosmetics never perturb gameplay
 const MAX_LEVEL_PARAM = 999;        // ?level= sanity cap (the campaign loops beyond LEVELS.count, §6.16)

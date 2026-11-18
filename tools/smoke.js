@@ -45,7 +45,7 @@
 //                                              #   boss, end); runs on the real-time clock match only when frame timing
 //                                              #   does not matter — the harness (synthetic clock) is the parity tool
 //   node tools/smoke.js --quality med           # low | med (alias medium / mid) | high
-//   node tools/smoke.js --matrix [filter] --out d  # P8: every level type (1.5.0: + chase L12, escort L18) × High / Medium / Low / software GL × phone / landscape, one Chrome
+//   node tools/smoke.js --matrix [filter] --out d  # P8: every level type (1.5.0: + chase L12, escort L18; 1.6.0: + HARD L45, HARD frontier L46) × High / Medium / Low / software GL × phone / landscape, one Chrome
 //                                              #   per cell (the lock is free between cells); a filter keeps the cells whose name holds any
 //                                              #   of its comma-separated parts ('horde', 'night-low-landscape'); --shell, --root, --bootTimeout
 //                                              #   pass through (the sw cells bring their own --gpu). A cell passes with verdict CLEAN, programs min == max, the draw caps (ARCH §12);
@@ -218,18 +218,23 @@ const PORT = server.address().port;
 
 // ---------------------------------------------------------------- matrix (P8)
 const MATRIX_TYPES = Object.freeze({ standard: { level: 2, seconds: 100 }, horde: { level: 9, seconds: 170 }, night: { level: 7, seconds: 135 },
-  chase: { level: 12, seconds: 110 }, escort: { level: 18, seconds: 120 } });   // 1.5.0 (P4): the chase and escort debuts
+  chase: { level: 12, seconds: 110 }, escort: { level: 18, seconds: 120 },   // 1.5.0 (P4): the chase and escort debuts
+  hard45: { level: 45, seconds: 190, hard: true }, hardfront46: { level: 46, seconds: 150, hard: true } });   // 1.6.0: HARD all mods, rank 10
+const MATRIX_HARD_PRE = "for (const id of ['squad', 'fireRate', 'damage', 'coinMult', 'bossDamage']) g.save.setUpgrade(id, 10);"
+  + " for (let L = 1; L <= 45; L++) g.save.recordLevel(L, { stars: 3, survivors: 300, score: 1, coins: 1, typeKey: g.level._typeOf(L).key, metric: 300 });"
+  + " g.level.setHard(15); return [45, 46].filter((L) => g.save.hardOpen(L)).join('+')";   // 'ok 45+46': both HARD-open
 const MATRIX_TIERS = Object.freeze({ high: ['--quality', 'high'], med: ['--quality', 'med'], low: ['--quality', 'low'], sw: ['--gpu', 'sw'] });
 const MATRIX_BOXES = Object.freeze({ phone: ['--viewport', '390x844'], landscape: ['--viewport', '844x390'] });
 const MATRIX_PRE = "for (const id of ['squad', 'fireRate', 'damage', 'coinMult', 'bossDamage']) g.save.setUpgrade(id, 6)";
 const MATRIX_ARGS = ['shell', 'root', 'bootTimeout'];   // passed to every cell
-/** ARCH §12's draw caps of one cell: { main, shadow, post } (night adds 2 main draws; Medium's post chain is shorter). */
-function matrixCaps(type, tier) { return { main: 50 + (type === 'night' ? 2 : 0), shadow: 20, post: tier === 'med' ? 10 : 14 }; }
+/** ARCH §12's draw caps of one cell: { main, shadow, post } (night, hard45 too, adds 2 main draws; Medium's post chain is shorter). */
+function matrixCaps(type, tier) { return { main: 50 + (type === 'night' || type === 'hard45' ? 2 : 0), shadow: 20, post: tier === 'med' ? 10 : 14 }; }
 function matrixRow(name, type, tier, r) {
   const fails = [];
   if (!r) fails.push('no report');
   else {
     if (r.verdict !== 'CLEAN') fails.push('verdict ' + r.verdict);
+    if (MATRIX_TYPES[type].hard && (r.preResult !== 'ok 45+46' || !r.result || r.result.hard !== 15)) fails.push(`HARD ${r.preResult} mask ${r.result && r.result.hard}`);
     if (!r.programs || r.programs.min !== r.programs.max) fails.push('programs ' + JSON.stringify(r.programs));
     const cap = matrixCaps(type, tier);
     for (const [id, c] of Object.entries(r.callsMax || {})) for (const k of ['main', 'shadow', 'post']) if (c[k] > cap[k]) fails.push(`${id} ${k} ${c[k]} > ${cap[k]}`);
@@ -246,7 +251,7 @@ async function runMatrix(filter) {
     const name = `${type}-${tier}-${box}`;
     if (parts.length && !parts.some((p) => name.includes(p))) continue;
     const dir = path.join(OUT, name), m = MATRIX_TYPES[type];
-    const cellArgs = [process.argv[1], '--level', String(m.level), '--seconds', String(m.seconds), '--shots', '40', '--out', dir, '--pre', MATRIX_PRE, ...MATRIX_TIERS[tier], ...MATRIX_BOXES[box]];
+    const cellArgs = [process.argv[1], '--level', String(m.level), '--seconds', String(m.seconds), '--shots', '40', '--out', dir, '--pre', m.hard ? MATRIX_HARD_PRE : MATRIX_PRE, ...MATRIX_TIERS[tier], ...MATRIX_BOXES[box]];
     for (const k of MATRIX_ARGS) { const v = opt(k, null); if (typeof v === 'string') cellArgs.push('--' + k, v); }
     const t0 = Date.now();
     spawnSync(process.execPath, cellArgs, { stdio: 'ignore' });
@@ -832,6 +837,7 @@ async function runPlay(level) {
     completeText: await ev(() => document.getElementById('scr-complete')?.hidden === false ? document.getElementById('scr-complete').innerText.replace(/\s+/g, ' ').slice(0, 300) : null),
     gameoverText: await ev(() => document.getElementById('scr-gameover')?.hidden === false ? document.getElementById('scr-gameover').innerText.replace(/\s+/g, ' ').slice(0, 300) : null),
     save: await ev(() => { const d = window.__game?.save?.data; return d ? { coins: d.coins, highestUnlocked: d.highestUnlocked, levels: d.levels } : null; }),
+    hard: await ev(() => (window.__game?.hard ? window.__game.hard.mask : null)),   // 1.6.0: the run's HARD mods
   };
   await shot('result');
 }

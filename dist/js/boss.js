@@ -1514,6 +1514,8 @@ export class BossSystem {
    *  by reason); squad invulnerability (gate pass / intro / level end) blocks the rest. Returns soldiers removed. */
   _applyKills(unit, n, kind, x, z, radius) {
     if (!(n > 0)) return 0;
+    const hd = this.ctx.hard;
+    if (hd && kind !== K_STOMP && kind !== K_CHEW) n = Math.round(n * hd.kill);   // HARD GLASS
     let remaining = n;
     const troops = this._troops;
     if (troops && troops.apcAbsorb) {

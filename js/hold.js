@@ -450,7 +450,7 @@ export class HoldSystem {
     this._kits = Math.min(this._kitsCap, HK.start + runKits + k * (as.kitsPerStep | 0));
     // the boss for the spawn later: hold mode now (no intro; its hooks are this system's)
     const bo = this._bossOpts;
-    bo.holdZ = HB.holdZ; bo.enrageS = spec.boss.enrageS != null ? spec.boss.enrageS : HB.enrageS; bo.attacks = spec.boss.attacks !== false;
+    bo.holdZ = HB.holdZ; bo.enrageS = (spec.boss.enrageS != null ? spec.boss.enrageS : HB.enrageS) - (ctx.hard ? ctx.hard.fuseS : 0); bo.attacks = spec.boss.attacks !== false;
     bo.debut = !!spec.debut; bo.chew = Math.max(HB.chewMin, Math.round(HB.chewPerE * this._eHold));
     if (this.botView) { this.botView.boss.arrivedAt = -1; this.botView.boss.enrageS = bo.enrageS; this.botView.wantThreat = false; }
     if (ctx.boss && ctx.boss.setHoldMode) ctx.boss.setHoldMode(bo);
@@ -805,7 +805,8 @@ export class HoldSystem {
     const u = this._bossColumn(x, true);
     if (u >= 0) {
       const boss = this.ctx.boss;
-      const beta = inLane ? (boss.holdWindup(u) >= 0 ? HFI.betaWind : HFI.beta) : HFI.betaOut;
+      const dl = boss.unitX(u) - (this.ctx.input ? this.ctx.input.aimX : 0), tl = this._spec.boss.split !== 1 ? HFI.twinLane : 1e9;   // 1.6.0: B1
+      const beta = inLane ? (dl > tl || -dl > tl ? 0 : (boss.holdWindup(u) >= 0 ? HFI.betaWind : HFI.beta)) : HFI.betaOut;
       this._accBoss[j] += beta;
       if (this._accBoss[j] >= 1) {
         this._accBoss[j] -= 1;
@@ -1296,12 +1297,12 @@ export class HoldSystem {
       if (this._hp[s] > wp) this._hp[s] -= wp;
       else {
         this._hp[s] = 0; this._breach(s);
-        if (squad && squad.count > 0) squad.removeSoldiers(Math.max(HB.slamKills.min, Math.round(HB.slamKills.frac * squad.count)), 'slam', segCx(s), HF.frontZ);
+        if (squad && squad.count > 0) squad.removeSoldiers(Math.round(Math.max(HB.slamKills.min, Math.round(HB.slamKills.frac * squad.count)) * this._glass()), 'slam', segCx(s), HF.frontZ);
       }
     } else if (kind === 'acid') {
       this._hp[s] = Math.max(0, this._hp[s] - wp);
       if (this._hp[s] <= 0) this._breach(s);
-      const k = this._spec.spitKills | 0 || 1;
+      const k = Math.round((this._spec.spitKills | 0 || 1) * this._glass());
       for (let g = 0; g < HB.acidGlobs && squad && squad.count > 0; g++) squad.removeSoldiers(k, 'spit', segCx(s) + (g - 1) * 0.6, HF.frontZ);
     } else {
       const s2 = s < NSEC - 1 ? s + 1 : s - 1;
@@ -1312,6 +1313,9 @@ export class HoldSystem {
       }
     }
   }
+
+  /** HARD GLASS on the boss's kills. */
+  _glass() { const h = this.ctx.hard; return h ? h.kill : 1; }
 
   _bossStagger(x, z) {
     this._staggers++;

@@ -1,0 +1,119 @@
+GATE RUSH 1.6.0 - P3 HARD (package note; goes to docs/build/r10/P3-HARD.txt at merge)
+==================================================================================
+PLAN-1.6.0 section 2.8 (+ 2.6 shop line). Branch r10/P3. Numbers and evidence: gate-rush-evidence/r10/build/P3/.
+
+WHAT IT IS
+- Unlock: L30 cleared (save.levels[30].stars >= 1). A one-time card "HARD UNLOCKED" (overlay 'hardnew', hint 'hard.unlock')
+  shows over the title or LEVELS, whichever comes first.
+- Where: every cleared level from L10 (any type) and the frontier (highestUnlocked, D11). Not L1-9, not endless.
+  SaveStore.hardOpen(n) is the one rule.
+- Entry: the title's "PLAY HARD" pill (the frontier) and LEVELS' HARD toggle (aria-pressed): while it is on, tiles HARD cannot play
+  are dimmed and disabled, and a tile opens the HARD sheet for its level.
+- Sheet (overlay 'hard', a bottom sheet): kicker LEVEL n, title HARD, the MARK line first ("MARK skull 3 · PAY x1.90", critic m11),
+  2 x 2 chips (pictogram + word + one line, >= 56 px tall), the level's BEST mark line, "No reinforcements · no assist", PLAY HARD
+  (disabled with no mod on), BACK. FUSE is disabled with "No boss here" on chase / escort. The chosen set is settings.hardMods.
+- Runs: level.setHard(mask) sets the next start's mods (the menus: 0 for PLAY / NEXT / a tile, the sheet's set for PLAY HARD;
+  RETRY / REPLAY / RESTART keep it; NORMAL on the game-over card = the same level with mods off, on its normal seed).
+  Same road and seed as normal; HARD retry seed 1000 + L + 100 x (consecutive HARD fails, session) = the normal retry roads.
+  HARD streaks live in level._failStreak under the key L + 10000 (they never touch the normal fail / assist streaks).
+- ctx.hard = { on, mask, fuseS, kill, claw, ring, fill, step, hp, surge, chase }, written at every start (level._applyHard; off = all
+  factors 1, fuseS 0) and at quitToTitle. Bits in HARD.mods order: GLASS 1, TIGHT 2, THICK 4, FUSE 8. HARD.bit maps each factor to its
+  mod bit.
+
+THE MODIFIERS (data.js HARD; pay = 1 + base 0.15 + the mods' pay, data.hardPay)
+- Base (always): no REINFORCEMENTS / fail assist (assistK 0 in every mode: soldiers, kits, DROP charges, plates).
+- GLASS +0.30: boss attack kills x1.6 (boss._applyKills, every kind but the stomp shockwave and the enrage chew - the two with no
+  dodge); spitter acid x1.6 (zombies glob kills, rounded); hold boss slam / acid kills x1.6 (barricade damage unchanged); chase
+  claw / bite x1.5 (an accumulator over gapStep's losses); escort grab ring fills x1.25 faster.
+- TIGHT +0.25: per gate at spawn in gates.js (critic B1, no data write): a + lane's cap = min(lane cap, max(capMin, round(3 x value)));
+  a x lane's step cost x1.15 (rounded). Field Guide '+' line: "(3x on HARD TIGHT; ...)".
+- THICK +0.30: wave, guard and run-up HP x data.hardHp(L, type) on RUN / NIGHT / HORDE run phase / ESCORT (climbers are escort
+  waves) - a factor after shopComp and the low-side band: x1.25 at L45, 0.01 less per level (x1.40 at L30 and below, x1.10 at L60
+  and beyond, HARD.hpRamp); ESCORT x1.10 at every level. Hold surges x1.15 (mode.begin threat); chase surges x1.2 (surgeAmp).
+  Never more bodies. The sheet's THICK line prints the level's figure ("Zombies 38 % tougher" on L32; chase shows its 20 %).
+  Why a ramp (measured, see CHECKS): a flat x1.25 gave the rank-10 reader 8/8 at L30 and 1/8 at L60 with all mods - rank 10's
+  margin over the normal curve shrinks with the level, so one flat factor cannot hold the 3-5/8 band at both ends.
+- FUSE +0.20: the boss enrages 3 s sooner: campaign spec.valveAfter - fuseS (level.js, the boss-spawn site), hold boss
+  enrageS - fuseS (hold.js, the hold boss's own read). The enrage clock beside the boss bar and the bot views show the shortened time.
+- All four x2.20 (x2.00 on chase / escort: no FUSE).
+
+PAY AND MARKS
+- Every coin of the run x the HARD factor (level._addCoins), so a loss keeps half of it like any loss. A HARD run is a replay
+  (x0.6) when the level is cleared AND its mark is not strictly higher than the level's best HARD mark (a new best mark pays the
+  first-clear rate). Results: chip "HARD +90%" after the breakdown chips (the chips already include the factor).
+- save.levels[n].h = { s best HARD stars, m that clear's mods (unknown high bits kept), b its survivors / metric }. Best = higher
+  mark (popcount(m & 15)), then stars, then b (SaveStore.recordHard; "NEW MARK" when the mark rises, a first HARD clear included).
+  A HARD clear also runs recordLevel (stars by the same needs, bests, clears, the next level unlocked: the frontier rule D11).
+  A re-type moves h into rec.prev with the bests. settings.hardMods (default 15) remembers the sheet. Save stays v2, additive:
+  59a8352's migrate and SaveStore keep h and hardMods (check-save H-e).
+- Tile: a bone skull + mark at the bottom-right (opposite the type badge); gold "IRON" when every applicable mod (4; 3 on chase /
+  escort) and 3 stars. Results: "HARD CLEAR skull 3 · NEW MARK". Game over on HARD: kicker "LEVEL n · HARD", RETRY + NORMAL.
+- Shop: once every line is at its top rank, #shop-note reads "Rank 10 is the standard from L30. HARD levels leave a mark and pay
+  more."
+
+FILES
+js/data.js (HARD, hardPay, HARD_TEXT, the '+' note), js/save.js, js/level.js (HARD hooks, the FUSE valveAfter line),
+js/ui.js (regions: title button, LEVELS toggle + tiles, sheet, results line + chip, game-over NORMAL, shop line, the card),
+js/gates.js (TIGHT, two lines), js/boss.js, js/hold.js, js/zombies.js (GLASS acid: one line, outside the PLAN's owned list - the
+spitter's glob lives there), js/chase.js, js/escort.js, index.html (sheet, card, buttons, results line), css/game.css (appended block),
+tools/check-save.js (H-a..H-g). Harness: bots/careless16.mjs (reader16's lanes via bots/lib16.cjs, no spit / boss dodge),
+r10/P3/hardmx.mjs (mx + --masks), r10/P3/hardshots.mjs (UI checks + the 3 shots), r10/P3/hardchase.mjs / hardescort.mjs (the r9
+chase / escort matrices + --mask, dropped, --subs), r10/P3/hardsum.cjs (the all-mods and paired summaries).
+
+DEVIATIONS / NOTES FOR THE MERGE
+- The levels counter "HARD n · IRON k" is cut (PLAN section 4 cut order item 1): the toggle reads "HARD".
+- No separate Field Guide row for HARD (bytes); the sheet and the card explain it; the '+' note is in.
+- Chip lines and the unlock card text are static copy in index.html (the numbers 1.6x / 3x / 3 s repeat data.js HARD; change both
+  together). THICK's line is rewritten per level by the sheet (HARD_TEXT thick).
+- Rebased onto r10-160 (035217a, P1). P2 (trade-off gates) moved to 1.7: nothing here depends on it. FUSE shortens the existing
+  enrage clock; THICK's ramp and ESCORT x1.10 are HARD-only values (no normal-mode value changed).
+
+CHECKS ON r10-160 (evidence under gate-rush-evidence/r10/build/P3/; the 59a8352-base checks are in PROGRESS-pre-rebase.txt)
+Bots: reader16 / careless16 / face16 from harness/bots (on the 1.5.0 road reader16 reads ordinary gates like smart + spit / boss
+dodges; face16 differs from reader16 only on P2's gates, so on this road it plays exactly like reader16 and its 0-3/8 target does
+not apply). All at rank 10 (every shop line), seeds 0,100,200,300,1000,2000,3000,4000 (game seed 1000 + L + offset).
+- Digest, HARD off: full L1-60 x {0,100,200} x {passive, strongj} + endless + chunk scripts IDENTICAL to the P1 final digest
+  (384 rows; digest160/hardoff160.json, cmp-p1final.txt). That digest is r10/P1@84fcc32; the merged 035217a adds f07cd1a, which
+  only moves the escort's HUD label (no gameplay field). The THICK ramp commit after it touches only h.hp when THICK is on.
+- All mods (mask 15; chase / escort 7), runs-final/all-sum.txt:
+    reader16   L30 3/8  L45 4/8  L60 3/8   pooled 10/24 = 42 %   (target 3-5/8 per level, 40-65 % pooled: PASS)
+    careless16 0/8 at each level (target <= reader16 - 2 pooled: PASS; the survivor ratio has no pair: careless never clears)
+    face16     = reader16 (see above);  idle 0/24
+- Single mods, paired at L45 (runs160/paired-sum.txt; L45 gameplay is unchanged by the ramp: hardHp(45) = 1.25 and the L45
+  all-mods rows came back identical):
+    reader16  GLASS clears 8->8, median paired survivor cost 0.2 % (-5.8..2.8)   TIGHT 8->8, 21.4 % (10.4..25.6)
+              THICK 8->7, 10.6 % (1.1..100)                                       FUSE 8->8, 0.0 %
+    careless16 GLASS 7->4, 48 %; TIGHT 7->1; THICK 7->2; FUSE 7->7, 0 %.  careless cost > reader cost: GLASS 7/8 seeds (PASS >= 6),
+              TIGHT 7/8, THICK 6/8, FUSE 0/8.  FUSE reader16 enrage - TTK median 10.8 s, min 6.7 s (PASS >= 1 s).
+    MISS (single-mod 5 % for reader16): GLASS and FUSE. DECISION NEEDED (steward / owner): waive, or redesign FUSE in 1.7.
+    GLASS: x1.6 on telegraphed hazards only; reader16 dodges them (0.2 %). A real step for anyone who gets hit: careless16 7->4
+    clears (48 %), human16 7->4 (35 %, check-P3). Kept at x1.6 (PLAN D5); 3 clears of 8 for human16 is steep - steward's call.
+    FUSE: at L45 rank 10 a single FUSE is near free for every bot (human16 8/8 seeds unchanged, check-P3). Fix pass measured
+    larger cuts (fix-fuse/fuse-sum.txt, fusesum.cjs): FUSE alone costs a median 0 % at L30 / L45 for reader16 and human16 at
+    3, 6 and 9 s (L45 slack: reader 10.8 / 7.8 / 4.8 s, human 6.6 / 3.6 / 0.6 s); it bites only at L60 (human16 7->6 clears at
+    3 and 6 s, 7->5 and 5.6 % at 9 s). A 5 % median at L45 would need an estimated ~11 s (enrage ~21 s), which breaks the >= 1 s rule for humans
+    and the all-mods band: reader16 all mods 10/24 at 3 s, 8/24 (33 %) at 6 s, 7/24 (29 %) at 9 s vs the 40 % floor.
+    Inside combinations FUSE does cost: all mods vs all-but-FUSE, survivors 583->239 (L45) and 700->78 (L60); TIGHT+FUSE vs
+    TIGHT, human16 2->1 clears. Kept at 3 s (PLAN value; -6 s was already rejected there). Waiver recommended: FUSE is a
+    combination / late-level mod; a FUSE that bites alone at the owner's level needs a different kind of mod (1.7).
+- CHASE L44 all mods (hardchase skilled, 4 seeds; run before the ramp, which leaves chase unchanged): 2/4 (PASS >= 2/4); idle 0/4. ESCORT L42 all mods (hardescort design): 3/4 on
+  seeds 0-300 (5/8 on 8 seeds; PASS >= 2/4); idle 0/8. With escort THICK at the ramp's x1.28 it was 0/4 (2/8): ESCORT x1.10.
+  ctx.debug.dropped on L42: no zombie / fx pool drops; only audio cue-queue drops, the same order as normal mode under the
+  harness's fast clock (normal L42: ~3,000 per run).
+- Hands-off with HARD retry streaks (--seq 6, streaks kept, no assist): idle / idleL / idleR on L30 / L45 / L46 (frontier of the
+  L45 owner save) / L60: 0 of 72; escort L42 idle / heldL / heldR x 6: 0 of 18; chase L44 idle 0/4. assistK 0 on every row.
+- Tier parity, HARD on: High = Low IDENTICAL (reader16 L30 x2; smart L30 / L45 x3). Software GL: identical except L30 seed 1030,
+  which also differs with HARD OFF (smart, mask 0: one bite at a different frame) - a pre-existing software-GL difference at
+  r10-160, not HARD's. reader16's async lane read is itself not reproducible on software GL (sw vs sw differ), so the sw parity
+  row uses smart.
+- Smoke CLEAN, 0 page errors: --scenario all High; HARD all mods L45 boss High and software GL (boss:fight enrageAt 29 = finale
+  26 + Colossus 6 - FUSE 3; boss:enrage at fight + 29 s on both); HARD all mods L30 Low.
+- UI (hardshots.mjs, 9 PASS, 0 page errors; the new check: L32's THICK line reads "Zombies 38 % tougher"); the 3 shots re-shot and
+  read (shots160/): levels grid with marks + gold IRON, the sheet (mark first, THICK 38 %), results "HARD CLEAR 3 · NEW MARK".
+- check-save every case PASS (H-a..H-g); check-imports OK; check-codex 0 errors; pay unchanged since the paycalc PASS.
+- Bytes (package --lint): js/ 3,196,426 raw / 999,040 gzip = +10,423 raw / +3,731 gzip on r10-160 (budget 12,000 / 3,650): 81 B
+  over, inside the 100 B rule, no cut-order item used beyond cut 1 (the counter). Trims: comments, ctx.hard built from HARD.bit,
+  Escape reads OVERLAY_IDS.
+
+OWNER DECISION (2026-11-17, at release): GLASS and FUSE ship as built (GLASS x1.6, FUSE -3 s); the reader16 >= 5 % single-mod rule
+is waived for both. FUSE counts as a combination / late-level mod; a FUSE that bites alone is a 1.7 design question.

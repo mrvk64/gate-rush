@@ -48,9 +48,11 @@
 //            1.3.0 dist/.
 //   v9 → v10: release 1.5.0 (round 9: CHASE and ESCORT levels, half coins on a lost run, gate glow ring, Hulk Twins reach,
 //            REPAIRING feedback; 31 modules). v9 shipped in the 1.4.0 dist/.
+//   v10 → v11: release 1.6.0 (round 10: HARD mode, Hulk Twins lane lever, harder HORDE holds from L31, escort loss notice,
+//            chase SURGE! pill; 31 modules). v10 shipped in the 1.5.0 dist/.
 'use strict';
 
-const VERSION = 'v10';
+const VERSION = 'v11';
 const APP_CACHE = 'gaterush-' + VERSION;          // §15.4 cache names gaterush-<VERSION> / gaterush-cdn-<VERSION>
 const CDN_CACHE = 'gaterush-cdn-' + VERSION;
 const CACHE_PREFIX = 'gaterush-';
@@ -335,4 +337,4 @@ self.addEventListener('fetch', (event) => {
   }
   // any other origin: default network handling
 });
-// build 5caa859d3e7cd5deedfde3c816998704c02f4d371fab9198f37a0381b609a76b
+// build 072ba0007a40ad5da46716396e61c717bdc983d0bf82d6540ac344e81522134e

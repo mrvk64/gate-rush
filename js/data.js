@@ -2208,8 +2208,10 @@ export function eTargetOf(L, override, on) {
 }
 /** The 3★ fraction of eTarget for type `key` on level L (D16). */
 export function starThreeOf(L, key) {
-  const t = LEVEL_TYPES[key];
-  return t && t.starThree > 0 ? t.starThree : starThree(L);
+  const t = LEVEL_TYPES[key], a = t && t.base === 'chase' ? CHASE_GEN.starThreeAt : null;
+  let f = t && t.starThree > 0 ? t.starThree : starThree(L);
+  for (let i = 0; a && i < a.length && a[i][0] <= L; i++) f = a[i][1];
+  return f;
 }
 /** The first level ≥ fromL of type `key` within 60 (the Field Guide's MEET IT ON LEVEL n); 0 = none. */
 export function nextLevelOfType(key, fromL, on) {
@@ -2297,9 +2299,9 @@ export const TYPES_TEXT = deepFreeze({
 export const HORDE_GEN = deepFreeze({
   eHoldShare: 0.75,                                  // E_hold = round5(0.75·E_boss(L)): the run ends there, the stars count from it
   // HP arrival over the spawn time = rho × the design DPS E_hold·rateBase·p_exp·accuracy (p_exp: fire × damage of
-  // expectedRanksOf(L)); lerp 0.57 at L5 → 0.73 at L30 → 0.865 at L60 → 1.05 at L120, flat after. L4's own row (A22): the expected shop's fodder sits on the 1-HP floor up to about 0.6, so it weighs on a shop far above L4;
+  // expectedRanksOf(L)); lerp 0.57 at L5 → 0.73 at L30 → (1.6.0) 0.85 at L31 → 1.0 at L60 → 1.13 at L120, flat after. L4's own row (A22): the expected shop's fodder sits on the 1-HP floor up to about 0.6, so it weighs on a shop far above L4;
   // the top row is 10 % over the plan's 0.955: at 1.0 or under, with E_boss capped at 1,300, a hands-off squad outlasts L252 (D37)
-  rho: [[4, 0.7], [5, 0.57], [30, 0.73], [60, 0.865], [120, 1.05]],
+  rho: [[4, 0.7], [5, 0.57], [30, 0.73], [31, 0.85], [60, 1.0], [120, 1.13]],
   surplusExp: 1.0,                                   // D26: HP × util.shopComp(p, p_exp, profileExp, surplusExp) / p_exp^profileExp
   baseHp: { walker: 2, runner: 1.5, crawler: 1.5, brute: 24, spitter: 8 },   // unit HP = baseHp × hz
   // `count` surges: the first at firstAt s, then gap ± jitter s (consecutive gaps never within antiRhythm s); each spawns over
@@ -2455,6 +2457,7 @@ export const HORDE = deepFreeze({
   fire: { laneHalf: 1.25, laneShare: 0.8, focusT: 0.8, focusFrom: 0.5, focusSteps: [0.34, 0.67, 1],
     pierce: 4, rateCap: 90, beta: 0.5, betaWind: 0.75, betaOut: 0.2, bossR: 1.77, bossY: 2.4, spitBeta: 0.5,
     twinR: 1.25,                // 1.5.0: each Hulk Twin's column reach (one lane half-width: a sweep past the Twins feeds them less)
+    twinLane: 0.8,              // 1.6.0: in-lane shots feed a Twin only this near the lane centre
     tracerY: 1.0, pileY: 1.3 },
   // the wall: section HP, claw slots, claw delay (brute), claw WP/s per type (ZOMBIES.common.types order), the pile above which
   // one non-brute climbs every climbK·max(climbMin, climbEvery·pile / (pile − slots)) s (from pileZone m behind the face: the
@@ -2793,6 +2796,7 @@ export const CHASE_GEN = deepFreeze({
   // the idle rule (C11; the PLAN's 0.9, aimed at 0.8 for margin): fixed lines at the expected shop and rank 10, all charges dropped
   // under dropAt, weapons fired at once, reach count 0 before idle.before × the course; repairs = side repairs per attempt
   idle: { before: 0.8, dropAt: 3, weaponS: 8, repairs: 6 },
+  starThreeAt: [[57, 0.8], [62, 0.73]],                       // 1.6.0: 3★ fraction by level (step): measured skilled runs
   coins: { escapePerL: 16 },                                   // ESCAPED: 16 × L on a clear; horde kills pay nothing
 });
 export const CHASE = deepFreeze({
@@ -2968,7 +2972,8 @@ export const ESCORT_TEXT = deepFreeze({
   strings: {
     escort: {
       checkpoint: 'CHECKPOINT', safeZone: 'SAFE ZONE', gauntlet: 'GAUNTLET!', safeAhead: 'SAFE ZONE AHEAD', start: 'GET THEM HOME',
-      board: (n) => `+${n} SURVIVORS`, grabbed: 'GRABBED!', plate: 'PLATE', plus: (n) => `+${n} PLATE${n === 1 ? '' : 'S'}`,
+      plate: 'PLATE', plus: (n) => `+${n} PLATE${n === 1 ? '' : 'S'}`, minus: (n) => `−${n}`, lost: (n) => `LOST ${n}`,
+      roll: (a, b, n) => `${a} → ${b} (+${n})`, delivered: (d, t) => `Delivered ${d} of${ESC_NB}${t}${ESC_DASH} lost${ESC_NB}${t - d}`,
     },
   },
   codex: {
@@ -2984,6 +2989,33 @@ export const ESCORT_TEXT = deepFreeze({
     },
   },
 });
+//
+//
+//
+// ---- HARD (1.6.0, P3): mods[i] = mask bit i ----
+export const HARD = deepFreeze({
+  unlock: 30, from: 10, base: 0.15,
+  mods: ['GLASS', 'TIGHT', 'THICK', 'FUSE'], pay: [0.3, 0.25, 0.3, 0.2],
+  kill: 1.6, claw: 1.5, ring: 1.25, fill: 3, step: 1.15, hp: 1.25, hpRamp: { at: 45, perL: -0.01, min: 1.1, max: 1.4 }, surge: 1.15, chase: 1.2, fuseS: 3,
+  bit: { kill: 1, claw: 1, ring: 1, fill: 2, step: 2, hp: 4, surge: 4, chase: 4 },   // the mod bit each factor needs
+  noBoss: ['chase', 'escort'],
+});
+export function hardHp(L, base) { const r = HARD.hpRamp; return base === 'chase' ? HARD.chase : base === 'escort' ? r.min : Math.min(r.max, Math.max(r.min, HARD.hp + r.perL * (L - r.at))); }
+export function hardPay(m) { let p = m ? 1 + HARD.base : 1; for (let i = 0; i < HARD.pay.length; i++) if (m & (1 << i)) p += HARD.pay[i]; return p; }
+//
+//
+//
+export const HARD_TEXT = deepFreeze({
+  strings: {
+    hard: {
+      pay: (k, x) => `${k}${ESC_NB}· PAY${ESC_NB}×${x.toFixed(2)}`, newMark: `${ESC_NB}· NEW${ESC_NB}MARK`, chip: (p) => `HARD +${p}%`, thick: (p) => `Zombies ${p} % tougher`, glass: (b) => b === 'chase' ? `Claws bite ${HARD.claw}× harder` : b === 'escort' ? `Grabs fill ${HARD.ring}× faster` : `Hazards hit ${HARD.kill}× harder`,
+      shop: `Rank 10 is the standard from L${HARD.unlock}. HARD levels leave a mark and pay more.`,
+    },
+  },
+});
+//
+//
+//
 // the truck's cues (escort.js emits escort:* with x / z): the horn before a lane change, a grab (a pitched-up screech), a plate
 // bolted on (a clank), a plate broken, the checkpoint (reward bus) and one rising tick per survivor delivered
 export const ESCORT_AUDIO = deepFreeze({
@@ -3009,7 +3041,7 @@ export const ESCORT_AUDIO = deepFreeze({
 //
 //
 // ---- merge lists (P0) ----
-export const TEXT_REGIONS = Object.freeze({ TYPES_TEXT, HORDE_TEXT, NIGHT_TEXT, CHASE_TEXT, ESCORT_TEXT });
+export const TEXT_REGIONS = Object.freeze({ TYPES_TEXT, HORDE_TEXT, NIGHT_TEXT, CHASE_TEXT, ESCORT_TEXT, HARD_TEXT });
 export const AUDIO_REGIONS = Object.freeze({ HORDE_AUDIO, NIGHT_AUDIO, CHASE_AUDIO, ESCORT_AUDIO });
 const textParts = (k, c) => Object.values(TEXT_REGIONS).map((t) => (c ? t[k] && t[k][c] : t[k]) || []);
 const textOf = (k, c) => Object.assign({}, ...textParts(k, c));
@@ -3448,7 +3480,7 @@ const CODEX_STRINGS = {
     'ctl.mute': { name: 'SOUND', line: 'M mutes everything. Volumes are in Settings.',
                   nameFs: 'SOUND · SCREEN', lineFs: 'M mutes everything; F toggles fullscreen. Volumes are in Settings.' },
     // gates
-    'gate.plus': { name: '+N GATE', line: `Adds N soldiers. Each hit adds 1, up to MAX: ${GR.plus.capMult}× its start (at least ${GR.plus.capMin}).` },
+    'gate.plus': { name: '+N GATE', line: `Adds N soldiers. Each hit adds 1, up to MAX: ${GR.plus.capMult}× its start (${HARD.fill}× on HARD TIGHT; at least ${GR.plus.capMin}).` },
     'gate.max': { name: 'MAX', card: 'EXTRA HITS PAY COINS',
                   line: `A gate at MAX pays ${GR.plus.coinPerHit} coin per extra hit (up to ${GR.plus.maxCoins}) and ${GR.coins.max} coins to pass instead of ${GR.coins.pass}.` },
     // r7 INT: 'keeps climbing', not '+N' — a campaign red lane capped at spawn (WP-B, LEVELS.curve.redCap) shows the capped −N and

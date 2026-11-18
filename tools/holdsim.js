@@ -48,7 +48,7 @@ export const RULES = Object.freeze({
   feedZ0: -70, feedZ1: -46, feedDensity: 3.0, r: 0.27,
   // fire (1.5.0: twinR, each Hulk Twin's column reach)
   laneHalf: 1.25, laneShare: 0.80, focusT: 0.8, focusFrom: 0.5, aimRange: 3.4, aimSpeed: 14, pierce: 4, rateCap: 90,
-  beta: 0.5, betaWind: 0.75, betaOut: 0.2, bossR: 1.77, twinR: 1.25, spitBeta: 0.5, crawlerHitZ: -14,
+  beta: 0.5, betaWind: 0.75, betaOut: 0.2, bossR: 1.77, twinR: 1.25, twinLane: 0.8, spitBeta: 0.5, crawlerHitZ: -14,
   // crowd: walker, runner, crawler, brute, spitter speeds (m/s); steering, density, separation
   speed: [5.0, 7.0, 3.5, 3.0, 2.4], densCap: 3.4, steerK: 0.9, steerMax: 1.8, diffuse: 0.3, accel: 6,
   sepK: 0.65, sepMax: 10, sepZMin: -76, runnerRetargetZ: -23.9, crawlLunge: 3, crawlLungeSpeed: 6,
@@ -508,7 +508,7 @@ export function simulateHold(scriptOrHold, bot, seed, opts = {}) {
       let took = false;
       for (const b of bosses) {                      // the boss share over the crowd (the nearer twin takes it)
         if (b.dead || b.z < T.rangeZ || Math.abs(sx - b.x) > bossR) continue;
-        const beta = inLane ? (b.wind >= 0 ? T.betaWind : T.beta) : T.betaOut;
+        const beta = inLane ? (arch.twins && Math.abs(aimX - b.x) > T.twinLane ? 0 : (b.wind >= 0 ? T.betaWind : T.beta)) : T.betaOut;   // 1.6.0: B1
         const share = dps * beta;
         bossDamage(b, share * DT * sh.bd, share * DT / (d * FIRE.accuracy));
         dps -= share; took = true; break;

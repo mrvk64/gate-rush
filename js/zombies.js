@@ -1703,7 +1703,7 @@ export class Zombies {
     this._gX0[g] = x; this._gY0[g] = y0; this._gZ0[g] = z;
     this._gTx[g] = tx; this._gTz[g] = tz;
     this._gT[g] = 0; this._gDur[g] = T;
-    this._gKills[g] = lvl >= sp.kills2FromLevel ? sp.kills + 1 : sp.kills;   // GDD §6.1: kills 1, 2 from L10 (= kills + 1; DATA-MISSING: ZOMBIES.spitter.spit.kills2)
+    this._gKills[g] = Math.round((lvl >= sp.kills2FromLevel ? sp.kills + 1 : sp.kills) * (this.ctx.hard ? this.ctx.hard.kill : 1));   // GDD §6.1: kills 1, 2 from L10 (= kills + 1; DATA-MISSING: ZOMBIES.spitter.spit.kills2)
     this._gDecal[g] = -1;
     this._gPreview[g] = 0;
     this._gOwner[g] = makeId(slot, this._gen[slot]);

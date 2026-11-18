@@ -11,7 +11,7 @@
 // Rules honoured (§14): no console.log, no Math.random, every browser API guarded, private fields `_`,
 // all tuning numbers from data.js (the two persistence literals below are flagged DATA-MISSING).
 // r8 (P1T) schema v2 (additive; a 1.3.0 build keeps it, tools/check-save.js): rec.t / metric / prev, modes, two settings.
-import { UPGRADES, LEVEL_TYPES } from './data.js';
+import { UPGRADES, LEVEL_TYPES, HARD } from './data.js';
 import { storage, warnOnce, clamp } from './util.js';
 
 // ---------------------------------------------------------------------------------------------
@@ -38,6 +38,11 @@ const TYPE_KEYS = Object.freeze(Object.keys(LEVEL_TYPES).filter((k) => LEVEL_TYP
 const MODE_FIELDS = Object.freeze(['runs', 'clears', 'kills', 'bestKills', 'metAtFrontier']);
 const BESTS = Object.freeze(['bestSurvivors', 'bestScore', 'bestCoins', 'metric']);
 const newMode = () => MODE_FIELDS.reduce((m, f) => { m[f] = 0; return m; }, {});
+// 1.6.0 (P3): rec.h = { s stars, m mods, b survivors }; mark = popcount(m & 15)
+const HARD_ALL = (1 << HARD.mods.length) - 1;
+const markOf = (m) => { let n = 0; for (let b = m & HARD_ALL; b; b >>= 1) n += b & 1; return n; };
+const rankH = (h) => (h ? markOf(h.m) * 4e6 + h.s * 1e6 + Math.min(h.b, 1e6 - 1) : -1);
+const fixH = (h) => { h.s = clamp(uint(h.s, 0), 0, 3); h.m = uint(h.m, 0); h.b = uint(h.b, 0); };
 
 /** Quality values a save may hold (QUALITY_TIERS.order + 'auto'); anything else → 'auto'. */
 const QUALITY_VALUES = Object.freeze(['auto', 'low', 'med', 'high']);
@@ -73,7 +78,7 @@ export function defaultSave(now) {
     // round 5 (lead decision): music defaults to 70 (was 80). Only a profile without a stored music value gets it: the
     // additive fill (fillDefaults) never overwrites a stored value, so a player's saved 80 (or any other) is kept
     settings: { sound: 100, music: 70, haptics: true, quality: 'auto', reducedMotion: null, hcGates: false, largeText: false, sensitivity: 1,
-                nightBright: false, leftHanded: false },   // r8: night brightness 'Bright', the mirrored HOLD buttons
+                nightBright: false, leftHanded: false, hardMods: HARD_ALL },   // r8: night brightness, mirrored HOLD; 1.6.0: HARD mods
     stats: { runs: 0, kills: 0, gatesPassed: 0, coinsEarned: 0, playSeconds: 0 },
     lastRunIncome: 0,
   };
@@ -208,6 +213,7 @@ function sanitize(d, defaults, now) {
       if (typeof rec.prev.t !== 'string' || !rec.prev.t) rec.prev.t = 'standard';
       for (let b = 0; b < BESTS.length; b++) rec.prev[BESTS[b]] = uint(rec.prev[BESTS[b]], 0);
     }
+    if (rec.h !== undefined) { if (isPlainObject(rec.h)) fixH(rec.h); else delete rec.h; }
     if ((rec.stars >= 1 || rec.clears >= 1) && n > cleared) cleared = n;
   }
 
@@ -249,6 +255,7 @@ function sanitize(d, defaults, now) {
   s.largeText = !!s.largeText;
   s.nightBright = !!s.nightBright;                // r8
   s.leftHanded = !!s.leftHanded;
+  s.hardMods = coerceSetting('hardMods', s.hardMods, defaults.settings);
   const sens = num(s.sensitivity, defaults.settings.sensitivity);
   s.sensitivity = sens > 0 ? sens : defaults.settings.sensitivity;
 
@@ -279,6 +286,7 @@ function coerceSetting(key, value, defaults) {
       const q = String(value).toLowerCase();
       return QUALITY_VALUES.indexOf(q) === -1 ? defaults.quality : q;
     }
+    case 'hardMods': return (uint(value, 0) & HARD_ALL) || defaults.hardMods;
     case 'sensitivity': {
       const v = num(value, defaults.sensitivity);
       return v > 0 ? v : defaults.sensitivity;
@@ -488,6 +496,7 @@ export class SaveStore {
     if (stars >= 1 && rec.t !== tk) {
       rec.prev = { t: rec.t };
       for (let b = 0; b < BESTS.length; b++) { rec.prev[BESTS[b]] = uint(rec[BESTS[b]], 0); rec[BESTS[b]] = 0; }
+      if (rec.h) { rec.prev.h = rec.h; delete rec.h; }   // 1.6.0: h moves too
       rec.t = tk;
     }
     rec.stars = Math.max(uint(rec.stars, 0), stars);
@@ -514,6 +523,24 @@ export class SaveStore {
     const rec = this._data.levels[String(n)];
     if (!isPlainObject(rec) || !(uint(rec.clears, 0) > 0)) return false;
     return rec.t === (typeKey || 'standard') || (Array.isArray(skip) ? skip : LEVEL_TYPES.retypeRewardSkip).indexOf(n) !== -1;
+  }
+
+  /** 1.6.0 (P3): HARD open on level n (cleared or the frontier). */
+  hardOpen(n) {
+    const d = this._data, r = d.levels[n], u = d.levels[HARD.unlock];
+    return !!u && u.stars > 0 && n >= HARD.from && n <= d.highestUnlocked && (n === d.highestUnlocked || (!!r && r.stars > 0));
+  }
+
+  hardOf(n) { const r = this._data.levels[n]; return r && isPlainObject(r.h) ? r.h : null; }
+
+  markOf(m) { return markOf(m); }
+
+  /** A HARD clear (after recordLevel); true: the mark rose. */
+  recordHard(n, stars, m, b) {
+    const h = this.hardOf(n), nh = { s: clamp(uint(stars, 0), 0, 3), m: uint(m, 0), b: uint(b, 0) };
+    if (rankH(nh) > rankH(h)) this._data.levels[n].h = nh;
+    this._commit('level');
+    return !h || markOf(m) > markOf(h.m);
   }
 
   /** r8 (P1T, D34): a run of `typeKey` starts — the first one records the frontier (highestUnlocked). Returns modes[typeKey]. */

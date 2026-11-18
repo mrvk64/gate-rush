@@ -20,6 +20,13 @@
 //       fields of a newer build (an unknown type string, a modes key, a record field) kept.
 //   (h) 1.5.0: a 1.4.0 owner save at L45 — the chase / escort levels behind it wear the ring, pay full once and keep their stars;
 //       every other level of L1–60 keeps its 1.4.0 type.
+//   1.6.0 (P3) HARD, on a 1.5.0-style owner save (L1–44 cleared, frontier L45, every rank 10):
+//   (H-a) it loads with no h; HARD opens on every cleared level L10–44 and on L45 (the frontier), not on L9 or L46, and not before
+//         L30 is cleared; a HARD clear of L45 writes h; (H-b) a 1.6 save round-trips h and settings.hardMods; (H-c) a corrupted h
+//         (s 7, m 'x', b -5) sanitises to s 3, m 0, b 0, a non-object h is dropped; (H-d) m 0xFF keeps its bits and marks 4;
+//         (H-e) 59a8352's (1.5.0) migrate and SaveStore load / record / save keep h and hardMods; (H-f) a re-type moves h into
+//         rec.prev; (H-g) a HARD clear of the frontier writes the normal record (stars, the next level unlocked) and h, and only a
+//         strictly higher mark is a NEW MARK.
 // Exit code 1 on any failure.
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -32,6 +39,7 @@ import { LEVEL_TYPES, ECONOMY, levelTypeOf } from '../js/data.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BASE_130 = '441104b';                        // Gate Rush 1.3.0 (the build an owner's phone may still run beside 1.4.0)
+const BASE_150 = '59a8352';                        // Gate Rush 1.5.0 (1.6.0's HARD record must survive it)
 const SAVE_KEY = 'gaterush.v1';
 const STAGE_140 = { horde: true, night: true, chase: false, escort: false };   // the 1.4.0 map (1.5.0's build turns chase / escort on)
 const verbose = process.argv.includes('--verbose');
@@ -44,11 +52,11 @@ const now = 1761600000000;
 const clone = (o) => JSON.parse(JSON.stringify(o));
 
 /** The 1.3.0 save.js (with its data.js and util.js) from git, in a scratch folder under os.tmpdir(); util's 'three' points at node_modules. */
-async function load130() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gr-save130-'));
+async function load130(at = BASE_130) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gr-save' + at + '-'));
   const three = import.meta.resolve('three');
   for (const f of ['save.js', 'data.js', 'util.js']) {
-    let src = execFileSync('git', ['-C', ROOT, 'show', `${BASE_130}:js/${f}`], { encoding: 'utf8', maxBuffer: 64 << 20 });
+    let src = execFileSync('git', ['-C', ROOT, 'show', `${at}:js/${f}`], { encoding: 'utf8', maxBuffer: 64 << 20 });
     if (f === 'util.js') src = src.split("from 'three'").join(`from '${three}'`);
     fs.writeFileSync(path.join(dir, f), src);
   }
@@ -172,6 +180,58 @@ try {
   check('(h) the first chase / escort clear pays full, keeps the 3 stars and moves the old bests to rec.prev; the next run is a replay', payFull === ringed.length
     && r12.t === 'chase' && r12.stars === 3 && r12.prev.t === 'standard' && r18.t === 'escort' && r18.stars === 3 && r18.prev.t === 'standard'
     && own.isReplay(12, 'chase') === true && own.isReplay(18, 'escort') === true, `${payFull}/${ringed.length} ${JSON.stringify(r12)}`);
+  // ---- 1.6.0 (P3) HARD
+  const v150 = clone(defaultSave(now));
+  delete v150.settings.hardMods;                   // a 1.5.0 save has no hardMods
+  v150.highestUnlocked = 45;
+  for (const k in v150.upgrades) v150.upgrades[k] = 10;
+  for (let L = 1; L <= 44; L++) v150.levels[L] = { stars: L % 7 === 0 ? 2 : 3, bestSurvivors: 300 + L, bestScore: 9000 + 100 * L, bestCoins: 500 + 10 * L, clears: 1, t: levelTypeOf(L).key, metric: 300 + L };
+  storage.set(SAVE_KEY, JSON.stringify(v150));
+  const hs = new SaveStore({ events: null });
+  hs.load();
+  const openL = []; for (let L = 1; L <= 60; L++) if (hs.hardOpen(L)) openL.push(L);
+  check('(H-a) the 1.5.0 owner save loads with no h and hardMods 15; HARD opens on L10–44 and the frontier L45 only',
+    Object.values(hs.data.levels).every((r) => r.h === undefined) && hs.data.settings.hardMods === 15 && openL.join(',') === Array.from({ length: 36 }, (_, i) => i + 10).join(','), openL.join(','));
+  const pre30 = clone(v150); pre30.highestUnlocked = 30; for (let L = 30; L <= 44; L++) delete pre30.levels[L];
+  storage.set(SAVE_KEY, JSON.stringify(pre30));
+  const p30 = new SaveStore({ events: null }); p30.load();
+  check('(H-a) before L30 is cleared no level opens HARD', [10, 20, 29, 30].every((L) => !p30.hardOpen(L)));
+  hs.recordLevel(45, { stars: 2, survivors: 520, score: 30000, coins: 2400, typeKey: levelTypeOf(45).key, metric: 520 });
+  const nm1 = hs.recordHard(45, 2, 0b1011, 520);
+  check('(H-g) a HARD clear of the frontier L45 writes the normal record (2 stars, L46 unlocked) and h, a NEW MARK', hs.data.levels[45].stars === 2 && hs.data.levels[45].clears === 1
+    && hs.data.highestUnlocked === 46 && nm1 === true && JSON.stringify(hs.data.levels[45].h) === '{"s":2,"m":11,"b":520}' && hs.hardOpen(46), JSON.stringify(hs.data.levels[45]));
+  const nm2 = hs.recordHard(45, 3, 0b0111, 600), nm3 = hs.recordHard(45, 1, 0b1111, 100);
+  check('(H-g) the same mark with more stars replaces h but is no NEW MARK; a strictly higher mark is', nm2 === false && nm3 === true && hs.data.levels[45].h.m === 15 && hs.data.levels[45].h.s === 1,
+    JSON.stringify(hs.data.levels[45].h));
+  hs.setSetting('hardMods', 5);
+  const j16 = JSON.stringify(hs.data), b16 = migrate(JSON.parse(j16), now);
+  check('(H-b) a 1.6 save round-trips h and hardMods', JSON.stringify(b16) === j16 && b16.levels[45].h.m === 15 && b16.settings.hardMods === 5);
+  const bad = JSON.parse(j16); bad.levels[44].h = { s: 7, m: 'x', b: -5 }; bad.levels[43].h = 'junk'; bad.levels[42].h = { s: 3, m: 0xFF, b: 9 }; bad.settings.hardMods = 'x';
+  const fb = migrate(bad, now);
+  check('(H-c) a corrupted h sanitises to s 3, m 0, b 0; a non-object h is dropped; a junk hardMods falls back to 15', JSON.stringify(fb.levels[44].h) === '{"s":3,"m":0,"b":0}' && fb.levels[43].h === undefined
+    && fb.settings.hardMods === 15, JSON.stringify(fb.levels[44].h));
+  check('(H-d) m 0xFF keeps its bits and marks popcount(m & 15) = 4', fb.levels[42].h.m === 255 && hs.markOf(fb.levels[42].h.m) === 4);
+  const o150 = await load130(BASE_150);
+  try {
+    const ob = o150.mod.migrate(JSON.parse(j16), now);
+    check('(H-e) the 1.5.0 migrate keeps every 1.6 field (h, hardMods): the blob comes back deep-equal', JSON.stringify(ob) === j16, diffKeys(JSON.parse(j16), ob).slice(0, 8).join(', '));
+    const ost = (await import(pathToFileURL(path.join(o150.dir, 'util.js')).href)).storage;   // 1.5.0's own storage
+    ost.set(SAVE_KEY, j16);
+    const os150 = new o150.mod.SaveStore({ events: null });
+    os150.load();
+    os150.recordLevel(46, { stars: 3, survivors: 700, score: 40000, coins: 2600, typeKey: levelTypeOf(46).key, metric: 700 });
+    os150.recordLevel(45, { stars: 3, survivors: 700, score: 40000, coins: 2600, typeKey: levelTypeOf(45).key, metric: 700 });
+    os150.flushNow();
+    const back150 = JSON.parse(ost.get(SAVE_KEY));
+    check('(H-e) a 1.6 save loaded, played and re-saved by the 1.5.0 SaveStore keeps h and hardMods', JSON.stringify(back150.levels[45].h) === JSON.stringify(hs.data.levels[45].h)
+      && back150.settings.hardMods === 5 && back150.levels[46].stars === 3, JSON.stringify(back150.levels[45]));
+  } finally {
+    try { fs.rmSync(o150.dir, { recursive: true, force: true }); } catch (_) { /* best effort */ }
+  }
+  const rt = clone(hs.data.levels[45]);
+  hs.recordLevel(45, { stars: 1, survivors: 50, score: 100, coins: 10, typeKey: rt.t === 'horde' ? 'standard' : 'horde', metric: 50 });
+  check('(H-f) a re-type moves h with the old bests into rec.prev', hs.data.levels[45].h === undefined && JSON.stringify(hs.data.levels[45].prev.h) === JSON.stringify(rt.h)
+    && hs.data.levels[45].prev.t === rt.t, JSON.stringify(hs.data.levels[45]));
   console.log(`sizes: 1.3.0 owner save ${v1json.length} B, after migration + this test's runs ${v2json.length} B`);
 } finally {
   try { fs.rmSync(old.dir, { recursive: true, force: true }); } catch (_) { /* best effort */ }
